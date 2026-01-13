@@ -79,6 +79,19 @@ This single command handles the entire lifecycle:
 3.  **Verification**: Runs the `tester` suite (Handshake + iperf3).
 4.  **Teardown**: Gracefully stops and cleans up the test environment.
 
+##### ✅ Latest Test Results (2026-01-13)
+
+| Test | Status |
+|:---|:---|
+| **Nucleus Rendezvous** | ✅ ONLINE |
+| **Edge A Registration** | ✅ Registered |
+| **Edge B Registration** | ✅ Registered |
+| **NAT Traversal** | ✅ UDP Hole Punch SUCCESS |
+| **Direct P2P Channel** | ✅ ESTABLISHED |
+| **Noise_IK Handshake** | ✅ COMPLETED |
+| **FDB Learning** | ✅ 2 entries learned |
+| **P2P Throughput** | 🚀 **74.1 Gbits/sec** |
+
 #### ☁️ Hybrid Cloud Connectivity
 
 To test connectivity between your local machine and a remote cloud service:
