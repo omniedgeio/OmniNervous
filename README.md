@@ -109,6 +109,9 @@ This single command handles the entire lifecycle:
 
 ##### ✅ Latest Test Results (2026-01-13)
 
+> **Note**: These results are from Docker containers on localhost.
+> Real-world WAN performance will differ based on network conditions.
+
 | Test | Status |
 |:---|:---|
 | **Nucleus Rendezvous** | ✅ ONLINE |
@@ -118,7 +121,9 @@ This single command handles the entire lifecycle:
 | **Direct P2P Channel** | ✅ ESTABLISHED |
 | **Noise_IK Handshake** | ✅ COMPLETED |
 | **FDB Learning** | ✅ 2 entries learned |
-| **P2P Throughput** | 🚀 **74.1 Gbits/sec** |
+| **iperf3 (localhost)** | ✅ Functional* |
+
+*\* Localhost benchmarks validate functionality, not production throughput.*
 
 #### ☁️ Hybrid Cloud Connectivity
 
