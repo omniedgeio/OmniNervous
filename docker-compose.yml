@@ -10,6 +10,7 @@ services:
     networks:
       omni-fabric:
         ipv4_address: 10.0.0.2
+        ipv6_address: fd00:abcd::2
 
   # Edge Node A (Cloud Edge - Running with Nucleus)
   edge-a:
@@ -24,6 +25,7 @@ services:
     networks:
       omni-fabric:
         ipv4_address: 10.0.0.20
+        ipv6_address: fd00:abcd::20
 
   # Edge Node B (Local Edge)
   edge-b:
@@ -38,6 +40,7 @@ services:
     networks:
       omni-fabric:
         ipv4_address: 10.0.0.21
+        ipv6_address: fd00:abcd::21
 
   # Automated Connectivity Tester
   tester:
@@ -54,10 +57,13 @@ services:
     networks:
       omni-fabric:
         ipv4_address: 10.0.0.100
+        ipv6_address: fd00:abcd::100
 
 networks:
   omni-fabric:
     driver: bridge
+    enable_ipv6: true
     ipam:
       config:
         - subnet: 10.0.0.0/24
+        - subnet: fd00:abcd::/64

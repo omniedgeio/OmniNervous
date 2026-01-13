@@ -19,13 +19,18 @@ echo "⏳ Waiting for Edge nodes to perform STUN discovery..."
 sleep 8
 
 # 3. Verify Peer-to-Peer Physical Connectivity (via Nucleus relay simulation)
-echo "🔍 Testing P2P path: Edge A (10.0.0.20) <-> Nucleus..."
+echo "🔍 Testing P2P path (IPv4): Edge A (10.0.0.20) <-> Nucleus..."
 ping -c 2 10.0.0.20 > /dev/null
-echo "✅ Edge A registered with Nucleus."
+echo "✅ Edge A registered with Nucleus (IPv4)."
 
-echo "🔍 Testing P2P path: Edge B (10.0.0.21) <-> Nucleus..."
+echo "🔍 Testing P2P path (IPv4): Edge B (10.0.0.21) <-> Nucleus..."
 ping -c 2 10.0.0.21 > /dev/null
-echo "✅ Edge B registered with Nucleus."
+echo "✅ Edge B registered with Nucleus (IPv4)."
+
+# 3b. IPv6 Connectivity Test
+echo "🌐 Testing IPv6 connectivity..."
+ping6 -c 2 fd00:abcd::20 > /dev/null 2>&1 && echo "✅ Edge A (fd00:abcd::20) IPv6 ONLINE" || echo "⚠️ Edge A IPv6 not reachable"
+ping6 -c 2 fd00:abcd::21 > /dev/null 2>&1 && echo "✅ Edge B (fd00:abcd::21) IPv6 ONLINE" || echo "⚠️ Edge B IPv6 not reachable"
 
 # 4. Direct Peer Connectivity Test (P2P Tunnel Simulation)
 echo "📡 Simulating P2P Hole Punch: Edge A <-> Edge B..."
