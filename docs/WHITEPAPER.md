@@ -223,12 +223,24 @@ OmniNervous P2P Mesh:
 
 ## 8. Future Roadmap
 
+### Core Connectivity (Milestone Focus)
+
 | Phase | Feature | ETA |
 |:---|:---|:---:|
-| **v0.2** | PMTUD, BBRv3 congestion control | Q2 2026 |
-| **v0.3** | Multi-path support, PTP time sync | Q3 2026 |
-| **v0.4** | ROS2 QoS integration, OPC-UA tunnel | Q4 2026 |
-| **v1.0** | Production-ready, FIPS 140-3 | 2027 |
+| **v0.1** | Core daemon, Noise handshake, XDP AEAD skeleton | ✅ Current |
+| **v0.2** | Real-world benchmarks, PMTUD | Feb 2026 |
+| **v0.3** | Congestion control, NAT traversal hardening | Mar 2026 |
+| **v0.4** | Multi-path support, connection migration | Apr 2026 |
+| **v1.0** | Production-ready, security audit | H2 2026 |
+
+### Optional Plugins (Community/Enterprise)
+
+| Plugin | Description | Priority |
+|:---|:---|:---:|
+| **omni-ros2** | ROS2 DDS QoS integration | Community |
+| **omni-opcua** | OPC-UA tunnel for industrial | Enterprise |
+| **omni-ptp** | IEEE 1588 PTP time sync | Enterprise |
+| **omni-fips** | FIPS 140-3 certified crypto | Enterprise |
 
 ---
 
