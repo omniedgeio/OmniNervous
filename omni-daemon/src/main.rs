@@ -1,0 +1,126 @@
+use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use aya::{
+    include_bytes_aligned,
+    maps::HashMap,
+    programs::{Xdp, XdpFlags},
+    Bpf,
+};
+use clap::Parser;
+use log::{info, error, warn};
+use tokio::net::UdpSocket;
+use tokio::signal;
+
+mod noise;
+mod session;
+mod p2p;
+mod fdb;
+
+use noise::NoiseSession;
+use session::{SessionManager, SessionState};
+use p2p::P2PDiscovery;
+use fdb::Fdb;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value = "eth0")]
+    iface: String,
+    #[arg(short, long, default_value = "51820")]
+    port: u16,
+    #[arg(short, long)]
+    mode: Option<String>,
+    #[arg(short, long)]
+    nucleus: Option<String>,
+    #[arg(short, long)]
+    cluster: Option<String>,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    env_logger::init();
+
+    info!("Starting OmniNervous Ganglion Daemon on port {}...", args.port);
+
+    let mut session_manager = SessionManager::new();
+    let mut fdb = Fdb::new();
+    let mut p2p = P2PDiscovery::new(Some("stun.l.google.com:19302"))?;
+
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", args.port)).await
+        .context("failed to bind UDP socket")?;
+    
+    info!("Ganglion listening on UDP/{}", args.port);
+
+    // Perform STUN discovery
+    if let Err(e) = p2p.discover_self(&socket).await {
+        warn!("STUN discovery failed: {}", e);
+    } else if let Some(ref endpoint) = p2p.local_endpoint {
+        info!("Public endpoint: {}:{}", endpoint.ip, endpoint.port);
+    }
+
+    // Generate a static identity for this session (normally loaded from disk)
+    let local_private_key = [0u8; 32]; 
+
+    let mut buf = [0u8; 2048];
+    loop {
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("Exiting...");
+                break;
+            }
+            result = socket.recv_from(&mut buf) => {
+                match result {
+                    Ok((len, src)) => {
+                        info!("Received {} bytes from {}", len, src);
+                        // Parse session_id from header (first 4 bytes)
+                        if len >= 4 {
+                            let session_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                            
+                            // Check if session exists, otherwise create a new one
+                            if session_manager.get_session_mut(session_id).is_none() {
+                                match NoiseSession::new_responder(&local_private_key) {
+                                    Ok(new_session) => {
+                                        session_manager.create_session(session_id, SessionState::Handshaking(new_session));
+                                        info!("Created new session: {}", session_id);
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to create session: {}", e);
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            // Advance handshake
+                            match session_manager.advance_handshake(session_id, &buf[4..len]) {
+                                Ok(Some(response)) => {
+                                    let mut reply = session_id.to_be_bytes().to_vec();
+                                    reply.extend(response);
+                                    if let Err(e) = socket.send_to(&reply, src).await {
+                                        error!("Failed to send response: {}", e);
+                                    }
+                                }
+                                Ok(None) => {
+                                    warn!("Session {} not in handshaking state", session_id);
+                                }
+                                Err(e) => {
+                                    error!("Handshake error: {}", e);
+                                }
+                            }
+
+                            // Try to finalize
+                            if let Ok(true) = session_manager.finalize_session(session_id) {
+                                info!("Session {} finalized successfully!", session_id);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Socket error: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}

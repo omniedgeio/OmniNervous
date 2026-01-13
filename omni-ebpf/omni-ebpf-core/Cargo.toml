@@ -1,0 +1,16 @@
+[package]
+name = "omni-ebpf-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-bpf = { git = "https://github.com/aya-rs/aya", tag = "aya-v0.12.0" }
+aya-log-ebpf = { git = "https://github.com/aya-rs/aya", tag = "aya-v0.12.0" }
+omni-common = { path = "../../omni-common" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "omni-ebpf"
+path = "src/main.rs"

@@ -1,0 +1,63 @@
+services:
+  # The Nucleus (Rendezvous & Signaling Node)
+  nucleus:
+    image: rust:1.79
+    container_name: omni-nucleus
+    volumes:
+      - .:/usr/src/omni
+    working_dir: /usr/src/omni
+    command: cargo run -p omni-daemon -- --mode nucleus
+    networks:
+      omni-fabric:
+        ipv4_address: 10.0.0.2
+
+  # Edge Node A (Cloud Edge - Running with Nucleus)
+  edge-a:
+    image: rust:1.79
+    container_name: omni-edge-a
+    privileged: true # Required for XDP/BPF
+    volumes:
+      - .:/usr/src/omni
+    working_dir: /usr/src/omni
+    command: >
+      sh -c "apt-get update -qq && apt-get install -y -qq iperf3 > /dev/null && iperf3 -s -D && sleep 5 && cargo run -p omni-daemon -- --nucleus 10.0.0.2 --cluster local-test"
+    networks:
+      omni-fabric:
+        ipv4_address: 10.0.0.20
+
+  # Edge Node B (Local Edge)
+  edge-b:
+    image: rust:1.79
+    container_name: omni-edge-b
+    privileged: true # Required for XDP/BPF
+    volumes:
+      - .:/usr/src/omni
+    working_dir: /usr/src/omni
+    command: >
+      sh -c "apt-get update -qq && apt-get install -y -qq iperf3 > /dev/null && iperf3 -s -D && sleep 5 && cargo run -p omni-daemon -- --nucleus 10.0.0.2 --cluster local-test"
+    networks:
+      omni-fabric:
+        ipv4_address: 10.0.0.21
+
+  # Automated Connectivity Tester
+  tester:
+    image: rust:1.79
+    container_name: omni-tester
+    volumes:
+      - .:/usr/src/omni
+    working_dir: /usr/src/omni
+    depends_on:
+      - nucleus
+      - edge-a
+      - edge-b
+    command: ./scripts/auto_test_docker.sh
+    networks:
+      omni-fabric:
+        ipv4_address: 10.0.0.100
+
+networks:
+  omni-fabric:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.0/24

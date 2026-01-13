@@ -1,0 +1,8 @@
+[package]
+name = "omni-common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# aya-bpf is only for the eBPF side, aya is for userspace.
+# We might need a small subset of features or just core types.

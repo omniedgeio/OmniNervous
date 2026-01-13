@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "omni-common",
+    "omni-daemon",
+    "omni-ebpf/omni-ebpf-core",
+]
+resolver = "2"
+
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1
