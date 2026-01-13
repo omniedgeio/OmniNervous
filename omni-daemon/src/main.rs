@@ -19,6 +19,7 @@ mod identity;
 mod ratelimit;
 mod metrics;
 mod config;
+mod bpf_sync;
 
 use noise::NoiseSession;
 use session::{SessionManager, SessionState};
@@ -28,6 +29,10 @@ use identity::Identity;
 use ratelimit::{RateLimiter, RateLimitConfig};
 use metrics::Metrics;
 use config::Config;
+use bpf_sync::BpfSync;
+
+use std::time::Duration;
+use tokio::time::interval;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -75,6 +80,10 @@ async fn main() -> Result<()> {
     let mut p2p = P2PDiscovery::new(Some("stun.l.google.com:19302"))?;
     let mut rate_limiter = RateLimiter::new(RateLimitConfig::default());
     let metrics = Metrics::new();
+    let mut bpf_sync = BpfSync::new();
+    
+    // Cleanup interval - runs every 60 seconds
+    let mut cleanup_interval = interval(Duration::from_secs(60));
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", args.port)).await
         .context("failed to bind UDP socket")?;
@@ -94,6 +103,15 @@ async fn main() -> Result<()> {
             _ = signal::ctrl_c() => {
                 info!("Exiting...");
                 break;
+            }
+            _ = cleanup_interval.tick() => {
+                // Periodic cleanup: rate limiter, expired sessions, BPF map
+                rate_limiter.cleanup();
+                let expired = rate_limiter.expired_sessions();
+                for sid in expired {
+                    let _ = bpf_sync.remove_session(sid);
+                    info!("Expired session {}", sid);
+                }
             }
             result = socket.recv_from(&mut buf) => {
                 match result {
@@ -147,7 +165,14 @@ async fn main() -> Result<()> {
 
                             // Try to finalize
                             if let Ok(true) = session_manager.finalize_session(session_id) {
-                                info!("Session {} finalized successfully!", session_id);
+                                // Sync to BPF map
+                                let key = [0u8; 32]; // TODO: Extract from transport state
+                                if let Err(e) = bpf_sync.insert_session(session_id, key, src.ip(), src.port()) {
+                                    error!("BPF sync failed: {}", e);
+                                } else {
+                                    metrics.inc_handshakes_completed();
+                                    info!("Session {} finalized and synced to BPF!", session_id);
+                                }
                             }
                         }
                     }
