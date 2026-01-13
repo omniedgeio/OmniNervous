@@ -1,6 +1,12 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
+use std::time::SystemTime;
 use crate::noise::NoiseSession;
 use anyhow::Result;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
 
 pub enum SessionState {
     Handshaking(NoiseSession),
@@ -9,13 +15,45 @@ pub enum SessionState {
 
 pub struct SessionManager {
     sessions: HashMap<u32, SessionState>,
+    secret: [u8; 32], // Server secret for HMAC
 }
 
 impl SessionManager {
     pub fn new() -> Self {
+        // Generate a random server secret on startup
+        let mut secret = [0u8; 32];
+        for i in 0..32 {
+            secret[i] = rand::random();
+        }
+        
         Self {
             sessions: HashMap::new(),
+            secret,
         }
+    }
+
+    /// Generate a cryptographically secure session ID based on source IP and timestamp.
+    pub fn generate_session_id(&self, src_ip: IpAddr) -> u32 {
+        let mut mac = HmacSha256::new_from_slice(&self.secret)
+            .expect("HMAC init failed");
+        
+        // Add source IP
+        match src_ip {
+            IpAddr::V4(v4) => mac.update(&v4.octets()),
+            IpAddr::V6(v6) => mac.update(&v6.octets()),
+        }
+        
+        // Add timestamp (nanoseconds)
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        mac.update(&nanos.to_le_bytes());
+        
+        // Take first 4 bytes of HMAC as session ID
+        let result = mac.finalize();
+        let bytes = result.into_bytes();
+        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     }
 
     pub fn create_session(&mut self, session_id: u32, state: SessionState) {

@@ -119,9 +119,13 @@ async fn main() -> Result<()> {
                         info!("Received {} bytes from {}", len, src);
                         metrics.inc_packets_rx();
                         
-                        // Parse session_id from header (first 4 bytes)
+                        // For initial handshake, check if this is a new connection
+                        // Client sends session_id in header, but we validate/generate our own
                         if len >= 4 {
-                            let session_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                            let client_session_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                            
+                            // Generate secure session ID based on source IP
+                            let session_id = session_manager.generate_session_id(src.ip());
                             
                             // Check if session exists, otherwise create a new one
                             if session_manager.get_session_mut(session_id).is_none() {
@@ -137,7 +141,7 @@ async fn main() -> Result<()> {
                                         session_manager.create_session(session_id, SessionState::Handshaking(new_session));
                                         rate_limiter.record_session_start(session_id);
                                         metrics.inc_sessions();
-                                        info!("Created new session: {}", session_id);
+                                        info!("Created new session: {} (client sent: {})", session_id, client_session_id);
                                     }
                                     Err(e) => {
                                         error!("Failed to create session: {}", e);

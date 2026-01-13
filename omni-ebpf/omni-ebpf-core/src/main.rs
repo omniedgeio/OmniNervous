@@ -8,7 +8,7 @@ use aya_bpf::{
     programs::XdpContext,
 };
 use aya_log_ebpf::info;
-use omni_common::{SessionEntry, FdbEntry, PacketHeader};
+use omni_common::{SessionEntry, FdbEntry};
 
 // Session map keyed by session_id
 #[map]
@@ -21,9 +21,11 @@ static mut FDB: HashMap<[u8; 6], FdbEntry> = HashMap::with_max_entries(1024, 0);
 // Constants for parsing
 const ETH_HDR_LEN: usize = 14;
 const IPV4_HDR_LEN: usize = 20;
+const IPV6_HDR_LEN: usize = 40;
 const UDP_HDR_LEN: usize = 8;
 const OMNI_HDR_LEN: usize = 12; // session_id (4) + nonce (8)
 const ETH_P_IPV4: u16 = 0x0800;
+const ETH_P_IPV6: u16 = 0x86DD;
 const IPPROTO_UDP: u8 = 17;
 const OMNI_PORT: u16 = 51820;
 
@@ -53,31 +55,48 @@ fn try_xdp_synapse(ctx: XdpContext) -> Result<u32, ()> {
     let eth_proto: *const u16 = ptr_at(&ctx, 12)?;
     let eth_proto = u16::from_be(unsafe { *eth_proto });
 
-    // Only process IPv4
-    if eth_proto != ETH_P_IPV4 {
+    let omni_offset = if eth_proto == ETH_P_IPV4 {
+        // IPv4 path
+        let ip_proto: *const u8 = ptr_at(&ctx, ETH_HDR_LEN + 9)?;
+        let ip_proto = unsafe { *ip_proto };
+
+        if ip_proto != IPPROTO_UDP {
+            return Ok(xdp_action::XDP_PASS);
+        }
+
+        // Parse UDP destination port
+        let dst_port: *const u16 = ptr_at(&ctx, ETH_HDR_LEN + IPV4_HDR_LEN + 2)?;
+        let dst_port = u16::from_be(unsafe { *dst_port });
+
+        if dst_port != OMNI_PORT {
+            return Ok(xdp_action::XDP_PASS);
+        }
+
+        ETH_HDR_LEN + IPV4_HDR_LEN + UDP_HDR_LEN
+    } else if eth_proto == ETH_P_IPV6 {
+        // IPv6 path
+        let next_hdr: *const u8 = ptr_at(&ctx, ETH_HDR_LEN + 6)?;
+        let next_hdr = unsafe { *next_hdr };
+
+        if next_hdr != IPPROTO_UDP {
+            return Ok(xdp_action::XDP_PASS);
+        }
+
+        // Parse UDP destination port
+        let dst_port: *const u16 = ptr_at(&ctx, ETH_HDR_LEN + IPV6_HDR_LEN + 2)?;
+        let dst_port = u16::from_be(unsafe { *dst_port });
+
+        if dst_port != OMNI_PORT {
+            return Ok(xdp_action::XDP_PASS);
+        }
+
+        ETH_HDR_LEN + IPV6_HDR_LEN + UDP_HDR_LEN
+    } else {
+        // Neither IPv4 nor IPv6
         return Ok(xdp_action::XDP_PASS);
-    }
-
-    // Parse IP header
-    let ip_proto: *const u8 = ptr_at(&ctx, ETH_HDR_LEN + 9)?;
-    let ip_proto = unsafe { *ip_proto };
-
-    // Only process UDP
-    if ip_proto != IPPROTO_UDP {
-        return Ok(xdp_action::XDP_PASS);
-    }
-
-    // Parse UDP header - destination port
-    let dst_port: *const u16 = ptr_at(&ctx, ETH_HDR_LEN + IPV4_HDR_LEN + 2)?;
-    let dst_port = u16::from_be(unsafe { *dst_port });
-
-    // Only process OmniNervous port
-    if dst_port != OMNI_PORT {
-        return Ok(xdp_action::XDP_PASS);
-    }
+    };
 
     // Parse OmniNervous header
-    let omni_offset = ETH_HDR_LEN + IPV4_HDR_LEN + UDP_HDR_LEN;
     let session_id: *const u32 = ptr_at(&ctx, omni_offset)?;
     let session_id = u32::from_be(unsafe { *session_id });
 
