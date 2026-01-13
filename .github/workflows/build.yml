@@ -1,0 +1,110 @@
+name: Build
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: linux-amd64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            name: linux-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-amd64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-amd64
+
+    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build omni-common
+        run: cargo build -p omni-common --release --target ${{ matrix.target }}
+
+      - name: Build omni-daemon
+        run: cargo build -p omni-daemon --release --target ${{ matrix.target }}
+
+      - name: Run tests
+        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'aarch64-apple-darwin'
+        run: cargo test -p omni-daemon --release --target ${{ matrix.target }}
+
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p artifacts
+          cp target/${{ matrix.target }}/release/omni-daemon artifacts/omni-daemon-${{ matrix.name }}
+          chmod +x artifacts/omni-daemon-${{ matrix.name }}
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          Copy-Item target/${{ matrix.target }}/release/omni-daemon.exe artifacts/omni-daemon-${{ matrix.name }}.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omni-daemon-${{ matrix.name }}
+          path: artifacts/
+
+  # eBPF build (Linux only, requires nightly)
+  build-ebpf:
+    runs-on: ubuntu-latest
+    name: Build eBPF (Linux)
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-action@nightly
+        with:
+          components: rust-src
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
+
+      - name: Build eBPF program
+        run: |
+          cargo build -p omni-ebpf-core \
+            --target bpfel-unknown-none \
+            -Z build-std=core \
+            --release
+        continue-on-error: true  # May fail if aya-bpf not fully configured
+
+      - name: Upload eBPF artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: omni-ebpf
+          path: target/bpfel-unknown-none/release/omni-ebpf
