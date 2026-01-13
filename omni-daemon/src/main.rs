@@ -23,6 +23,7 @@ mod bpf_sync;
 mod http;
 mod nonce;
 mod crypto_util;
+mod poly1305;
 
 use noise::NoiseSession;
 use session::{SessionManager, SessionState};
