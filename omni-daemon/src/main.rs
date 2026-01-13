@@ -16,12 +16,16 @@ mod session;
 mod p2p;
 mod fdb;
 mod identity;
+mod ratelimit;
+mod metrics;
 
 use noise::NoiseSession;
 use session::{SessionManager, SessionState};
 use p2p::P2PDiscovery;
 use fdb::Fdb;
 use identity::Identity;
+use ratelimit::{RateLimiter, RateLimitConfig};
+use metrics::Metrics;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -65,6 +69,8 @@ async fn main() -> Result<()> {
     let mut session_manager = SessionManager::new();
     let _fdb = Fdb::new();
     let mut p2p = P2PDiscovery::new(Some("stun.l.google.com:19302"))?;
+    let mut rate_limiter = RateLimiter::new(RateLimitConfig::default());
+    let metrics = Metrics::new();
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", args.port)).await
         .context("failed to bind UDP socket")?;
@@ -89,15 +95,26 @@ async fn main() -> Result<()> {
                 match result {
                     Ok((len, src)) => {
                         info!("Received {} bytes from {}", len, src);
+                        metrics.inc_packets_rx();
+                        
                         // Parse session_id from header (first 4 bytes)
                         if len >= 4 {
                             let session_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
                             
                             // Check if session exists, otherwise create a new one
                             if session_manager.get_session_mut(session_id).is_none() {
+                                // Rate limiting check
+                                if !rate_limiter.allow_new_session(src.ip()) {
+                                    metrics.inc_ratelimit_drops();
+                                    warn!("Rate limited: {} (session {})", src.ip(), session_id);
+                                    continue;
+                                }
+                                
                                 match NoiseSession::new_responder(&identity.private_key) {
                                     Ok(new_session) => {
                                         session_manager.create_session(session_id, SessionState::Handshaking(new_session));
+                                        rate_limiter.record_session_start(session_id);
+                                        metrics.inc_sessions();
                                         info!("Created new session: {}", session_id);
                                     }
                                     Err(e) => {

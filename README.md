@@ -10,6 +10,33 @@ OmniNervous dissolves the "Network Tax" by splitting the protocol into two speci
 - **Ganglion (Control Plane)**: An asynchronous Rust daemon (`tokio`) that handles high-level "Intellectual" tasks—Identity management, Noise handshakes, and NAT traversal.
 - **Synapse (Data Plane)**: A zero-copy XDP engine (`aya`) that intercepts and process packets at the driver level, providing **Cryptographic Silence** (stealth mode).
 
+```mermaid
+graph TB
+    subgraph Peer_A["🤖 Robot A"]
+        GA[Ganglion<br/>Control Plane]
+        SA[Synapse<br/>XDP Engine]
+    end
+    
+    subgraph Nucleus["☁️ Nucleus"]
+        NR[Rendezvous<br/>Server]
+    end
+    
+    subgraph Peer_B["🤖 Robot B"]
+        GB[Ganglion<br/>Control Plane]
+        SB[Synapse<br/>XDP Engine]
+    end
+    
+    GA -.->|1. Register| NR
+    GB -.->|1. Register| NR
+    NR -.->|2. Exchange Endpoints| GA
+    NR -.->|2. Exchange Endpoints| GB
+    SA <-->|3. Direct P2P<br/>Encrypted L2| SB
+    
+    style SA fill:#2d5a3d
+    style SB fill:#2d5a3d
+    style NR fill:#4a4a6a
+```
+
 ## 🚀 Getting Started
 
 ### Prerequisites
