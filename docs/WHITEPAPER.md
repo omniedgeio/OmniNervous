@@ -187,20 +187,24 @@ OmniNervous P2P Mesh:
 
 ## 6. Use Cases
 
+> **Note**: These are target use cases based on architecture design, not deployed production systems.
+
 ### 6.1 Warehouse Robotics
 - 500 AMRs (Autonomous Mobile Robots)
 - ROS2 navigation + EtherCAT motor control
-- Sub-1ms response for collision avoidance
+- Target: Sub-1ms response for collision avoidance*
 
 ### 6.2 Multi-Cloud AI Training
 - GPU clusters across AWS, GCP, Azure
 - NCCL/RDMA-compatible L2 overlay
-- 100 Gbps aggregate training throughput
+- Target: High aggregate throughput*
 
 ### 6.3 Autonomous Vehicle Fleet
 - OTA updates over encrypted tunnel
 - Real-time telemetry streaming
 - Mesh connectivity for platooning
+
+*Performance targets pending real-world validation*
 
 ---
 

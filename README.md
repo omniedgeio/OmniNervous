@@ -1,7 +1,7 @@
 # OmniNervous: The 2026 AI Fabric L2 Protocol
 
 > [!IMPORTANT]
-> **OmniNervous** is a next-generation, identity-driven Layer 2 fabric implemented entirely in **Rust**. It is designed for 1.6T AI clusters and real-time humanoid robotics where sub-microsecond latency and cryptographic certainty are non-negotiable.
+> **OmniNervous** is a next-generation, identity-driven Layer 2 fabric implemented entirely in **Rust**. It is designed for AI clusters and real-time humanoid robotics where low latency and cryptographic certainty are non-negotiable.
 
 ## 🧠 Architecture Overview
 
