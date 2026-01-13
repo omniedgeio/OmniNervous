@@ -13,6 +13,7 @@ env_logger = "0.10"
 log = "0.4"
 indexmap = "=2.2.6"
 rand = "0.8"
+dirs = "5.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aya = { version = "0.12", features = ["async_tokio"] }

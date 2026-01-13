@@ -15,11 +15,13 @@ mod noise;
 mod session;
 mod p2p;
 mod fdb;
+mod identity;
 
 use noise::NoiseSession;
 use session::{SessionManager, SessionState};
 use p2p::P2PDiscovery;
 use fdb::Fdb;
+use identity::Identity;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -34,6 +36,10 @@ struct Args {
     nucleus: Option<String>,
     #[arg(short, long)]
     cluster: Option<String>,
+    #[arg(long, help = "Initialize new identity and exit")]
+    init: bool,
+    #[arg(long, help = "Path to identity directory")]
+    identity: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -43,8 +49,21 @@ async fn main() -> Result<()> {
 
     info!("Starting OmniNervous Ganglion Daemon on port {}...", args.port);
 
+    // Handle --init flag
+    if args.init {
+        let id = Identity::generate();
+        id.save(args.identity.as_ref())?;
+        info!("Generated new identity: {}", id.public_key_hex());
+        println!("Your Public Identity: {}", id.public_key_hex());
+        return Ok(());
+    }
+
+    // Load or generate identity
+    let identity = Identity::load_or_generate(args.identity.as_ref())?;
+    info!("Using identity: {}", identity.public_key_hex());
+
     let mut session_manager = SessionManager::new();
-    let mut fdb = Fdb::new();
+    let _fdb = Fdb::new();
     let mut p2p = P2PDiscovery::new(Some("stun.l.google.com:19302"))?;
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", args.port)).await
@@ -58,9 +77,6 @@ async fn main() -> Result<()> {
     } else if let Some(ref endpoint) = p2p.local_endpoint {
         info!("Public endpoint: {}:{}", endpoint.ip, endpoint.port);
     }
-
-    // Generate a static identity for this session (normally loaded from disk)
-    let local_private_key = [0u8; 32]; 
 
     let mut buf = [0u8; 2048];
     loop {
@@ -79,7 +95,7 @@ async fn main() -> Result<()> {
                             
                             // Check if session exists, otherwise create a new one
                             if session_manager.get_session_mut(session_id).is_none() {
-                                match NoiseSession::new_responder(&local_private_key) {
+                                match NoiseSession::new_responder(&identity.private_key) {
                                     Ok(new_session) => {
                                         session_manager.create_session(session_id, SessionState::Handshaking(new_session));
                                         info!("Created new session: {}", session_id);
