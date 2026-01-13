@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
-# OmniNervous Cloud-to-Cloud Test Script
-# Tests P2P connectivity between two cloud instances
+# OmniNervous Cloud-to-Cloud Test Orchestrator
+# Run from LOCAL machine, orchestrates tests between TWO remote cloud instances
 # =============================================================================
 
 set -e
@@ -10,64 +10,92 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 print_header() {
     echo -e "\n${GREEN}=== $1 ===${NC}\n"
 }
 
-print_error() {
-    echo -e "${RED}ERROR: $1${NC}"
+print_step() {
+    echo -e "${CYAN}>>> $1${NC}"
 }
 
-print_warning() {
-    echo -e "${YELLOW}WARNING: $1${NC}"
+print_error() {
+    echo -e "${RED}ERROR: $1${NC}"
 }
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
+NODE_A=""
+NODE_B=""
+SSH_KEY=""
+SSH_USER="${SSH_USER:-ubuntu}"
 OMNI_PORT=${OMNI_PORT:-51820}
-OMNI_BINARY=${OMNI_BINARY:-"./target/release/omni-daemon"}
 TEST_DURATION=${TEST_DURATION:-10}
+RESULTS_DIR="./test_results"
+BINARY_PATH="./target/release/omni-daemon"
 
 show_help() {
     cat << EOF
-OmniNervous Cloud-to-Cloud Test
+OmniNervous Cloud-to-Cloud Test Orchestrator
+
+Runs from your LOCAL machine, SSHs into two cloud instances, deploys binaries,
+runs P2P connectivity test, and collects results locally.
 
 Usage:
-  On Node A (initiator):
-    $0 --role initiator --peer-ip <NODE_B_IP> --peer-pubkey <NODE_B_PUBKEY>
-  
-  On Node B (responder):
-    $0 --role responder
-  
-  Pre-flight check only:
-    $0 --check
+  $0 --node-a <IP_A> --node-b <IP_B> [OPTIONS]
+
+Required:
+  --node-a        IP address of Node A (initiator)
+  --node-b        IP address of Node B (responder)
 
 Options:
-  --role          Role: 'initiator' or 'responder'
-  --peer-ip       IP address of peer (required for initiator)
-  --peer-pubkey   Public key of peer (required for initiator)
-  --port          UDP port (default: 51820)
+  --ssh-key       Path to SSH private key (default: ~/.ssh/id_rsa)
+  --ssh-user      SSH username (default: ubuntu)
+  --port          OmniNervous UDP port (default: 51820)
   --duration      iperf3 test duration in seconds (default: 10)
-  --check         Run pre-flight checks only
+  --skip-build    Skip local cargo build
+  --skip-deploy   Skip binary deployment (use existing)
   --help          Show this help
 
 Environment Variables:
+  SSH_USER        SSH username (default: ubuntu)
   OMNI_PORT       UDP port (default: 51820)
-  OMNI_BINARY     Path to omni-daemon binary
   TEST_DURATION   iperf3 test duration
 
-Example (Real-world test):
-  # On Node B (AWS us-west-2):
-  ./cloud_test.sh --role responder
-  # Note the public key output
-  
-  # On Node A (GCP us-central1):
-  ./cloud_test.sh --role initiator --peer-ip 54.x.x.x --peer-pubkey abc123...
+Example:
+  # Test between AWS (us-west-2) and GCP (us-central1)
+  $0 --node-a 54.x.x.x --node-b 35.x.x.x --ssh-key ~/.ssh/cloud.pem
+
+Prerequisites on cloud nodes:
+  - iperf3 installed (apt-get install iperf3)
+  - UDP port $OMNI_PORT open in firewall/security group
+  - SSH access with key authentication
 EOF
+}
+
+# =============================================================================
+# SSH Helper Functions
+# =============================================================================
+
+ssh_cmd() {
+    local host="$1"
+    shift
+    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        ${SSH_KEY:+-i "$SSH_KEY"} \
+        "$SSH_USER@$host" "$@"
+}
+
+scp_to() {
+    local src="$1"
+    local host="$2"
+    local dest="$3"
+    scp -o StrictHostKeyChecking=no \
+        ${SSH_KEY:+-i "$SSH_KEY"} \
+        "$src" "$SSH_USER@$host:$dest"
 }
 
 # =============================================================================
@@ -75,43 +103,48 @@ EOF
 # =============================================================================
 
 preflight_check() {
-    print_header "Pre-flight Checks"
+    print_header "Pre-flight Checks (Local)"
     
     local errors=0
     
-    # Check binary exists
-    if [[ -f "$OMNI_BINARY" ]]; then
-        echo -e "✅ omni-daemon binary found: $OMNI_BINARY"
+    # Check local binary
+    if [[ -f "$BINARY_PATH" ]]; then
+        echo -e "✅ Local binary found: $BINARY_PATH"
     else
-        echo -e "❌ omni-daemon binary not found: $OMNI_BINARY"
+        echo -e "❌ Local binary not found: $BINARY_PATH"
         echo "   Run: cargo build -p omni-daemon --release"
         errors=$((errors + 1))
     fi
     
-    # Check iperf3
-    if command -v iperf3 &> /dev/null; then
-        echo -e "✅ iperf3 installed"
+    # Check SSH connectivity to Node A
+    print_step "Testing SSH to Node A ($NODE_A)..."
+    if ssh_cmd "$NODE_A" "echo ok" &>/dev/null; then
+        echo -e "✅ SSH to Node A successful"
     else
-        echo -e "❌ iperf3 not installed"
-        echo "   Install: apt-get install iperf3 / brew install iperf3"
+        echo -e "❌ SSH to Node A failed"
         errors=$((errors + 1))
     fi
     
-    # Check port availability
-    if ! lsof -i :$OMNI_PORT &> /dev/null; then
-        echo -e "✅ Port $OMNI_PORT available"
+    # Check SSH connectivity to Node B
+    print_step "Testing SSH to Node B ($NODE_B)..."
+    if ssh_cmd "$NODE_B" "echo ok" &>/dev/null; then
+        echo -e "✅ SSH to Node B successful"
     else
-        echo -e "❌ Port $OMNI_PORT in use"
+        echo -e "❌ SSH to Node B failed"
         errors=$((errors + 1))
     fi
     
-    # Check firewall (best effort)
-    echo -e "⚠️  Ensure UDP port $OMNI_PORT is open in cloud firewall/security group"
-    
-    # Check public IP
-    local public_ip
-    public_ip=$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || echo "unknown")
-    echo -e "📍 Public IP: $public_ip"
+    # Check iperf3 on nodes
+    print_step "Checking iperf3 on remote nodes..."
+    for node in "$NODE_A" "$NODE_B"; do
+        if ssh_cmd "$node" "which iperf3" &>/dev/null; then
+            echo -e "✅ iperf3 installed on $node"
+        else
+            echo -e "❌ iperf3 not installed on $node"
+            echo "   Run: ssh $SSH_USER@$node 'sudo apt-get install -y iperf3'"
+            errors=$((errors + 1))
+        fi
+    done
     
     if [[ $errors -gt 0 ]]; then
         print_error "Pre-flight checks failed with $errors errors"
@@ -122,153 +155,155 @@ preflight_check() {
 }
 
 # =============================================================================
-# Responder Mode
+# Deploy Binaries
 # =============================================================================
 
-run_responder() {
-    print_header "Starting Responder (Node B)"
+deploy_binaries() {
+    print_header "Deploying Binaries"
     
-    preflight_check
-    
-    echo "Generating identity..."
-    local pubkey
-    pubkey=$($OMNI_BINARY --init 2>/dev/null | grep "Public" | awk '{print $NF}')
-    
-    if [[ -z "$pubkey" ]]; then
-        # Fallback: generate mock key for testing
-        pubkey=$(openssl rand -hex 16)
-        print_warning "Using mock public key (daemon --init not implemented yet)"
-    fi
-    
-    echo -e "\n${GREEN}Your Public Key:${NC}"
-    echo -e "${YELLOW}$pubkey${NC}"
-    echo -e "\nShare this with the initiator node.\n"
-    
-    # Get public IP
-    local public_ip
-    public_ip=$(curl -s ifconfig.me 2>/dev/null || echo "YOUR_IP")
-    echo -e "Your Public IP: $public_ip"
-    echo -e "\nCommand for initiator:"
-    echo -e "${YELLOW}./cloud_test.sh --role initiator --peer-ip $public_ip --peer-pubkey $pubkey${NC}\n"
-    
-    echo "Starting daemon in responder mode..."
-    echo "Press Ctrl+C to stop"
-    
-    # Start daemon
-    $OMNI_BINARY --port $OMNI_PORT &
-    DAEMON_PID=$!
-    
-    # Start iperf3 server
-    echo "Starting iperf3 server..."
-    iperf3 -s -p 5201 &
-    IPERF_PID=$!
-    
-    trap "kill $DAEMON_PID $IPERF_PID 2>/dev/null; exit" INT TERM
-    
-    echo -e "\n${GREEN}Responder ready. Waiting for connections...${NC}"
-    wait $DAEMON_PID
+    for node in "$NODE_A" "$NODE_B"; do
+        print_step "Deploying to $node..."
+        
+        # Create remote directory
+        ssh_cmd "$node" "mkdir -p ~/omni-test"
+        
+        # Copy binary
+        scp_to "$BINARY_PATH" "$node" "~/omni-test/omni-daemon"
+        
+        # Make executable
+        ssh_cmd "$node" "chmod +x ~/omni-test/omni-daemon"
+        
+        echo -e "✅ Deployed to $node"
+    done
 }
 
 # =============================================================================
-# Initiator Mode
+# Run Test
 # =============================================================================
 
-run_initiator() {
-    local peer_ip="$1"
-    local peer_pubkey="$2"
+run_test() {
+    print_header "Running P2P Test"
     
-    print_header "Starting Initiator (Node A)"
+    # Create local results directory
+    mkdir -p "$RESULTS_DIR"
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local result_file="$RESULTS_DIR/cloud_test_$timestamp.json"
     
-    if [[ -z "$peer_ip" || -z "$peer_pubkey" ]]; then
-        print_error "--peer-ip and --peer-pubkey required for initiator"
-        exit 1
-    fi
+    # Kill any existing processes
+    print_step "Cleaning up old processes..."
+    for node in "$NODE_A" "$NODE_B"; do
+        ssh_cmd "$node" "pkill -f omni-daemon || true; pkill -f iperf3 || true" 2>/dev/null || true
+    done
+    sleep 2
     
-    preflight_check
+    # Start responder on Node B
+    print_step "Starting responder on Node B ($NODE_B)..."
+    ssh_cmd "$NODE_B" "cd ~/omni-test && nohup ./omni-daemon --port $OMNI_PORT > daemon.log 2>&1 &"
+    ssh_cmd "$NODE_B" "nohup iperf3 -s -p 5201 > iperf_server.log 2>&1 &"
+    sleep 3
     
-    echo "Peer IP: $peer_ip"
-    echo "Peer Public Key: $peer_pubkey"
-    
-    echo -e "\nStarting daemon and connecting to peer..."
-    $OMNI_BINARY --port $OMNI_PORT --peer $peer_pubkey --endpoint $peer_ip:$OMNI_PORT &
-    DAEMON_PID=$!
-    
-    # Wait for handshake
-    echo "Waiting for Noise handshake..."
+    # Start initiator on Node A and connect to Node B
+    print_step "Starting initiator on Node A ($NODE_A), connecting to Node B..."
+    ssh_cmd "$NODE_A" "cd ~/omni-test && nohup ./omni-daemon --port $OMNI_PORT --endpoint $NODE_B:$OMNI_PORT > daemon.log 2>&1 &"
     sleep 5
     
-    # Run connectivity test
-    print_header "Connectivity Test"
+    # Run connectivity tests from Node A to Node B
+    print_header "Network Metrics (A → B)"
     
-    echo "Testing ping to peer..."
-    if ping -c 3 -W 5 $peer_ip &> /dev/null; then
-        echo -e "✅ Ping to $peer_ip successful"
-    else
-        print_warning "Ping failed (may be blocked by firewall)"
-    fi
+    # Latency test (via Node A to Node B)
+    print_step "Measuring latency..."
+    local latency_output
+    latency_output=$(ssh_cmd "$NODE_A" "ping -c 10 $NODE_B 2>/dev/null | tail -1" 2>/dev/null || echo "")
+    local avg_latency
+    avg_latency=$(echo "$latency_output" | awk -F'/' '{print $5}' 2>/dev/null || echo "N/A")
+    echo -e "  Average Latency: ${YELLOW}${avg_latency} ms${NC}"
     
-    # Run iperf3 test
-    print_header "Throughput Test (iperf3)"
+    # Throughput test
+    print_step "Running iperf3 throughput test ($TEST_DURATION seconds)..."
+    local iperf_json
+    iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $NODE_B -p 5201 -t $TEST_DURATION --json 2>/dev/null" || echo "{}")
     
-    echo "Running iperf3 for $TEST_DURATION seconds..."
-    if iperf3 -c $peer_ip -p 5201 -t $TEST_DURATION --json > /tmp/iperf_result.json 2>/dev/null; then
-        local bps
-        bps=$(jq '.end.sum_sent.bits_per_second // 0' /tmp/iperf_result.json 2>/dev/null || echo "0")
-        local mbps
-        mbps=$(echo "scale=2; $bps / 1000000" | bc 2>/dev/null || echo "N/A")
-        
-        echo -e "\n${GREEN}Results:${NC}"
-        echo -e "  Throughput: ${YELLOW}$mbps Mbps${NC}"
-        
-        local retransmits
-        retransmits=$(jq '.end.sum_sent.retransmits // 0' /tmp/iperf_result.json 2>/dev/null || echo "0")
-        echo -e "  Retransmits: $retransmits"
-    else
-        print_warning "iperf3 test failed (peer iperf3 server may not be running)"
-    fi
+    local throughput_bps
+    throughput_bps=$(echo "$iperf_json" | jq '.end.sum_sent.bits_per_second // 0' 2>/dev/null || echo "0")
+    local throughput_mbps
+    throughput_mbps=$(echo "scale=2; $throughput_bps / 1000000" | bc 2>/dev/null || echo "N/A")
     
-    # Latency test
-    print_header "Latency Test"
+    local retransmits
+    retransmits=$(echo "$iperf_json" | jq '.end.sum_sent.retransmits // 0' 2>/dev/null || echo "0")
     
-    echo "Running latency test..."
-    if command -v ping &> /dev/null; then
-        local latency
-        latency=$(ping -c 10 $peer_ip 2>/dev/null | tail -1 | awk -F'/' '{print $5}')
-        if [[ -n "$latency" ]]; then
-            echo -e "  Average Latency: ${YELLOW}${latency}ms${NC}"
-        else
-            print_warning "Could not measure latency"
-        fi
-    fi
+    echo -e "  Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
+    echo -e "  Retransmits: $retransmits"
     
-    # Cleanup
-    kill $DAEMON_PID 2>/dev/null || true
+    # Collect daemon logs
+    print_step "Collecting logs..."
+    ssh_cmd "$NODE_A" "cat ~/omni-test/daemon.log" > "$RESULTS_DIR/node_a_daemon.log" 2>/dev/null || true
+    ssh_cmd "$NODE_B" "cat ~/omni-test/daemon.log" > "$RESULTS_DIR/node_b_daemon.log" 2>/dev/null || true
     
+    # Create results JSON
+    cat > "$result_file" << EOF
+{
+  "timestamp": "$timestamp",
+  "node_a": "$NODE_A",
+  "node_b": "$NODE_B",
+  "test_duration_sec": $TEST_DURATION,
+  "results": {
+    "latency_ms": "$avg_latency",
+    "throughput_mbps": $throughput_mbps,
+    "throughput_bps": $throughput_bps,
+    "retransmits": $retransmits
+  },
+  "raw_iperf": $iperf_json
+}
+EOF
+    
+    # Cleanup remote processes
+    print_step "Cleaning up remote processes..."
+    for node in "$NODE_A" "$NODE_B"; do
+        ssh_cmd "$node" "pkill -f omni-daemon || true; pkill -f iperf3 || true" 2>/dev/null || true
+    done
+    
+    # Summary
     print_header "Test Complete"
-    echo "Results saved to /tmp/iperf_result.json"
+    
+    echo -e "Node A (Initiator): $NODE_A"
+    echo -e "Node B (Responder): $NODE_B"
+    echo ""
+    echo -e "┌──────────────────────────────────────┐"
+    echo -e "│  ${GREEN}RESULTS${NC}                             │"
+    echo -e "├──────────────────────────────────────┤"
+    echo -e "│  Latency:     ${YELLOW}${avg_latency} ms${NC}"
+    echo -e "│  Throughput:  ${YELLOW}${throughput_mbps} Mbps${NC}"
+    echo -e "│  Retransmits: $retransmits"
+    echo -e "└──────────────────────────────────────┘"
+    echo ""
+    echo -e "Results saved to: ${CYAN}$result_file${NC}"
+    echo -e "Daemon logs: ${CYAN}$RESULTS_DIR/node_*_daemon.log${NC}"
 }
 
 # =============================================================================
 # Main
 # =============================================================================
 
-ROLE=""
-PEER_IP=""
-PEER_PUBKEY=""
-CHECK_ONLY=false
+SKIP_BUILD=false
+SKIP_DEPLOY=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --role)
-            ROLE="$2"
+        --node-a)
+            NODE_A="$2"
             shift 2
             ;;
-        --peer-ip)
-            PEER_IP="$2"
+        --node-b)
+            NODE_B="$2"
             shift 2
             ;;
-        --peer-pubkey)
-            PEER_PUBKEY="$2"
+        --ssh-key)
+            SSH_KEY="$2"
+            shift 2
+            ;;
+        --ssh-user)
+            SSH_USER="$2"
             shift 2
             ;;
         --port)
@@ -279,8 +314,12 @@ while [[ $# -gt 0 ]]; do
             TEST_DURATION="$2"
             shift 2
             ;;
-        --check)
-            CHECK_ONLY=true
+        --skip-build)
+            SKIP_BUILD=true
+            shift
+            ;;
+        --skip-deploy)
+            SKIP_DEPLOY=true
             shift
             ;;
         --help|-h)
@@ -295,21 +334,31 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if $CHECK_ONLY; then
-    preflight_check
-    exit 0
+# Validate required args
+if [[ -z "$NODE_A" || -z "$NODE_B" ]]; then
+    print_error "Both --node-a and --node-b are required"
+    show_help
+    exit 1
 fi
 
-case $ROLE in
-    responder)
-        run_responder
-        ;;
-    initiator)
-        run_initiator "$PEER_IP" "$PEER_PUBKEY"
-        ;;
-    *)
-        print_error "Please specify --role (initiator or responder)"
-        show_help
-        exit 1
-        ;;
-esac
+print_header "OmniNervous Cloud-to-Cloud Test"
+echo "Node A (Initiator): $NODE_A"
+echo "Node B (Responder): $NODE_B"
+
+# Build locally if needed
+if ! $SKIP_BUILD; then
+    print_header "Building Binary (Local)"
+    cargo build -p omni-daemon --release --target x86_64-unknown-linux-gnu 2>/dev/null || \
+    cargo build -p omni-daemon --release
+fi
+
+# Run test sequence
+preflight_check
+
+if ! $SKIP_DEPLOY; then
+    deploy_binaries
+fi
+
+run_test
+
+echo -e "\n${GREEN}✅ Cloud test completed successfully!${NC}"
