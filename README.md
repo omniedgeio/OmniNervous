@@ -35,7 +35,7 @@ graph TB
     style SA fill:#2d5a3d
     style SB fill:#2d5a3d
     style NR fill:#4a4a6a
-    
+
 ```
 
 ## 🚀 Getting Started
@@ -198,4 +198,4 @@ DoS protection is enabled by default:
 - **Memory Safety**: 100% Rust implementation provides a mathematical guarantee against buffer overflows and use-after-free vulnerabilities.
 
 ---
-*© 2026 OmniEdge Protocol Group. Engineering the Nervous System of the Future.*
+*© 2026 OmniEdge Inc. Engineering the Nervous System of the Future.*
