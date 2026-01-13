@@ -11,7 +11,7 @@ pub struct PacketHeader {
 #[derive(Clone, Copy, Debug)]
 pub struct SessionEntry {
     pub key: [u8; 32],
-    pub remote_ip: u32, // Simplified for now
+    pub remote_addr: [u8; 16], // IPv6 compatible (IPv4 mapped as ::ffff:x.x.x.x)
     pub remote_port: u16,
 }
 

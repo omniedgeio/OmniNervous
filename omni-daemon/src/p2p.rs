@@ -74,7 +74,22 @@ impl StunClient {
                     let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(
                         x_ip[0], x_ip[1], x_ip[2], x_ip[3]
                     ));
-                    info!("STUN discovered: {}:{}", ip, port);
+                    info!("STUN discovered (IPv4): {}:{}", ip, port);
+                    return Ok(PublicEndpoint { ip, port });
+                } else if family == 0x02 && attr_len >= 20 {
+                    // IPv6: XOR with magic cookie + transaction ID
+                    let mut x_ip6 = [0u8; 16];
+                    // First 4 bytes XOR with magic cookie
+                    x_ip6[0] = buf[offset + 8] ^ 0x21;
+                    x_ip6[1] = buf[offset + 9] ^ 0x12;
+                    x_ip6[2] = buf[offset + 10] ^ 0xa4;
+                    x_ip6[3] = buf[offset + 11] ^ 0x42;
+                    // Remaining 12 bytes XOR with transaction ID (from request)
+                    for i in 4..16 {
+                        x_ip6[i] = buf[offset + 8 + i] ^ request[8 + i - 4];
+                    }
+                    let ip = std::net::IpAddr::V6(std::net::Ipv6Addr::from(x_ip6));
+                    info!("STUN discovered (IPv6): [{}]:{}", ip, port);
                     return Ok(PublicEndpoint { ip, port });
                 }
             }
