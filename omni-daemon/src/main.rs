@@ -20,6 +20,7 @@ mod ratelimit;
 mod metrics;
 mod config;
 mod bpf_sync;
+mod http;
 
 use noise::NoiseSession;
 use session::{SessionManager, SessionState};
@@ -90,8 +91,16 @@ async fn main() -> Result<()> {
     
     info!("Ganglion listening on UDP/{}", args.port);
 
-    // Perform STUN discovery
-    if let Err(e) = p2p.discover_self(&socket).await {
+    // Spawn metrics HTTP server
+    let metrics_clone = metrics.clone();
+    tokio::spawn(async move {
+        if let Err(e) = http::serve_metrics(metrics_clone, 9090).await {
+            error!("Metrics server failed: {}", e);
+        }
+    });
+
+    // Perform STUN discovery (using isolated ephemeral socket)
+    if let Err(e) = p2p.discover_self().await {
         warn!("STUN discovery failed: {}", e);
     } else if let Some(ref endpoint) = p2p.local_endpoint {
         info!("Public endpoint: {}:{}", endpoint.ip, endpoint.port);

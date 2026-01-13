@@ -127,9 +127,15 @@ impl P2PDiscovery {
     }
 
     /// Perform STUN discovery to find our public endpoint.
-    pub async fn discover_self(&mut self, socket: &UdpSocket) -> Result<()> {
+    pub async fn discover_self(&mut self) -> Result<()> {
         if let Some(ref client) = self.stun_client {
-            self.local_endpoint = Some(client.discover(socket).await?);
+            // Use ephemeral socket for STUN to avoid confusion with data packets
+            let stun_socket = UdpSocket::bind("0.0.0.0:0").await
+                .context("Failed to bind ephemeral STUN socket")?;
+            
+            self.local_endpoint = Some(client.discover(&stun_socket).await?);
+            
+            // Socket is dropped here, keeping STUN isolated
         } else {
             warn!("No STUN server configured, skipping self-discovery");
         }
