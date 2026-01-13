@@ -151,6 +151,45 @@ Using OmniNervous is designed to be as simple as plugging in a physical cable:
     - Your applications (ROS2, etc.) use `omni0`.
     - Routing is handled by the **Synapse Engine** based on the peer's public key.
 
+## ⚙️ Configuration
+
+OmniNervous supports TOML configuration files. Create `~/.omni/config.toml` or use `--config`:
+
+```toml
+[daemon]
+port = 51820
+interface = "eth0"
+
+[network]
+nucleus = "nucleus.omni.io"
+cluster = "ai-robot-fleet"
+
+[security]
+max_sessions_per_ip = 10
+handshake_timeout_secs = 5
+
+[[peers]]
+public_key = "abc123..."
+endpoint = "192.168.1.100:51820"
+```
+
+See [config.example.toml](config.example.toml) for all options.
+
+## 📊 Observability
+
+Built-in Prometheus metrics (accessible via API):
+- `omni_sessions_active` — Current active sessions
+- `omni_packets_rx_total` — Total packets received
+- `omni_handshakes_completed_total` — Successful handshakes
+- `omni_sessions_dropped_ratelimit_total` — Rate-limited connections
+
+## 🛡️ Rate Limiting
+
+DoS protection is enabled by default:
+- **10 new sessions per IP per second**
+- **5 second handshake timeout**
+- **1 hour session expiration**
+
 ## 🔒 Security DNA
 
 - **Identity-as-Address**: Routing is derived from Ed25519 Public Keys.
