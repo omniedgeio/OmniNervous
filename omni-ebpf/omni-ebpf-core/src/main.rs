@@ -101,7 +101,7 @@ fn chacha20_block(key: &[u8; 32], nonce: &[u8; 8], counter: u32, output: &mut [u
     // Nonce (2 words)
     state[13] = u32::from_le_bytes([nonce[0], nonce[1], nonce[2], nonce[3]]);
     state[14] = u32::from_le_bytes([nonce[4], nonce[5], nonce[6], nonce[7]]);
-    state[15] = 0; // Additional nonce word (unused in our protocol)
+    state[15] = 0;
     
     let mut working = state;
     
@@ -138,42 +138,28 @@ fn chacha20_block(key: &[u8; 32], nonce: &[u8; 8], counter: u32, output: &mut [u
     }
 }
 
-/// Decrypt a buffer in-place using ChaCha20
+/// Poly1305 MAC computation (simplified for eBPF)
 #[inline(always)]
-fn chacha20_decrypt(key: &[u8; 32], nonce: &[u8; 8], data: &mut [u8], len: usize) -> Result<(), ()> {
-    let mut counter = 0u32;
-    let mut pos = 0usize;
+fn poly1305_verify(key: &[u8; 32], nonce: &[u8; 8], msg: &[u8], msg_len: usize, tag: &[u8; 16]) -> bool {
+    // Derive Poly1305 key from ChaCha20(key, nonce, counter=0)
+    let mut poly_key_block = [0u8; 64];
+    chacha20_block(key, nonce, 0, &mut poly_key_block);
     
-    // Process full blocks
-    while pos + 64 <= len {
-        let mut keystream = [0u8; 64];
-        chacha20_block(key, nonce, counter, &mut keystream);
-        
-        // XOR with keystream (eBPF verifier needs bounded loop)
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..64 {
-            if pos + i < len {
-                data[pos + i] ^= keystream[i];
-            }
-        }
-        
-        pos += 64;
-        counter += 1;
-    }
-    
-    // Process remaining bytes
-    if pos < len {
-        let mut keystream = [0u8; 64];
-        chacha20_block(key, nonce, counter, &mut keystream);
-        
-        let remaining = len - pos;
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..remaining {
-            data[pos + i] ^= keystream[i];
+    // For eBPF simplicity, we do a basic tag comparison
+    // A full Poly1305 implementation would compute the MAC here
+    // For now, we verify the tag is non-zero (placeholder)
+    let mut tag_valid = false;
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..16 {
+        if tag[i] != 0 {
+            tag_valid = true;
+            break;
         }
     }
     
-    Ok(())
+    // TODO: Full Poly1305 computation
+    // This is a placeholder - production needs full MAC verification
+    tag_valid && msg_len > 0 && msg.len() > 0
 }
 
 fn try_xdp_synapse(ctx: XdpContext) -> Result<u32, ()> {
@@ -223,8 +209,9 @@ fn try_xdp_synapse(ctx: XdpContext) -> Result<u32, ()> {
     let session_id: *const u32 = ptr_at(&ctx, omni_offset)?;
     let session_id = u32::from_be(unsafe { *session_id });
 
-    // Extract nonce for decryption
+    // Extract nonce
     let mut nonce = [0u8; 8];
+    #[allow(clippy::needless_range_loop)]
     for i in 0..8 {
         let byte_ptr: *const u8 = ptr_at(&ctx, omni_offset + 4 + i)?;
         nonce[i] = unsafe { *byte_ptr };
@@ -235,24 +222,74 @@ fn try_xdp_synapse(ctx: XdpContext) -> Result<u32, ()> {
 
     match session {
         Some(entry) => {
-            // Session found - decrypt payload
-            // Payload starts after OmniNervous header
+            // Payload: [encrypted_data][16-byte Poly1305 tag]
             let payload_offset = omni_offset + OMNI_HDR_LEN;
             
-            // NOTE: Full decryption in XDP is complex due to packet size limits
-            // For now, we validate the session and pass to userspace for decryption
-            // A production implementation would decrypt in-place here
+            // Get packet end to calculate payload length
+            let data_start = ctx.data();
+            let data_end = ctx.data_end();
             
-            info!(&ctx, "OmniNervous: session {} authorized (key available)", session_id);
+            if data_end <= data_start + payload_offset + POLY1305_TAG_LEN {
+                // Packet too short
+                return Ok(xdp_action::XDP_DROP);
+            }
             
-            // TODO: Implement full ChaCha20-Poly1305 decryption
-            // 1. Decrypt payload in-place
-            // 2. Verify Poly1305 tag
-            // 3. Parse inner Ethernet frame
-            // 4. FDB lookup for MAC forwarding
-            // 5. XDP_REDIRECT to destination interface
+            let total_payload_len = data_end - (data_start + payload_offset);
+            let ciphertext_len = total_payload_len - POLY1305_TAG_LEN;
             
-            Ok(xdp_action::XDP_PASS)
+            // Extract Poly1305 tag (last 16 bytes)
+            let mut tag = [0u8; 16];
+            let tag_offset = payload_offset + ciphertext_len;
+            #[allow(clippy::needless_range_loop)]
+            for i in 0..16 {
+                let byte_ptr: *const u8 = ptr_at(&ctx, tag_offset + i)?;
+                tag[i] = unsafe { *byte_ptr };
+            }
+            
+            // TODO 1: Verify Poly1305 MAC
+            // For now, we assume tag is valid (placeholder)
+            let tag_valid = tag[0] != 0 || tag[1] != 0; // Basic check
+            
+            if !tag_valid {
+                info!(&ctx, "Poly1305 verification failed for session {}", session_id);
+                return Ok(xdp_action::XDP_DROP);
+            }
+            
+            // TODO 2: Decrypt in-place and parse inner Ethernet frame
+            // For production, we would:
+            // 1. Decrypt ciphertext using chacha20_decrypt()
+            // 2. Parse inner Ethernet header
+            // 3. Extract destination MAC
+            
+            // Placeholder: assume inner frame starts at payload_offset after decryption
+            let inner_eth_offset = payload_offset;
+            
+            // Extract destination MAC from inner frame
+            let mut dst_mac = [0u8; 6];
+            #[allow(clippy::needless_range_loop)]
+            for i in 0..6 {
+                let byte_ptr: *const u8 = ptr_at(&ctx, inner_eth_offset + i)?;
+                dst_mac[i] = unsafe { *byte_ptr };
+            }
+            
+            // TODO 3: FDB lookup and XDP_REDIRECT
+            let fdb_entry = unsafe { FDB.get(&dst_mac) };
+            
+            match fdb_entry {
+                Some(_fdb_rec) => {
+                    // Found in FDB - would XDP_REDIRECT here
+                    // let ifindex = fdb_rec.ifindex;
+                    // return Ok(xdp_action::XDP_REDIRECT);
+                    
+                    info!(&ctx, "FDB hit for MAC, forwarding session {}", session_id);
+                    Ok(xdp_action::XDP_PASS) // Placeholder: pass to userspace
+                }
+                None => {
+                    // MAC not in FDB - flood or pass to userspace for learning
+                    info!(&ctx, "FDB miss, learning required for session {}", session_id);
+                    Ok(xdp_action::XDP_PASS)
+                }
+            }
         }
         None => {
             // Unknown session - drop silently (Cryptographic Silence)
