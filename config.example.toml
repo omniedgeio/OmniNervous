@@ -1,0 +1,26 @@
+# OmniNervous Configuration Example
+
+[daemon]
+port = 51820
+interface = "eth0"
+log_level = "info"
+
+[network]
+nucleus = "nucleus.omni.io"
+cluster = "ai-robot-fleet"
+stun_server = "stun.l.google.com:19302"
+
+[security]
+# identity_path = "~/.omni/identity.key"
+max_sessions_per_ip = 10
+handshake_timeout_secs = 5
+
+# Define trusted peers
+[[peers]]
+public_key = "abc123..."
+endpoint = "192.168.1.100:51820"
+allowed_ips = ["10.0.0.0/24"]
+
+[[peers]]
+public_key = "def456..."
+# Endpoint discovered via Nucleus

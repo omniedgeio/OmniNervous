@@ -18,6 +18,7 @@ mod fdb;
 mod identity;
 mod ratelimit;
 mod metrics;
+mod config;
 
 use noise::NoiseSession;
 use session::{SessionManager, SessionState};
@@ -26,6 +27,7 @@ use fdb::Fdb;
 use identity::Identity;
 use ratelimit::{RateLimiter, RateLimitConfig};
 use metrics::Metrics;
+use config::Config;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -44,6 +46,8 @@ struct Args {
     init: bool,
     #[arg(long, help = "Path to identity directory")]
     identity: Option<std::path::PathBuf>,
+    #[arg(long, short = 'C', help = "Path to config file")]
+    config: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
