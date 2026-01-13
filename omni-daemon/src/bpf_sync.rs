@@ -9,7 +9,7 @@ use aya::maps::HashMap as BpfHashMap;
 /// Manages synchronization between userspace sessions and BPF maps.
 pub struct BpfSync {
     #[cfg(target_os = "linux")]
-    sessions_map: Option<BpfHashMap<aya::maps::MapData, u32, SessionEntry>>,
+    sessions_map: Option<BpfHashMap<aya::maps::MapData, u64, SessionEntry>>,
 }
 
 impl BpfSync {
@@ -36,7 +36,7 @@ impl BpfSync {
     /// Add a session to the BPF map.
     pub fn insert_session(
         &mut self, 
-        session_id: u32, 
+        session_id: u64,  // Changed from u32 to u64
         key: [u8; 32], 
         remote_addr: IpAddr,
         remote_port: u16
@@ -57,6 +57,7 @@ impl BpfSync {
             key,
             remote_addr: addr_bytes,
             remote_port,
+            last_seq: 0,  // Initialize replay protection counter
         };
 
         #[cfg(target_os = "linux")]
@@ -76,7 +77,7 @@ impl BpfSync {
     }
 
     /// Remove a session from the BPF map.
-    pub fn remove_session(&mut self, session_id: u32) -> Result<()> {
+    pub fn remove_session(&mut self, session_id: u64) -> Result<()> {
         #[cfg(target_os = "linux")]
         if let Some(ref mut map) = self.sessions_map {
             let _ = map.remove(&session_id); // Ignore if missing

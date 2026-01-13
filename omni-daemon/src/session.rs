@@ -14,7 +14,7 @@ pub enum SessionState {
 }
 
 pub struct SessionManager {
-    sessions: HashMap<u32, SessionState>,
+    sessions: HashMap<u64, SessionState>,  // Changed from u32 to u64
     secret: [u8; 32], // Server secret for HMAC
 }
 
@@ -32,8 +32,8 @@ impl SessionManager {
         }
     }
 
-    /// Generate a cryptographically secure session ID based on source IP and timestamp.
-    pub fn generate_session_id(&self, src_ip: IpAddr) -> u32 {
+    /// Generate a cryptographically secure 64-bit session ID
+    pub fn generate_session_id(&self, src_ip: IpAddr) -> u64 {
         let mut mac = HmacSha256::new_from_slice(&self.secret)
             .expect("HMAC init failed");
         
@@ -50,22 +50,25 @@ impl SessionManager {
             .as_nanos();
         mac.update(&nanos.to_le_bytes());
         
-        // Take first 4 bytes of HMAC as session ID
+        // Take first 8 bytes of HMAC as 64-bit session ID
         let result = mac.finalize();
         let bytes = result.into_bytes();
-        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        u64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7]
+        ])
     }
 
-    pub fn create_session(&mut self, session_id: u32, state: SessionState) {
+    pub fn create_session(&mut self, session_id: u64, state: SessionState) {
         self.sessions.insert(session_id, state);
     }
 
-    pub fn get_session_mut(&mut self, session_id: u32) -> Option<&mut SessionState> {
+    pub fn get_session_mut(&mut self, session_id: u64) -> Option<&mut SessionState> {
         self.sessions.get_mut(&session_id)
     }
 
     /// Advance the handshake for a given session.
-    pub fn advance_handshake(&mut self, session_id: u32, message: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub fn advance_handshake(&mut self, session_id: u64, message: &[u8]) -> Result<Option<Vec<u8>>> {
         if let Some(SessionState::Handshaking(ref mut session)) = self.sessions.get_mut(&session_id) {
             let response = session.process_handshake(message)?;
             Ok(Some(response))
@@ -75,7 +78,7 @@ impl SessionManager {
     }
 
     /// Finalize a handshake and move the session to Active state.
-    pub fn finalize_session(&mut self, session_id: u32) -> Result<bool> {
+    pub fn finalize_session(&mut self, session_id: u64) -> Result<bool> {
         if let Some(state) = self.sessions.remove(&session_id) {
             if let SessionState::Handshaking(session) = state {
                 if session.is_handshake_finished() {

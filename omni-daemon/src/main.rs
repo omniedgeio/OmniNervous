@@ -21,6 +21,8 @@ mod metrics;
 mod config;
 mod bpf_sync;
 mod http;
+mod nonce;
+mod crypto_util;
 
 use noise::NoiseSession;
 use session::{SessionManager, SessionState};

@@ -32,7 +32,7 @@ struct IpRateState {
 pub struct RateLimiter {
     config: RateLimitConfig,
     ip_states: HashMap<IpAddr, IpRateState>,
-    session_creation_times: HashMap<u32, Instant>,
+    session_creation_times: HashMap<u64, Instant>,  // Changed from u32 to u64
 }
 
 impl RateLimiter {
@@ -70,12 +70,12 @@ impl RateLimiter {
     }
 
     /// Record when a session was created (for timeout tracking).
-    pub fn record_session_start(&mut self, session_id: u32) {
+    pub fn record_session_start(&mut self, session_id: u64) {
         self.session_creation_times.insert(session_id, Instant::now());
     }
 
     /// Check if a handshake has timed out.
-    pub fn is_handshake_timeout(&self, session_id: u32) -> bool {
+    pub fn is_handshake_timeout(&self, session_id: u64) -> bool {
         if let Some(start_time) = self.session_creation_times.get(&session_id) {
             Instant::now().duration_since(*start_time) > self.config.handshake_timeout
         } else {
@@ -84,7 +84,7 @@ impl RateLimiter {
     }
 
     /// Get list of expired sessions.
-    pub fn expired_sessions(&self) -> Vec<u32> {
+    pub fn expired_sessions(&self) -> Vec<u64> {
         let now = Instant::now();
         self.session_creation_times
             .iter()
@@ -94,7 +94,7 @@ impl RateLimiter {
     }
 
     /// Remove a session from tracking.
-    pub fn remove_session(&mut self, session_id: u32) {
+    pub fn remove_session(&mut self, session_id: u64) {
         self.session_creation_times.remove(&session_id);
     }
 
