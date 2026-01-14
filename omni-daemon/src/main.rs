@@ -209,7 +209,7 @@ async fn main() -> Result<()> {
     info!("Running on non-Linux platform, using userspace processing");
     
     // Create virtual interface if VIP is specified
-    let _tun = if let Some(vip) = args.vip {
+    let mut _tun = if let Some(vip) = args.vip {
         // Check permissions first
         if let Err(e) = tun::check_tun_permissions() {
             warn!("TUN permission check: {}", e);
@@ -264,7 +264,19 @@ async fn main() -> Result<()> {
     }
 
     let mut buf = [0u8; 2048];
+    let mut tun_buf = [0u8; 2048];
+    
     loop {
+        // TUN read future - only if TUN is active
+        let tun_read = async {
+            if let Some(ref mut tun) = _tun {
+                tun.read(&mut tun_buf).await
+            } else {
+                // No TUN, sleep forever on this branch
+                std::future::pending::<Result<usize>>().await
+            }
+        };
+        
         tokio::select! {
             _ = signal::ctrl_c() => {
                 info!("Exiting...");
@@ -277,6 +289,29 @@ async fn main() -> Result<()> {
                 for sid in expired {
                     let _ = bpf_sync.remove_session(sid);
                     info!("Expired session {}", sid);
+                }
+            }
+            // Read from TUN interface (local packets to send to VPN)
+            tun_result = tun_read => {
+                match tun_result {
+                    Ok(len) if len > 0 => {
+                        // IP packet from local TUN: needs encryption + send to peer
+                        // For now, just log - full encryption requires peer lookup
+                        let ip_version = (tun_buf[0] >> 4) & 0xF;
+                        if ip_version == 4 && len >= 20 {
+                            let dst_ip = std::net::Ipv4Addr::new(
+                                tun_buf[16], tun_buf[17], tun_buf[18], tun_buf[19]
+                            );
+                            info!("TUN→ IP packet: {} bytes to {}", len, dst_ip);
+                            // TODO: Lookup peer by dst_ip, encrypt with session key, send via UDP
+                        } else {
+                            info!("TUN→ Non-IPv4 packet: {} bytes", len);
+                        }
+                    }
+                    Ok(_) => {} // Zero-length read, ignore
+                    Err(e) => {
+                        error!("TUN read error: {}", e);
+                    }
                 }
             }
             result = socket.recv_from(&mut buf) => {
@@ -356,3 +391,4 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
