@@ -108,7 +108,8 @@ jobs:
       - name: Wait for P2P tunnel
         run: |
           echo "Waiting for tunnel establishment..."
-          sleep 10
+          echo "Note: Edge A learns about Edge B via HEARTBEAT_ACK (30s interval)"
+          sleep 35
           
           echo "=== Container Status ==="
           docker ps -a
