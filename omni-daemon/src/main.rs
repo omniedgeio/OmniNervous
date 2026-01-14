@@ -185,7 +185,7 @@ async fn main() -> Result<()> {
 
     let mut session_manager = SessionManager::new();
     let _fdb = Fdb::new();
-    let mut p2p = P2PDiscovery::new(Some("stun.l.google.com:19302")).await?;
+    let mut p2p = P2PDiscovery::new(None).await?;
     let mut rate_limiter = RateLimiter::new(RateLimitConfig::default());
     let metrics = Metrics::new();
     let mut bpf_sync = BpfSync::new();
