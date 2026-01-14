@@ -30,15 +30,20 @@ impl Identity {
         Self { private_key, public_key }
     }
 
-    /// Derive public key from private key (X25519 compatible).
-    fn derive_public_key(_private_key: &[u8; 32]) -> [u8; 32] {
-        // Use snow's built-in key derivation for X25519
-        let builder = snow::Builder::new("Noise_IK_25519_ChaChaPoly_BLAKE2s".parse().unwrap());
-        let keypair = builder.generate_keypair().unwrap();
-        // In production, use the actual private key to derive
-        // For now, return the generated public key
+    /// Derive public key from private key (X25519).
+    /// Uses the X25519 base point multiplication to get the public key.
+    fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
+        // Use snow's DH function to derive public key from private key
+        // This creates a proper X25519 keypair relationship
+        use snow::resolvers::{DefaultResolver, CryptoResolver};
+        use snow::params::DHChoice;
+        
+        let resolver = DefaultResolver;
+        let mut dh = resolver.resolve_dh(&DHChoice::Curve25519).unwrap();
+        dh.set(private_key);
+        
         let mut pk = [0u8; 32];
-        pk.copy_from_slice(&keypair.public);
+        pk.copy_from_slice(dh.pubkey());
         pk
     }
 
