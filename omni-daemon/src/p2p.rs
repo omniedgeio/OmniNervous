@@ -17,7 +17,6 @@ pub struct StunClient {
 
 impl StunClient {
     pub async fn new(stun_server: &str) -> Result<Self> {
-        // Use tokio DNS lookup to support hostnames like stun.l.google.com:19302
         use tokio::net::lookup_host;
         
         let addr = lookup_host(stun_server)
