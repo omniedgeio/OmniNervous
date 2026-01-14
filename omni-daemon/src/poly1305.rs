@@ -107,7 +107,9 @@ impl Poly1305 {
                 return;
             }
 
-            self.block(&self.buffer, 1);
+            // Copy buffer to avoid simultaneous borrow
+            let block_data = self.buffer;
+            self.block(&block_data, 1);
             self.leftover = 0;
         }
 
