@@ -73,7 +73,8 @@ services:
       - ./scripts:/scripts:ro
     command: >
       bash -c "apt-get update -qq && apt-get install -y -qq iputils-ping iperf3 > /dev/null && 
-               sleep 15 && /scripts/auto_test_docker.sh"
+               echo 'Waiting 40s for heartbeat cycle + handshake...' &&
+               sleep 40 && /scripts/auto_test_docker.sh"
     networks:
       omni-fabric:
         ipv4_address: 10.0.0.100
