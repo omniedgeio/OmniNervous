@@ -214,27 +214,43 @@ Using OmniNervous is designed to be as simple as plugging in a physical cable:
 
 ## ⚙️ Configuration
 
-OmniNervous supports TOML configuration files. Create `~/.omni/config.toml` or use `--config`:
+### Command Line
+
+Run with `--help` for all options:
+
+```bash
+omni-daemon --help
+```
+
+**Nucleus (Signaling Server):**
+```bash
+omni-daemon --mode nucleus --port 51820
+```
+
+**Edge Client (P2P VPN):**
+```bash
+omni-daemon \
+  --nucleus 1.2.3.4:51820 \
+  --cluster mynetwork \
+  --secret "YourSecretAtLeast16Chars" \
+  --vip 10.200.0.1
+```
+
+### Configuration File (Planned)
+
+TOML configuration file support is defined but not yet active. See [config.example.toml](config.example.toml) for the planned format:
 
 ```toml
 [daemon]
 port = 51820
-interface = "eth0"
 
 [network]
-nucleus = "nucleus.omni.io"
+nucleus = "nucleus.example.com"
 cluster = "ai-robot-fleet"
 
 [security]
 max_sessions_per_ip = 10
-handshake_timeout_secs = 5
-
-[[peers]]
-public_key = "abc123..."
-endpoint = "192.168.1.100:51820"
 ```
-
-See [config.example.toml](config.example.toml) for all options.
 
 ## 📊 Observability
 
