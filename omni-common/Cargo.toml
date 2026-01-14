@@ -3,6 +3,14 @@ name = "omni-common"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# Enable aya integration for BPF map types
+aya = ["dep:aya"]
+
 [dependencies]
-# aya-bpf is only for the eBPF side, aya is for userspace.
-# We might need a small subset of features or just core types.
+# Optional aya dependency for Pod trait (userspace only)
+aya = { version = "0.12", optional = true }
+
+[target.'cfg(target_arch = "bpf")'.dependencies]
+# eBPF target uses aya-bpf
