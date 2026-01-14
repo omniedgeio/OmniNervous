@@ -38,11 +38,20 @@ use bpf_sync::BpfSync;
 use std::time::Duration;
 use tokio::time::interval;
 
+/// Embedded eBPF program binary (built by CI and placed in omni-daemon/ebpf/)
+#[cfg(target_os = "linux")]
+static EBPF_PROGRAM: &[u8] = include_bytes!("../ebpf/omni-ebpf-core");
+
 /// Try to load eBPF/XDP program on Linux
 /// Returns Ok(Bpf) if successful, Err if not available or failed
 #[cfg(target_os = "linux")]
 fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
     use std::process::Command;
+    
+    // Check if eBPF binary is available (not empty placeholder)
+    if EBPF_PROGRAM.is_empty() {
+        anyhow::bail!("eBPF program not embedded (placeholder only)");
+    }
     
     // Check kernel version (need 5.4+ for good XDP support)
     let kernel_version = Command::new("uname")
@@ -70,25 +79,31 @@ fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
         anyhow::bail!("Interface {} not found", iface);
     }
     
-    // Try to load embedded eBPF program
-    // Note: In production, this would use include_bytes_aligned! macro
-    // For now, we check if the eBPF binary exists and is loadable
-    info!("Attempting to load XDP program on {}...", iface);
+    // Load embedded eBPF program
+    info!("Loading embedded XDP program ({} bytes)...", EBPF_PROGRAM.len());
+    let mut bpf = Bpf::load(EBPF_PROGRAM)
+        .context("Failed to load eBPF program")?;
     
-    // Placeholder: In production, use include_bytes_aligned!()
-    // let bpf_bytes = include_bytes_aligned!("path/to/omni-ebpf-core");
-    // let mut bpf = Bpf::load(bpf_bytes)?;
+    // Get and load the XDP program
+    let program: &mut Xdp = bpf.program_mut("xdp_synapse")
+        .context("xdp_synapse program not found")?
+        .try_into()
+        .context("Failed to cast to XDP program")?;
     
-    // For now, we'll just initialize BpfSync without actual XDP attachment
-    // The actual eBPF loading will be enabled once the program is compiled
-    anyhow::bail!("eBPF binary not embedded yet (build with cargo xtask build-ebpf)");
+    program.load()
+        .context("Failed to load XDP program into kernel")?;
     
-    // Uncomment when eBPF is ready:
-    // let program: &mut Xdp = bpf.program_mut("xdp_synapse")?;
-    // program.load()?;
-    // program.attach(iface, XdpFlags::default())?;
-    // bpf_sync.init_from_bpf(&mut bpf)?;
-    // Ok(bpf)
+    // Attach to interface
+    program.attach(iface, XdpFlags::default())
+        .context(format!("Failed to attach XDP to {}", iface))?;
+    
+    info!("XDP program attached to interface {}", iface);
+    
+    // Initialize BPF map sync
+    bpf_sync.init_from_bpf(&mut bpf)
+        .context("Failed to initialize BPF map sync")?;
+    
+    Ok(bpf)
 }
 
 #[derive(Parser, Debug)]
