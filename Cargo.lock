@@ -795,6 +795,7 @@ dependencies = [
  "indexmap",
  "log",
  "omni-common",
+ "poly1305",
  "rand",
  "serde",
  "sha2",
