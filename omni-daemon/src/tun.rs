@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use log::info;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use log::warn;
 use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
