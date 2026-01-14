@@ -612,124 +612,164 @@ async fn main() -> Result<()> {
                         
                         info!("Received {} bytes from {}", len, src);
                         
-                        // For initial handshake, check if this is a new connection
-                        // Client sends session_id in header (8 bytes)
+                        // All data/handshake packets start with 8-byte session_id
                         if len >= 8 {
-                            let client_session_id = u64::from_be_bytes([
+                            let session_id = u64::from_be_bytes([
                                 buf[0], buf[1], buf[2], buf[3],
                                 buf[4], buf[5], buf[6], buf[7]
                             ]);
                             
-                            // Use the client's session_id to ensure both sides match
-                            // This is the session_id the initiator will expect in responses
-                            let session_id = client_session_id;
-                            
-                            // Check if session exists, otherwise create a new one
-                            if session_manager.get_session_mut(session_id).is_none() {
-                                // Rate limiting check (use src.ip() for rate limiting)
-                                if !rate_limiter.allow_new_session(src.ip()) {
-                                    metrics.inc_ratelimit_drops();
-                                    warn!("Rate limited: {} (session {})", src.ip(), session_id);
-                                    continue;
-                                }
-                                
-                                match NoiseSession::new_responder(&identity.private_key, psk.as_ref()) {
-                                    Ok(new_session) => {
-                                        session_manager.create_session(session_id, SessionState::Handshaking(new_session));
-                                        rate_limiter.record_session_start(session_id);
-                                        metrics.inc_sessions();
-                                        info!("Created new session: {} from {}", session_id, src);
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to create session: {}", e);
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            // Advance handshake (skip 8-byte session header)
-                            // Store peer VIP from handshake payload
-                            let mut peer_vip_from_handshake: Option<std::net::Ipv4Addr> = None;
-                            
-                            match session_manager.advance_handshake(session_id, &buf[8..len]) {
-                                Ok(Some((response, peer_payload))) => {
-                                    // Extract peer VIP from payload (first 4 bytes)
-                                    if peer_payload.len() >= 4 {
-                                        peer_vip_from_handshake = Some(std::net::Ipv4Addr::new(
-                                            peer_payload[0], peer_payload[1], 
-                                            peer_payload[2], peer_payload[3]
-                                        ));
-                                    }
-                                    
-                                    let mut reply = session_id.to_be_bytes().to_vec();
-                                    reply.extend(response);
-                                    if let Err(e) = socket.send_to(&reply, src).await {
-                                        error!("Failed to send response: {}", e);
-                                    }
-                                }
-                                Ok(None) => {
-                                    warn!("Session {} not in handshaking state", session_id);
-                                }
-                                Err(e) => {
-                                    error!("Handshake error: {}", e);
-                                }
-                            }
-
-                            // Try to finalize
-                            if let Ok(true) = session_manager.finalize_session(session_id) {
-                                // Sync to BPF map
-                                let key = [0u8; 32]; // TODO: Extract from transport state
-                                if let Err(e) = bpf_sync.insert_session(session_id, key, src.ip(), src.port()) {
-                                    error!("BPF sync failed: {}", e);
-                                } else {
-                                    metrics.inc_handshakes_completed();
-                                    info!("Session {} finalized and synced to BPF!", session_id);
-                                }
-                                
-                                // Register peer with VIP from handshake (or fallback)
-                                let peer_vip = peer_vip_from_handshake.unwrap_or_else(|| {
-                                    // Fallback: check if peer already exists in table (from signaling)
-                                    if let Some(peer) = peer_table.lookup_by_session(session_id) {
-                                        peer.virtual_ip
-                                    } else {
-                                        // Last resort: derive from session (not ideal)
-                                        std::net::Ipv4Addr::new(10, 200, 0, ((session_id % 250) + 1) as u8)
-                                    }
+                            // Check session state to determine packet type
+                            let session_state = session_manager.get_session_mut(session_id)
+                                .map(|s| match s {
+                                    SessionState::Handshaking(_) => "handshaking",
+                                    SessionState::Active(_) => "active",
                                 });
-                                peer_table.upsert(peer_vip, session_id, src);
-                                info!("Registered peer: {} at {} (session {})", peer_vip, src, session_id);
-                            }
-                        } else if len > 8 {
-                            // Data packet with session_id header (8 bytes)
-                            // Format: [session_id(8)] [encrypted_payload]
-                            let session_id = u64::from_be_bytes([
-                                buf[0], buf[1], buf[2], buf[3], 
-                                buf[4], buf[5], buf[6], buf[7]
-                            ]);
                             
-                            if let Some(SessionState::Active(transport)) = session_manager.get_session_mut(session_id) {
-                                let mut decrypted = vec![0u8; len - 8];
-                                match transport.read_message(session_id, &buf[8..len], &mut decrypted) {
-                                    Ok(dec_len) => {
-                                        // Write decrypted IP packet to TUN
-                                        if let Some(ref mut tun) = _tun {
-                                            if let Err(e) = tun.write(&decrypted[..dec_len]).await {
-                                                error!("TUN write error: {}", e);
-                                            } else {
-                                                info!("UDP→TUN: {} bytes from session {}", dec_len, session_id);
+                            match session_state {
+                                Some("active") => {
+                                    // DATA PACKET: decrypt and forward to TUN
+                                    if let Some(SessionState::Active(transport)) = session_manager.get_session_mut(session_id) {
+                                        let mut decrypted = vec![0u8; len - 8];
+                                        match transport.read_message(session_id, &buf[8..len], &mut decrypted) {
+                                            Ok(dec_len) => {
+                                                // Write decrypted IP packet to TUN
+                                                if let Some(ref mut tun) = _tun {
+                                                    if let Err(e) = tun.write(&decrypted[..dec_len]).await {
+                                                        error!("TUN write error: {}", e);
+                                                    } else {
+                                                        info!("UDP→TUN: {} bytes from session {}", dec_len, session_id);
+                                                    }
+                                                }
+                                                
+                                                // Update peer last_seen
+                                                if let Some(peer) = peer_table.lookup_by_session(session_id) {
+                                                    let vip = peer.virtual_ip;
+                                                    peer_table.touch(&vip);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("Decryption failed: {}", e);
                                             }
                                         }
-                                        
-                                        // Update peer last_seen
-                                        if let Some(peer) = peer_table.lookup_by_session(session_id) {
-                                            let vip = peer.virtual_ip;
-                                            peer_table.touch(&vip);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Decryption failed: {}", e);
                                     }
                                 }
+                                Some("handshaking") => {
+                                    // HANDSHAKE PACKET: advance handshake state
+                                    let mut peer_vip_from_handshake: Option<std::net::Ipv4Addr> = None;
+                                    
+                                    match session_manager.advance_handshake(session_id, &buf[8..len]) {
+                                        Ok(Some((response, peer_payload))) => {
+                                            // Extract peer VIP from payload (first 4 bytes)
+                                            if peer_payload.len() >= 4 {
+                                                peer_vip_from_handshake = Some(std::net::Ipv4Addr::new(
+                                                    peer_payload[0], peer_payload[1], 
+                                                    peer_payload[2], peer_payload[3]
+                                                ));
+                                            }
+                                            
+                                            let mut reply = session_id.to_be_bytes().to_vec();
+                                            reply.extend(response);
+                                            if let Err(e) = socket.send_to(&reply, src).await {
+                                                error!("Failed to send response: {}", e);
+                                            }
+                                        }
+                                        Ok(None) => {
+                                            warn!("Session {} not in handshaking state", session_id);
+                                        }
+                                        Err(e) => {
+                                            error!("Handshake error: {}", e);
+                                        }
+                                    }
+
+                                    // Try to finalize
+                                    if let Ok(true) = session_manager.finalize_session(session_id) {
+                                        // Sync to BPF map
+                                        let key = [0u8; 32]; // TODO: Extract from transport state
+                                        if let Err(e) = bpf_sync.insert_session(session_id, key, src.ip(), src.port()) {
+                                            error!("BPF sync failed: {}", e);
+                                        } else {
+                                            metrics.inc_handshakes_completed();
+                                            info!("Session {} finalized and synced to BPF!", session_id);
+                                        }
+                                        
+                                        // Register peer with VIP from handshake (or fallback)
+                                        let peer_vip = peer_vip_from_handshake.unwrap_or_else(|| {
+                                            // Fallback: check if peer already exists in table (from signaling)
+                                            if let Some(peer) = peer_table.lookup_by_session(session_id) {
+                                                peer.virtual_ip
+                                            } else {
+                                                // Last resort: derive from session (not ideal)
+                                                std::net::Ipv4Addr::new(10, 200, 0, ((session_id % 250) + 1) as u8)
+                                            }
+                                        });
+                                        peer_table.upsert(peer_vip, session_id, src);
+                                        info!("Registered peer: {} at {} (session {})", peer_vip, src, session_id);
+                                    }
+                                }
+                                None => {
+                                    // NEW SESSION: create responder and start handshake
+                                    // Rate limiting check
+                                    if !rate_limiter.allow_new_session(src.ip()) {
+                                        metrics.inc_ratelimit_drops();
+                                        warn!("Rate limited: {} (session {})", src.ip(), session_id);
+                                        continue;
+                                    }
+                                    
+                                    match NoiseSession::new_responder(&identity.private_key, psk.as_ref()) {
+                                        Ok(new_session) => {
+                                            session_manager.create_session(session_id, SessionState::Handshaking(new_session));
+                                            rate_limiter.record_session_start(session_id);
+                                            metrics.inc_sessions();
+                                            info!("Created new session: {} from {}", session_id, src);
+                                            
+                                            // Process first handshake message
+                                            let mut peer_vip_from_handshake: Option<std::net::Ipv4Addr> = None;
+                                            
+                                            match session_manager.advance_handshake(session_id, &buf[8..len]) {
+                                                Ok(Some((response, peer_payload))) => {
+                                                    if peer_payload.len() >= 4 {
+                                                        peer_vip_from_handshake = Some(std::net::Ipv4Addr::new(
+                                                            peer_payload[0], peer_payload[1], 
+                                                            peer_payload[2], peer_payload[3]
+                                                        ));
+                                                    }
+                                                    
+                                                    let mut reply = session_id.to_be_bytes().to_vec();
+                                                    reply.extend(response);
+                                                    if let Err(e) = socket.send_to(&reply, src).await {
+                                                        error!("Failed to send response: {}", e);
+                                                    }
+                                                }
+                                                Ok(None) => {}
+                                                Err(e) => {
+                                                    error!("Handshake error: {}", e);
+                                                }
+                                            }
+                                            
+                                            // Try to finalize
+                                            if let Ok(true) = session_manager.finalize_session(session_id) {
+                                                let key = [0u8; 32];
+                                                if let Err(e) = bpf_sync.insert_session(session_id, key, src.ip(), src.port()) {
+                                                    error!("BPF sync failed: {}", e);
+                                                } else {
+                                                    metrics.inc_handshakes_completed();
+                                                    info!("Session {} finalized!", session_id);
+                                                }
+                                                
+                                                let peer_vip = peer_vip_from_handshake.unwrap_or_else(|| {
+                                                    std::net::Ipv4Addr::new(10, 200, 0, ((session_id % 250) + 1) as u8)
+                                                });
+                                                peer_table.upsert(peer_vip, session_id, src);
+                                                info!("Registered peer: {} at {} (session {})", peer_vip, src, session_id);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to create session: {}", e);
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
