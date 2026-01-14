@@ -143,12 +143,44 @@ To establish a link between two remote devices (e.g., Robot A and Cloud Node B):
     - **Peer B**: `./omni-daemon --peer <PUBKEY_A> --endpoint <IP_A>:51820`
 3.  **Verification**: Once the Noise handshake completes, Ping the virtual L2 addresses.
 
-#### 📡 The Nucleus (Rendezvous Server)
+#### 📡 The Nucleus (Signaling Server)
 
 OmniNervous uses a **Nucleus** to facilitate connectivity behind NAT/Firewalls:
 - Unlike an L3 VPN, the Nucleus only handles **Signaling** (discovery and hole-punching).
 - Data traffic is strictly **P2P** via the Synapse engine.
-- If P2P is impossible, the Nucleus can act as a fallback relay (Transparent L2 Relay).
+- Designed to scale to **1000+ edges per cluster** with on-demand peer discovery.
+
+**Signaling Protocol:**
+
+| Message | Direction | Purpose |
+|:---|:---:|:---|
+| `REGISTER` → `REGISTER_ACK` | Edge ↔ Nucleus | Join cluster, receive recent peers (last 90s) |
+| `HEARTBEAT` → `HEARTBEAT_ACK` | Edge ↔ Nucleus | Keep-alive, receive delta (new/left peers) |
+| `QUERY_PEER` → `PEER_INFO` | Edge ↔ Nucleus | On-demand O(1) VIP lookup |
+
+```mermaid
+sequenceDiagram
+    participant A as Edge A
+    participant N as Nucleus
+    participant B as Edge B
+    
+    A->>N: REGISTER (vip, pubkey)
+    N-->>A: REGISTER_ACK (recent peers)
+    B->>N: REGISTER (vip, pubkey)
+    N-->>B: REGISTER_ACK (includes A)
+    B-->>A: Noise IK Handshake
+    A-->>B: Encrypted P2P Traffic
+    
+    loop Every 30s
+        A->>N: HEARTBEAT
+        N-->>A: HEARTBEAT_ACK (delta)
+    end
+```
+
+**Scalability:**
+- Full peer list is **never sent** (prevents O(n²) explosion)
+- Delta updates only include changes since last heartbeat
+- On-demand `QUERY_PEER` for unknown VIPs
 
 #### 🧪 Local Cluster Simulation (Docker)
 

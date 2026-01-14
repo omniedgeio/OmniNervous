@@ -65,9 +65,53 @@ OmniNervous is a high-performance, identity-driven Layer 2 VPN protocol designed
 
 **Ganglion** (Control): Handles handshakes, session management, STUN
 **Synapse** (Data): XDP program for wire-speed packet processing
-**Nucleus**: Signaling server for NAT traversal (optional relay)
+**Nucleus**: Scalable signaling server for NAT traversal (no relay, pure rendezvous)
 
-### 2.2 Protocol Stack
+### 2.2 Nucleus Signaling Protocol
+
+The Nucleus implements a **scalable signaling protocol** designed for 1000+ edges per cluster:
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    NUCLEUS                           │
+│                                                      │
+│   Cluster "robotics" → HashMap<VIP, Peer>  O(1)     │
+│   Cluster "factory"  → HashMap<VIP, Peer>  O(1)     │
+└─────────────────────────────────────────────────────┘
+         ▲                    ▲                    ▲
+         │                    │                    │
+    REGISTER            HEARTBEAT            QUERY_PEER
+         │                    │                    │
+         ▼                    ▼                    ▼
+   REGISTER_ACK          HEARTBEAT_ACK        PEER_INFO
+   (recent peers)        (delta updates)      (single peer)
+```
+
+**Message Types:**
+
+| Message | Direction | Payload |
+|:---|:---:|:---|
+| `REGISTER` | Edge → Nucleus | cluster, VIP, port, public_key |
+| `REGISTER_ACK` | Nucleus → Edge | success, recent_peers (last 90s) |
+| `HEARTBEAT` | Edge → Nucleus | cluster, VIP, peer_count |
+| `HEARTBEAT_ACK` | Nucleus → Edge | new_peers[], removed_vips[] |
+| `QUERY_PEER` | Edge → Nucleus | cluster, target_VIP |
+| `PEER_INFO` | Nucleus → Edge | found, peer (VIP, endpoint, pubkey) |
+
+**Scalability Guarantees:**
+- **O(1) lookup**: VIP-indexed HashMap per cluster
+- **No full list**: Never sends entire peer list (prevents O(n²))
+- **Delta updates**: Only new joins and departures since last heartbeat
+- **On-demand discovery**: Query specific VIP when needed
+
+**Bandwidth Analysis (1000 edges):**
+
+| Approach | Traffic per Heartbeat Cycle |
+|:---|---:|
+| Push full list | 60 GB/30s ❌ |
+| Delta updates | ~100 KB/30s ✅ |
+
+### 2.3 Protocol Stack
 
 ```
 ┌──────────────────────────────────────┐
@@ -169,19 +213,31 @@ Initiator (I)             Responder (R)
 
 ### 5.2 Fleet Scalability
 
-```
-Traditional Hub-and-Spoke:
-       ┌───────┐
-       │ Relay │  ← Bottleneck
-       └───┬───┘
-     ┌─────┼─────┐
-   Robot Robot Robot
+**Architecture: Nucleus + P2P Mesh**
 
-OmniNervous P2P Mesh:
-   Robot ←→ Robot
-     ↑       ↓
-   Robot ←→ Robot   ← Direct encrypted links
 ```
+Traditional Hub-and-Spoke:          OmniNervous P2P Mesh:
+       ┌───────┐                       Robot ←→ Robot
+       │ Relay │  ← Bottleneck           ↑       ↓
+       └───┬───┘                       Robot ←→ Robot
+     ┌─────┼─────┐                       Direct encrypted links
+   Robot Robot Robot
+```
+
+**Scalability by Cluster Size:**
+
+| Cluster Size | Signaling Overhead | P2P Connections |
+|:---:|:---:|:---:|
+| 10 edges | ~1 KB/30s | Up to 45 |
+| 100 edges | ~10 KB/30s | Up to 4,950 |
+| 1,000 edges | ~100 KB/30s | Up to 499,500 |
+| 10,000 edges | ~1 MB/30s | On-demand only |
+
+**Key Design Decisions:**
+1. **Delta-only updates**: New peer notifications, not full lists
+2. **On-demand queries**: `QUERY_PEER` for unknown VIPs
+3. **VIP-indexed lookup**: O(1) routing at Nucleus and Edge
+4. **Cluster isolation**: Separate peer tables per cluster
 
 ---
 
