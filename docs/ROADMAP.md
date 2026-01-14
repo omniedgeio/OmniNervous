@@ -19,19 +19,19 @@
 - [x] Cluster secret authentication (Noise PSK)
 - [x] P2P discovery
 
-## Phase 4: Virtual Interface 🔄 (In Progress)
-- [ ] Cross-platform TAP (Layer 2)
+## Phase 4: Virtual Interface ✅
+- [x] Cross-platform TUN (tun2 crate)
   - Linux: `/dev/net/tun`
-  - macOS: `feth` + `utun`
-  - Windows: `tap-windows6`
-- [ ] Virtual IP assignment (`--vip`)
-- [ ] Ethernet frame routing
-- [ ] FDB learning & forwarding
+  - macOS: utun (native)
+  - Windows: Wintun
+- [x] Virtual IP assignment (`--vip`)
+- [ ] FDB learning & forwarding (TODO)
+- [ ] TAP/Layer 2 for Windows (TODO: tap-windows6)
 
-## Phase 5: Cloud Testing
-- [ ] 3-node cloud_test.sh (Nucleus + 2 Edges)
-- [ ] P2P tunnel throughput benchmarks
+## Phase 5: Cloud Testing 🔄
+- [x] 3-node cloud_test.sh (Nucleus + 2 Edges)
 - [ ] Real-world WAN testing
+- [ ] P2P tunnel throughput benchmarks
 
 ---
 
@@ -64,8 +64,8 @@
 - [ ] Multi-GPU pooling support
 
 **Dependencies**: 
-- Phase 4 (TAP interface) required
-- eBPF for low-latency memory transfers
+- Phase 4 (TUN interface) required ✅
+- eBPF for low-latency memory transfers ✅
 
 ---
 
