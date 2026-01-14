@@ -187,6 +187,10 @@ async fn main() -> Result<()> {
     let mut rate_limiter = RateLimiter::new(RateLimitConfig::default());
     let metrics = Metrics::new();
     let mut bpf_sync = BpfSync::new();
+    let mut peer_table = peers::PeerTable::new();
+    
+    // Our virtual IP (if assigned)
+    let our_vip = args.vip;
     
     // Try to load eBPF/XDP on Linux if not disabled
     #[cfg(target_os = "linux")]
@@ -296,17 +300,45 @@ async fn main() -> Result<()> {
             tun_result = tun_read => {
                 match tun_result {
                     Ok(len) if len > 0 => {
-                        // IP packet from local TUN: needs encryption + send to peer
-                        // For now, just log - full encryption requires peer lookup
+                        // IP packet from local TUN: encrypt + send to peer
                         let ip_version = (tun_buf[0] >> 4) & 0xF;
                         if ip_version == 4 && len >= 20 {
                             let dst_ip = std::net::Ipv4Addr::new(
                                 tun_buf[16], tun_buf[17], tun_buf[18], tun_buf[19]
                             );
-                            info!("TUN→ IP packet: {} bytes to {}", len, dst_ip);
-                            // TODO: Lookup peer by dst_ip, encrypt with session key, send via UDP
-                        } else {
-                            info!("TUN→ Non-IPv4 packet: {} bytes", len);
+                            
+                            // Lookup peer by destination VIP
+                            if let Some(peer) = peer_table.lookup_by_vip(&dst_ip) {
+                                // Get session for encryption
+                                if let Some(SessionState::Active(transport)) = session_manager.get_session_mut(peer.session_id) {
+                                    // Encrypt packet: [session_id(8)] [nonce(8)] [encrypted_data] [tag(16)]
+                                    let mut nonce_counter = [0u8; 8];
+                                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce_counter);
+                                    
+                                    let mut encrypted = vec![0u8; len + 16]; // 16 bytes for tag
+                                    match transport.write_message(peer.session_id, &tun_buf[..len], &mut encrypted) {
+                                        Ok(enc_len) => {
+                                            // Build packet: session_id + encrypted
+                                            let mut packet = peer.session_id.to_be_bytes().to_vec();
+                                            packet.extend_from_slice(&encrypted[..enc_len]);
+                                            
+                                            if let Err(e) = socket.send_to(&packet, peer.endpoint).await {
+                                                error!("Failed to send encrypted packet: {}", e);
+                                            } else {
+                                                metrics.inc_packets_tx();
+                                                info!("TUN→UDP: {} bytes to {} (session {})", len, dst_ip, peer.session_id);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("Encryption failed: {}", e);
+                                        }
+                                    }
+                                } else {
+                                    warn!("No active session for peer {} (session {})", dst_ip, peer.session_id);
+                                }
+                            } else {
+                                // No peer for this IP - drop silently (normal for broadcast/unknown)
+                            }
                         }
                     }
                     Ok(_) => {} // Zero-length read, ignore
