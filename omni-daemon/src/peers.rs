@@ -16,8 +16,12 @@ pub struct PeerInfo {
     pub endpoint: SocketAddr,
     /// Peer's virtual IP
     pub virtual_ip: Ipv4Addr,
+    /// Peer's X25519 public key (for Noise handshake)
+    pub public_key: Option<[u8; 32]>,
     /// Last activity time
     pub last_seen: Instant,
+    /// Whether handshake has been initiated to this peer
+    pub handshake_initiated: bool,
 }
 
 /// Peer routing table
@@ -39,13 +43,15 @@ impl PeerTable {
         }
     }
     
-    /// Add or update a peer
+    /// Add or update a peer (without public key - for handshake completion)
     pub fn upsert(&mut self, virtual_ip: Ipv4Addr, session_id: u64, endpoint: SocketAddr) {
         let peer = PeerInfo {
             session_id,
             endpoint,
             virtual_ip,
+            public_key: None,
             last_seen: Instant::now(),
+            handshake_initiated: false,
         };
         
         // Remove old session mapping if VIP was mapped to different session
@@ -61,10 +67,43 @@ impl PeerTable {
         info!("Peer registered: {} → {} (session {})", virtual_ip, endpoint, session_id);
     }
     
-    /// Register a peer from signaling (includes public key, though not stored yet)
-    pub fn register(&mut self, _public_key: [u8; 32], endpoint: SocketAddr, vip: Ipv4Addr, session_id: u64) {
-        // For now, just call upsert - public_key storage can be added later
-        self.upsert(vip, session_id, endpoint);
+    /// Register a peer from signaling (includes public key for handshake)
+    pub fn register(&mut self, public_key: [u8; 32], endpoint: SocketAddr, vip: Ipv4Addr, session_id: u64) {
+        let peer = PeerInfo {
+            session_id,
+            endpoint,
+            virtual_ip: vip,
+            public_key: Some(public_key),
+            last_seen: Instant::now(),
+            handshake_initiated: false,
+        };
+        
+        // Remove old session mapping if VIP was mapped to different session
+        if let Some(old) = self.by_vip.get(&vip) {
+            if old.session_id != session_id {
+                self.by_session.remove(&old.session_id);
+            }
+        }
+        
+        self.by_vip.insert(vip, peer);
+        self.by_session.insert(session_id, vip);
+        
+        info!("Peer registered from signaling: {} → {} (session {})", vip, endpoint, session_id);
+    }
+    
+    /// Mark peer as handshake initiated
+    pub fn mark_handshake_initiated(&mut self, vip: &Ipv4Addr) {
+        if let Some(peer) = self.by_vip.get_mut(vip) {
+            peer.handshake_initiated = true;
+        }
+    }
+    
+    /// Get peers that need handshake initiation
+    pub fn peers_needing_handshake(&self) -> Vec<PeerInfo> {
+        self.by_vip.values()
+            .filter(|p| p.public_key.is_some() && !p.handshake_initiated)
+            .cloned()
+            .collect()
     }
     
     /// Lookup peer by virtual IP

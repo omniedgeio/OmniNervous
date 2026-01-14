@@ -66,10 +66,11 @@ impl SessionManager {
     }
 
     /// Advance the handshake for a given session.
-    pub fn advance_handshake(&mut self, session_id: u64, message: &[u8]) -> Result<Option<Vec<u8>>> {
+    /// Returns (response_to_send, peer_payload) where peer_payload may contain VIP
+    pub fn advance_handshake(&mut self, session_id: u64, message: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         if let Some(SessionState::Handshaking(ref mut session)) = self.sessions.get_mut(&session_id) {
-            let response = session.process_handshake(message)?;
-            Ok(Some(response))
+            let (response, peer_payload) = session.process_handshake_with_payload(message)?;
+            Ok(Some((response, peer_payload)))
         } else {
             Ok(None)
         }
