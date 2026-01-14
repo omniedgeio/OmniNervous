@@ -24,6 +24,7 @@ mod http;
 mod nonce;
 mod crypto_util;
 mod poly1305;
+mod tun;
 
 use noise::NoiseSession;
 use session::{SessionManager, SessionState};
@@ -129,6 +130,12 @@ struct Args {
     config: Option<std::path::PathBuf>,
     #[arg(long, help = "Disable eBPF/XDP acceleration (Linux only)")]
     no_ebpf: bool,
+    #[arg(long, help = "Virtual IP address (e.g., 10.200.0.1)")]
+    vip: Option<std::net::Ipv4Addr>,
+    #[arg(long, default_value = "255.255.255.0", help = "Virtual network mask")]
+    netmask: std::net::Ipv4Addr,
+    #[arg(long, default_value = "omni0", help = "Virtual interface name")]
+    tun_name: String,
 }
 
 #[tokio::main]

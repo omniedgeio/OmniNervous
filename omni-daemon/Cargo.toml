@@ -22,6 +22,8 @@ poly1305 = "0.8"
 hyper = { version = "1.5", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+tun2 = { version = "1", features = ["async"] }
+libc = "0.2"
 
 # Non-Linux: omni-common without aya
 [target.'cfg(not(target_os = "linux"))'.dependencies]
