@@ -120,4 +120,9 @@ impl Identity {
             .collect::<Vec<_>>()
             .join("")
     }
+
+    /// Get raw public key bytes.
+    pub fn public_key_bytes(&self) -> [u8; 32] {
+        self.public_key
+    }
 }

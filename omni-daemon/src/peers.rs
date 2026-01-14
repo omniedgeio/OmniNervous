@@ -61,6 +61,12 @@ impl PeerTable {
         info!("Peer registered: {} → {} (session {})", virtual_ip, endpoint, session_id);
     }
     
+    /// Register a peer from signaling (includes public key, though not stored yet)
+    pub fn register(&mut self, _public_key: [u8; 32], endpoint: SocketAddr, vip: Ipv4Addr, session_id: u64) {
+        // For now, just call upsert - public_key storage can be added later
+        self.upsert(vip, session_id, endpoint);
+    }
+    
     /// Lookup peer by virtual IP
     pub fn lookup_by_vip(&self, vip: &Ipv4Addr) -> Option<&PeerInfo> {
         self.by_vip.get(vip)
