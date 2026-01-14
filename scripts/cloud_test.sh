@@ -247,6 +247,28 @@ run_test() {
     print_step "Waiting for P2P tunnel establishment..."
     sleep 5
     
+    # Check if daemons are running
+    print_step "Checking daemon processes..."
+    echo "Nucleus process:"
+    ssh_cmd "$NUCLEUS" "pgrep -a omni-daemon || echo 'NOT RUNNING'"
+    echo "Edge A process:"
+    ssh_cmd "$NODE_A" "pgrep -a omni-daemon || echo 'NOT RUNNING'"
+    echo "Edge B process:"
+    ssh_cmd "$NODE_B" "pgrep -a omni-daemon || echo 'NOT RUNNING'"
+    echo ""
+    
+    # Show logs for debugging
+    print_step "Daemon logs (last 10 lines)..."
+    echo "--- Nucleus log ---"
+    ssh_cmd "$NUCLEUS" "tail -10 ~/omni-test/nucleus.log 2>/dev/null || echo 'No log'"
+    echo ""
+    echo "--- Edge A log ---"
+    ssh_cmd "$NODE_A" "tail -10 ~/omni-test/edge_a.log 2>/dev/null || echo 'No log'"
+    echo ""
+    echo "--- Edge B log ---"
+    ssh_cmd "$NODE_B" "tail -10 ~/omni-test/edge_b.log 2>/dev/null || echo 'No log'"
+    echo ""
+    
     # Check interfaces on edges
     print_step "Verifying TUN interfaces..."
     echo "Edge A interfaces:"
