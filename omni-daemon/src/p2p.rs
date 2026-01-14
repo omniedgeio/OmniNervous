@@ -16,9 +16,16 @@ pub struct StunClient {
 }
 
 impl StunClient {
-    pub fn new(stun_server: &str) -> Result<Self> {
-        let addr: SocketAddr = stun_server.parse()
-            .context("Invalid STUN server address")?;
+    pub async fn new(stun_server: &str) -> Result<Self> {
+        // Use tokio DNS lookup to support hostnames like stun.l.google.com:19302
+        use tokio::net::lookup_host;
+        
+        let addr = lookup_host(stun_server)
+            .await
+            .context("Failed to resolve STUN server hostname")?
+            .next()
+            .context("No addresses found for STUN server")?;
+        
         Ok(Self { stun_server: addr })
     }
 
@@ -115,10 +122,11 @@ pub struct P2PDiscovery {
 }
 
 impl P2PDiscovery {
-    pub fn new(stun_server: Option<&str>) -> Result<Self> {
-        let stun_client = stun_server
-            .map(StunClient::new)
-            .transpose()?;
+    pub async fn new(stun_server: Option<&str>) -> Result<Self> {
+        let stun_client = match stun_server {
+            Some(server) => Some(StunClient::new(server).await?),
+            None => None,
+        };
         Ok(Self {
             stun_client,
             local_endpoint: None,
