@@ -208,6 +208,38 @@ async fn main() -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     info!("Running on non-Linux platform, using userspace processing");
     
+    // Create virtual interface if VIP is specified
+    let _tun = if let Some(vip) = args.vip {
+        // Check permissions first
+        if let Err(e) = tun::check_tun_permissions() {
+            warn!("TUN permission check: {}", e);
+        }
+        
+        let tun_config = tun::TunConfig {
+            name: args.tun_name.clone(),
+            address: vip,
+            netmask: args.netmask,
+            mtu: 1420,
+        };
+        
+        match tun::VirtualInterface::create(tun_config).await {
+            Ok(tun) => {
+                info!("✅ Virtual interface '{}' active with IP {}", tun.name(), tun.address());
+                Some(tun)
+            }
+            Err(e) => {
+                error!("Failed to create TUN interface: {}", e);
+                error!("   Ensure you have root/admin privileges");
+                #[cfg(target_os = "windows")]
+                error!("   Windows: Ensure wintun.dll is in the same directory");
+                None
+            }
+        }
+    } else {
+        info!("No --vip specified, running without virtual interface");
+        None
+    };
+    
     // Cleanup interval - runs every 60 seconds
     let mut cleanup_interval = interval(Duration::from_secs(60));
 
