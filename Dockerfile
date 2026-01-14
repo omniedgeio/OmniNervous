@@ -19,8 +19,11 @@ RUN mkdir -p omni-daemon/src omni-common/src omni-ebpf/omni-ebpf-core/src && \
     echo "#![no_std]" > omni-ebpf/omni-ebpf-core/src/lib.rs && \
     echo "#![no_std] #![no_main] fn main() {}" > omni-ebpf/omni-ebpf-core/src/main.rs
 
+# Create placeholder eBPF binary (for include_bytes! in main.rs)
+RUN mkdir -p omni-daemon/ebpf && \
+    echo "PLACEHOLDER_EBPF_BINARY" > omni-daemon/ebpf/omni-ebpf-core
+
 # Build dependencies only (this layer is cached)
-# Note: omni-ebpf won't build without aya, that's OK - we only need omni-daemon
 RUN cargo build -p omni-daemon --release 2>/dev/null || true
 
 # Copy actual source code

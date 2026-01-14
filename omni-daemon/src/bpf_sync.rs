@@ -3,13 +3,22 @@ use anyhow::Result;
 use anyhow::Context;
 use log::info;
 #[cfg(target_os = "linux")]
-use omni_common::SessionKey;
-use omni_common::SessionEntry;
+use omni_common::{SessionKey, SessionEntry};
 use std::collections::HashMap;
 use std::net::IpAddr;
 
 #[cfg(target_os = "linux")]
 use aya::maps::HashMap as BpfHashMap;
+
+/// Local SessionEntry for non-Linux platforms (mirrors omni_common::SessionEntry)
+#[cfg(not(target_os = "linux"))]
+#[derive(Clone, Copy, Debug)]
+pub struct SessionEntry {
+    pub key: [u8; 32],
+    pub remote_addr: [u8; 16],
+    pub remote_port: u16,
+    pub last_seq: u64,
+}
 
 /// Manages synchronization between userspace sessions and BPF maps.
 /// 
