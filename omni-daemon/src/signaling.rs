@@ -1,13 +1,15 @@
-//! Nucleus Signaling Protocol
+//! Nucleus Signaling Protocol - Scalable for 1000+ Edges
 //!
-//! Simple UDP-based signaling for P2P VPN peer discovery.
-//! Nucleus acts as a rendezvous server (like n2n supernode) - does NOT
-//! store or validate public keys. Authentication happens edge-to-edge.
+//! On-demand peer discovery with delta updates.
+//! Nucleus acts as a VIP → endpoint registry (like DNS for VPN).
 //!
-//! Message Format (all messages are CBOR-encoded):
-//! - REGISTER: Edge → Nucleus (join cluster with VIP + endpoint)
-//! - PEER_LIST: Nucleus → Edge (list of peers in cluster)
+//! Message Types:
+//! - REGISTER: Edge → Nucleus (join cluster)
+//! - REGISTER_ACK: Nucleus → Edge (confirm + recent peers)
 //! - HEARTBEAT: Edge → Nucleus (keep alive)
+//! - HEARTBEAT_ACK: Nucleus → Edge (delta: new joins/leaves)
+//! - QUERY_PEER: Edge → Nucleus (lookup specific VIP)
+//! - PEER_INFO: Nucleus → Edge (VIP → endpoint mapping)
 
 use anyhow::{Context, Result};
 use log::{info, warn, debug};
@@ -19,92 +21,135 @@ use tokio::net::UdpSocket;
 
 /// Message types for signaling protocol
 const MSG_REGISTER: u8 = 0x01;
-const MSG_PEER_LIST: u8 = 0x02;
+const MSG_REGISTER_ACK: u8 = 0x02;
 const MSG_HEARTBEAT: u8 = 0x03;
+const MSG_HEARTBEAT_ACK: u8 = 0x04;
+const MSG_QUERY_PEER: u8 = 0x05;
+const MSG_PEER_INFO: u8 = 0x06;
 #[allow(dead_code)]
-const MSG_DEREGISTER: u8 = 0x04;
+const MSG_DEREGISTER: u8 = 0x07;
+
+/// How long peers stay in "recent" list for delta updates
+const RECENT_PEER_WINDOW_SECS: u64 = 90; // 3x heartbeat interval
 
 /// Registration message from Edge to Nucleus
-/// NOTE: Nucleus uses VIP as peer identifier (like n2n uses MAC)
-/// Public key is passed through to other edges but NOT validated by Nucleus
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RegisterMessage {
     pub cluster: String,
-    pub vip: Ipv4Addr,           // Primary identifier (like MAC in n2n)
+    pub vip: Ipv4Addr,
     pub listen_port: u16,
-    pub public_key: [u8; 32],    // Passed through for edge-to-edge auth
+    pub public_key: [u8; 32],
 }
 
-/// Peer info broadcast from Nucleus to Edges
-/// Contains everything an edge needs to connect to another edge
+/// Registration acknowledgment (includes recent peers for initial discovery)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RegisterAckMessage {
+    pub success: bool,
+    pub recent_peers: Vec<PeerInfo>,  // Peers that joined in last 90s
+}
+
+/// Heartbeat from Edge to Nucleus
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HeartbeatMessage {
+    pub cluster: String,
+    pub vip: Ipv4Addr,
+    pub last_seen_count: u32,  // Number of peers edge knows about
+}
+
+/// Heartbeat acknowledgment with delta updates
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HeartbeatAckMessage {
+    pub new_peers: Vec<PeerInfo>,      // Joined since last heartbeat
+    pub removed_vips: Vec<Ipv4Addr>,   // Left since last heartbeat
+}
+
+/// Query for a specific peer by VIP
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QueryPeerMessage {
+    pub cluster: String,
+    pub target_vip: Ipv4Addr,
+    pub requester_vip: Ipv4Addr,
+}
+
+/// Peer info response (single peer)
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeerInfo {
     pub vip: Ipv4Addr,
     pub endpoint: String,        // "ip:port"
-    pub public_key: [u8; 32],    // For edge-to-edge Noise handshake
+    pub public_key: [u8; 32],
 }
 
-/// Peer list message from Nucleus
+/// Response to QUERY_PEER
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PeerListMessage {
-    pub peers: Vec<PeerInfo>,
+pub struct PeerInfoMessage {
+    pub found: bool,
+    pub peer: Option<PeerInfo>,
 }
 
-/// Heartbeat/keepalive - uses VIP as identifier (not pubkey)
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct HeartbeatMessage {
-    pub cluster: String,
-    pub vip: Ipv4Addr,           // Identifies which peer is alive
-}
-
-/// Registered peer on Nucleus
-/// Nucleus stores minimal info - just enough for routing/relay
-/// No cryptographic validation - that's edge-to-edge
+/// Registered peer on Nucleus with join time tracking
 #[derive(Debug, Clone)]
 pub struct RegisteredPeer {
-    pub vip: Ipv4Addr,           // Primary identifier
-    pub endpoint: SocketAddr,     // Where to reach this peer
+    pub vip: Ipv4Addr,
+    pub endpoint: SocketAddr,
     pub listen_port: u16,
-    pub public_key: [u8; 32],    // Passed through, not validated
+    pub public_key: [u8; 32],
+    pub joined_at: Instant,      // For "recent peers" calculation
     pub last_seen: Instant,
 }
 
+/// Recently removed peer (for delta updates)
+#[derive(Debug, Clone)]
+struct RemovedPeer {
+    pub vip: Ipv4Addr,
+    pub removed_at: Instant,
+}
+
+/// Per-cluster state
+#[derive(Default)]
+struct ClusterState {
+    /// VIP → peer info (O(1) lookup for QUERY_PEER)
+    peers: HashMap<Ipv4Addr, RegisteredPeer>,
+    /// Recently removed peers for delta updates
+    removed: Vec<RemovedPeer>,
+}
+
 /// Nucleus state - manages registered peers by cluster
-/// Acts as simple rendezvous server (like n2n supernode)
+/// Optimized for 1000+ edges per cluster
 #[derive(Default)]
 pub struct NucleusState {
-    /// cluster_name -> list of registered peers
-    peers: HashMap<String, Vec<RegisteredPeer>>,
+    clusters: HashMap<String, ClusterState>,
 }
 
 impl NucleusState {
     pub fn new() -> Self {
-        Self { peers: HashMap::new() }
+        Self { clusters: HashMap::new() }
     }
 
-    /// Register or update a peer (identified by VIP, not pubkey)
-    pub fn register(&mut self, cluster: &str, peer: RegisteredPeer) {
-        let peers = self.peers.entry(cluster.to_string()).or_default();
+    /// Register or update a peer
+    pub fn register(&mut self, cluster: &str, peer: RegisteredPeer) -> Vec<PeerInfo> {
+        let state = self.clusters.entry(cluster.to_string()).or_default();
+        let is_new = !state.peers.contains_key(&peer.vip);
         
-        // Find by VIP (like n2n uses MAC as identifier)
-        if let Some(existing) = peers.iter_mut().find(|p| p.vip == peer.vip) {
-            existing.endpoint = peer.endpoint;
-            existing.listen_port = peer.listen_port;
-            existing.public_key = peer.public_key; // Pass through updated key
-            existing.last_seen = Instant::now();
-            info!("Updated peer {} at {} in cluster '{}'", peer.vip, peer.endpoint, cluster);
+        if is_new {
+            info!("New peer {} at {} in cluster '{}'", peer.vip, peer.endpoint, cluster);
         } else {
-            info!("Registered new peer {} at {} in cluster '{}'", peer.vip, peer.endpoint, cluster);
-            peers.push(peer);
+            debug!("Updated peer {} in cluster '{}'", peer.vip, cluster);
         }
+        
+        state.peers.insert(peer.vip, peer.clone());
+        
+        // Return recent peers (joined in last RECENT_PEER_WINDOW_SECS)
+        self.get_recent_peers(cluster, peer.vip)
     }
 
-    /// Get all peers in a cluster (except the requester, identified by VIP)
-    pub fn get_peers(&self, cluster: &str, exclude_vip: Ipv4Addr) -> Vec<PeerInfo> {
-        self.peers.get(cluster)
-            .map(|peers| {
-                peers.iter()
-                    .filter(|p| p.vip != exclude_vip)
+    /// Get peers that joined recently (for REGISTER_ACK)
+    fn get_recent_peers(&self, cluster: &str, exclude_vip: Ipv4Addr) -> Vec<PeerInfo> {
+        let window = Duration::from_secs(RECENT_PEER_WINDOW_SECS);
+        
+        self.clusters.get(cluster)
+            .map(|state| {
+                state.peers.values()
+                    .filter(|p| p.vip != exclude_vip && p.joined_at.elapsed() < window)
                     .map(|p| PeerInfo {
                         vip: p.vip,
                         endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
@@ -115,32 +160,82 @@ impl NucleusState {
             .unwrap_or_default()
     }
 
-    /// Update heartbeat (identified by VIP)
-    pub fn heartbeat(&mut self, cluster: &str, vip: Ipv4Addr) {
-        if let Some(peers) = self.peers.get_mut(cluster) {
-            if let Some(peer) = peers.iter_mut().find(|p| p.vip == vip) {
-                peer.last_seen = Instant::now();
-                debug!("Heartbeat from {}", vip);
-            }
+    /// Update heartbeat and return delta (new peers + removed peers)
+    pub fn heartbeat(&mut self, cluster: &str, vip: Ipv4Addr, last_heartbeat_time: Option<Instant>) 
+        -> (Vec<PeerInfo>, Vec<Ipv4Addr>) 
+    {
+        let state = match self.clusters.get_mut(cluster) {
+            Some(s) => s,
+            None => return (vec![], vec![]),
+        };
+        
+        // Update last_seen
+        if let Some(peer) = state.peers.get_mut(&vip) {
+            peer.last_seen = Instant::now();
         }
+        
+        // Calculate delta since last heartbeat (or last 30s if unknown)
+        let since = last_heartbeat_time.unwrap_or_else(|| Instant::now() - Duration::from_secs(30));
+        
+        // New peers since last heartbeat
+        let new_peers: Vec<PeerInfo> = state.peers.values()
+            .filter(|p| p.vip != vip && p.joined_at > since)
+            .map(|p| PeerInfo {
+                vip: p.vip,
+                endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
+                public_key: p.public_key,
+            })
+            .collect();
+        
+        // Removed peers since last heartbeat
+        let removed_vips: Vec<Ipv4Addr> = state.removed.iter()
+            .filter(|r| r.removed_at > since)
+            .map(|r| r.vip)
+            .collect();
+        
+        (new_peers, removed_vips)
+    }
+
+    /// Lookup a specific peer by VIP (O(1))
+    pub fn query_peer(&self, cluster: &str, vip: Ipv4Addr) -> Option<PeerInfo> {
+        self.clusters.get(cluster)
+            .and_then(|state| state.peers.get(&vip))
+            .map(|p| PeerInfo {
+                vip: p.vip,
+                endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
+                public_key: p.public_key,
+            })
     }
 
     /// Remove stale peers (no heartbeat for > 60 seconds)
     pub fn cleanup(&mut self) {
         let timeout = Duration::from_secs(60);
-        for (cluster, peers) in self.peers.iter_mut() {
-            let before = peers.len();
-            peers.retain(|p| p.last_seen.elapsed() < timeout);
-            let removed = before - peers.len();
-            if removed > 0 {
-                info!("Removed {} stale peers from cluster '{}'", removed, cluster);
+        let removal_retention = Duration::from_secs(RECENT_PEER_WINDOW_SECS);
+        
+        for (cluster, state) in self.clusters.iter_mut() {
+            // Find and remove stale peers
+            let stale: Vec<Ipv4Addr> = state.peers.iter()
+                .filter(|(_, p)| p.last_seen.elapsed() > timeout)
+                .map(|(vip, _)| *vip)
+                .collect();
+            
+            for vip in stale {
+                state.peers.remove(&vip);
+                state.removed.push(RemovedPeer {
+                    vip,
+                    removed_at: Instant::now(),
+                });
+                info!("Removed stale peer {} from cluster '{}'", vip, cluster);
             }
+            
+            // Cleanup old removal records
+            state.removed.retain(|r| r.removed_at.elapsed() < removal_retention);
         }
     }
 
     /// Total registered peers
     pub fn peer_count(&self) -> usize {
-        self.peers.values().map(|v| v.len()).sum()
+        self.clusters.values().map(|s| s.peers.len()).sum()
     }
 }
 
@@ -154,7 +249,6 @@ pub fn encode_message(msg_type: u8, payload: &impl Serialize) -> Result<Vec<u8>>
 }
 
 /// Handle incoming signaling message (Nucleus side)
-/// Nucleus just relays peer info - no crypto validation
 pub fn handle_nucleus_message(
     state: &mut NucleusState,
     data: &[u8],
@@ -175,15 +269,17 @@ pub fn handle_nucleus_message(
                         vip: reg.vip,
                         endpoint: src,
                         listen_port: reg.listen_port,
-                        public_key: reg.public_key, // Pass through, don't validate
+                        public_key: reg.public_key,
+                        joined_at: Instant::now(),
                         last_seen: Instant::now(),
                     };
-                    state.register(&reg.cluster, peer);
-
-                    // Send back peer list (exclude self by VIP)
-                    let peers = state.get_peers(&reg.cluster, reg.vip);
-                    let response = PeerListMessage { peers };
-                    encode_message(MSG_PEER_LIST, &response).ok()
+                    let recent_peers = state.register(&reg.cluster, peer);
+                    
+                    let ack = RegisterAckMessage {
+                        success: true,
+                        recent_peers,
+                    };
+                    encode_message(MSG_REGISTER_ACK, &ack).ok()
                 }
                 Err(e) => {
                     warn!("Invalid REGISTER from {}: {}", src, e);
@@ -194,11 +290,28 @@ pub fn handle_nucleus_message(
         MSG_HEARTBEAT => {
             match serde_cbor::from_slice::<HeartbeatMessage>(payload) {
                 Ok(hb) => {
-                    state.heartbeat(&hb.cluster, hb.vip);
-                    None
+                    let (new_peers, removed_vips) = state.heartbeat(&hb.cluster, hb.vip, None);
+                    let ack = HeartbeatAckMessage { new_peers, removed_vips };
+                    encode_message(MSG_HEARTBEAT_ACK, &ack).ok()
                 }
                 Err(e) => {
                     warn!("Invalid HEARTBEAT from {}: {}", src, e);
+                    None
+                }
+            }
+        }
+        MSG_QUERY_PEER => {
+            match serde_cbor::from_slice::<QueryPeerMessage>(payload) {
+                Ok(query) => {
+                    let peer = state.query_peer(&query.cluster, query.target_vip);
+                    let response = PeerInfoMessage {
+                        found: peer.is_some(),
+                        peer,
+                    };
+                    encode_message(MSG_PEER_INFO, &response).ok()
+                }
+                Err(e) => {
+                    warn!("Invalid QUERY_PEER from {}: {}", src, e);
                     None
                 }
             }
@@ -258,16 +371,38 @@ impl NucleusClient {
         Ok(())
     }
 
-    /// Send heartbeat to nucleus (uses VIP as identifier)
-    pub async fn heartbeat(&self, socket: &UdpSocket) -> Result<()> {
+    /// Send heartbeat to nucleus
+    pub async fn heartbeat(&self, socket: &UdpSocket, known_peer_count: u32) -> Result<()> {
         let msg = HeartbeatMessage {
             cluster: self.cluster.clone(),
             vip: self.vip,
+            last_seen_count: known_peer_count,
         };
         let data = encode_message(MSG_HEARTBEAT, &msg)?;
         socket.send_to(&data, self.nucleus_addr).await?;
         debug!("Sent heartbeat to nucleus");
         Ok(())
+    }
+
+    /// Query specific peer by VIP
+    pub async fn query_peer(&self, socket: &UdpSocket, target_vip: Ipv4Addr) -> Result<()> {
+        let msg = QueryPeerMessage {
+            cluster: self.cluster.clone(),
+            target_vip,
+            requester_vip: self.vip,
+        };
+        let data = encode_message(MSG_QUERY_PEER, &msg)?;
+        socket.send_to(&data, self.nucleus_addr).await?;
+        debug!("Queried peer {}", target_vip);
+        Ok(())
+    }
+
+    pub fn cluster(&self) -> &str {
+        &self.cluster
+    }
+
+    pub fn vip(&self) -> Ipv4Addr {
+        self.vip
     }
 
     #[allow(dead_code)]
@@ -276,17 +411,42 @@ impl NucleusClient {
     }
 }
 
-/// Parse peer list response
-pub fn parse_peer_list(data: &[u8]) -> Result<Vec<PeerInfo>> {
-    if data.is_empty() || data[0] != MSG_PEER_LIST {
-        anyhow::bail!("Not a peer list message");
+/// Parse REGISTER_ACK response
+pub fn parse_register_ack(data: &[u8]) -> Result<RegisterAckMessage> {
+    if data.is_empty() || data[0] != MSG_REGISTER_ACK {
+        anyhow::bail!("Not a REGISTER_ACK message");
     }
-    let list: PeerListMessage = serde_cbor::from_slice(&data[1..])
-        .context("Failed to decode peer list")?;
-    Ok(list.peers)
+    serde_cbor::from_slice(&data[1..]).context("Failed to decode REGISTER_ACK")
 }
 
-/// Check if message is from nucleus (peer list)
-pub fn is_signaling_message(data: &[u8]) -> bool {
-    !data.is_empty() && data[0] == MSG_PEER_LIST
+/// Parse HEARTBEAT_ACK response
+pub fn parse_heartbeat_ack(data: &[u8]) -> Result<HeartbeatAckMessage> {
+    if data.is_empty() || data[0] != MSG_HEARTBEAT_ACK {
+        anyhow::bail!("Not a HEARTBEAT_ACK message");
+    }
+    serde_cbor::from_slice(&data[1..]).context("Failed to decode HEARTBEAT_ACK")
 }
+
+/// Parse PEER_INFO response
+pub fn parse_peer_info(data: &[u8]) -> Result<PeerInfoMessage> {
+    if data.is_empty() || data[0] != MSG_PEER_INFO {
+        anyhow::bail!("Not a PEER_INFO message");
+    }
+    serde_cbor::from_slice(&data[1..]).context("Failed to decode PEER_INFO")
+}
+
+/// Check if message is a signaling message (from nucleus)
+pub fn is_signaling_message(data: &[u8]) -> bool {
+    if data.is_empty() { return false; }
+    matches!(data[0], MSG_REGISTER_ACK | MSG_HEARTBEAT_ACK | MSG_PEER_INFO)
+}
+
+/// Get signaling message type
+pub fn get_signaling_type(data: &[u8]) -> Option<u8> {
+    data.first().copied()
+}
+
+// Re-export constants for matching
+pub const SIGNALING_REGISTER_ACK: u8 = MSG_REGISTER_ACK;
+pub const SIGNALING_HEARTBEAT_ACK: u8 = MSG_HEARTBEAT_ACK;
+pub const SIGNALING_PEER_INFO: u8 = MSG_PEER_INFO;

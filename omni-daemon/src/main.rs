@@ -10,7 +10,7 @@ use aya::{
     Bpf,
 };
 use clap::Parser;
-use log::{info, error, warn};
+use log::{info, error, warn, debug};
 use tokio::net::UdpSocket;
 use tokio::signal;
 
@@ -396,7 +396,8 @@ async fn main() -> Result<()> {
             _ = heartbeat_interval.tick() => {
                 // Edge mode: send heartbeat to nucleus
                 if let Some(ref client) = nucleus_client {
-                    if let Err(e) = client.heartbeat(&socket).await {
+                    let peer_count = peer_table.len() as u32;
+                    if let Err(e) = client.heartbeat(&socket, peer_count).await {
                         warn!("Failed to send heartbeat: {}", e);
                     }
                 }
@@ -488,7 +489,15 @@ async fn main() -> Result<()> {
                                     warn!("No active session for peer {} (session {})", dst_ip, peer.session_id);
                                 }
                             } else {
-                                // No peer for this IP - drop silently (normal for broadcast/unknown)
+                                // On-demand discovery: query nucleus for unknown peer
+                                if let Some(ref client) = nucleus_client {
+                                    if let Err(e) = client.query_peer(&socket, dst_ip).await {
+                                        warn!("Failed to query peer {}: {}", dst_ip, e);
+                                    } else {
+                                        debug!("Queried nucleus for peer {}", dst_ip);
+                                    }
+                                }
+                                // Packet will be dropped; retry after peer info arrives
                             }
                         }
                     }
@@ -518,27 +527,83 @@ async fn main() -> Result<()> {
                                     }
                                 }
                             } else if signaling::is_signaling_message(&buf[..len]) {
-                                // Edge: received peer list from nucleus
-                                match signaling::parse_peer_list(&buf[..len]) {
-                                    Ok(peers) => {
-                                        info!("Received {} peers from nucleus", peers.len());
-                                        for peer_info in peers {
-                                            // Parse endpoint
-                                            if let Ok(endpoint) = peer_info.endpoint.parse::<std::net::SocketAddr>() {
-                                                // Add to peer table
-                                                let session_id = session_manager.generate_session_id(endpoint.ip());
-                                                peer_table.register(
-                                                    peer_info.public_key,
-                                                    endpoint,
-                                                    peer_info.vip,
-                                                    session_id,
-                                                );
-                                                info!("Added peer {} at {}", peer_info.vip, endpoint);
+                                // Edge: received response from nucleus
+                                let msg_type = signaling::get_signaling_type(&buf[..len]);
+                                
+                                match msg_type {
+                                    Some(signaling::SIGNALING_REGISTER_ACK) => {
+                                        // Registration confirmed with recent peers
+                                        match signaling::parse_register_ack(&buf[..len]) {
+                                            Ok(ack) => {
+                                                info!("Registration confirmed, {} recent peers", ack.recent_peers.len());
+                                                for peer_info in ack.recent_peers {
+                                                    if let Ok(endpoint) = peer_info.endpoint.parse::<std::net::SocketAddr>() {
+                                                        let session_id = session_manager.generate_session_id(endpoint.ip());
+                                                        peer_table.register(
+                                                            peer_info.public_key,
+                                                            endpoint,
+                                                            peer_info.vip,
+                                                            session_id,
+                                                        );
+                                                        info!("Discovered peer {} at {}", peer_info.vip, endpoint);
+                                                    }
+                                                }
                                             }
+                                            Err(e) => warn!("Failed to parse REGISTER_ACK: {}", e),
                                         }
                                     }
-                                    Err(e) => {
-                                        warn!("Failed to parse peer list: {}", e);
+                                    Some(signaling::SIGNALING_HEARTBEAT_ACK) => {
+                                        // Delta update: new peers and removed peers
+                                        match signaling::parse_heartbeat_ack(&buf[..len]) {
+                                            Ok(ack) => {
+                                                // Add new peers
+                                                for peer_info in ack.new_peers {
+                                                    if let Ok(endpoint) = peer_info.endpoint.parse::<std::net::SocketAddr>() {
+                                                        let session_id = session_manager.generate_session_id(endpoint.ip());
+                                                        peer_table.register(
+                                                            peer_info.public_key,
+                                                            endpoint,
+                                                            peer_info.vip,
+                                                            session_id,
+                                                        );
+                                                        info!("New peer joined: {} at {}", peer_info.vip, endpoint);
+                                                    }
+                                                }
+                                                // Handle removed peers
+                                                for vip in ack.removed_vips {
+                                                    peer_table.remove_by_vip(&vip);
+                                                    info!("Peer left: {}", vip);
+                                                }
+                                            }
+                                            Err(e) => warn!("Failed to parse HEARTBEAT_ACK: {}", e),
+                                        }
+                                    }
+                                    Some(signaling::SIGNALING_PEER_INFO) => {
+                                        // Response to QUERY_PEER
+                                        match signaling::parse_peer_info(&buf[..len]) {
+                                            Ok(info) => {
+                                                if info.found {
+                                                    if let Some(peer_info) = info.peer {
+                                                        if let Ok(endpoint) = peer_info.endpoint.parse::<std::net::SocketAddr>() {
+                                                            let session_id = session_manager.generate_session_id(endpoint.ip());
+                                                            peer_table.register(
+                                                                peer_info.public_key,
+                                                                endpoint,
+                                                                peer_info.vip,
+                                                                session_id,
+                                                            );
+                                                            info!("Query result: {} at {}", peer_info.vip, endpoint);
+                                                        }
+                                                    }
+                                                } else {
+                                                    debug!("Peer not found in nucleus");
+                                                }
+                                            }
+                                            Err(e) => warn!("Failed to parse PEER_INFO: {}", e),
+                                        }
+                                    }
+                                    _ => {
+                                        debug!("Unknown signaling message type");
                                     }
                                 }
                             }
