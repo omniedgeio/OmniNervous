@@ -613,19 +613,20 @@ async fn main() -> Result<()> {
                         info!("Received {} bytes from {}", len, src);
                         
                         // For initial handshake, check if this is a new connection
-                        // Client sends session_id in header (8 bytes), but we validate/generate our own
+                        // Client sends session_id in header (8 bytes)
                         if len >= 8 {
                             let client_session_id = u64::from_be_bytes([
                                 buf[0], buf[1], buf[2], buf[3],
                                 buf[4], buf[5], buf[6], buf[7]
                             ]);
                             
-                            // Generate secure session ID based on source IP
-                            let session_id = session_manager.generate_session_id(src.ip());
+                            // Use the client's session_id to ensure both sides match
+                            // This is the session_id the initiator will expect in responses
+                            let session_id = client_session_id;
                             
                             // Check if session exists, otherwise create a new one
                             if session_manager.get_session_mut(session_id).is_none() {
-                                // Rate limiting check
+                                // Rate limiting check (use src.ip() for rate limiting)
                                 if !rate_limiter.allow_new_session(src.ip()) {
                                     metrics.inc_ratelimit_drops();
                                     warn!("Rate limited: {} (session {})", src.ip(), session_id);
@@ -637,7 +638,7 @@ async fn main() -> Result<()> {
                                         session_manager.create_session(session_id, SessionState::Handshaking(new_session));
                                         rate_limiter.record_session_start(session_id);
                                         metrics.inc_sessions();
-                                        info!("Created new session: {} (client sent: {})", session_id, client_session_id);
+                                        info!("Created new session: {} from {}", session_id, src);
                                     }
                                     Err(e) => {
                                         error!("Failed to create session: {}", e);
