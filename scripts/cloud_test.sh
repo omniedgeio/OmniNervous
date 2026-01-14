@@ -38,9 +38,6 @@ SSH_USER="${SSH_USER:-ubuntu}"
 OMNI_PORT=${OMNI_PORT:-51820}
 TEST_DURATION=${TEST_DURATION:-10}
 RESULTS_DIR="./test_results"
-# Use cross-compiled Linux binary path (x86_64)
-BINARY_PATH="./target/x86_64-unknown-linux-gnu/release/omni-daemon"
-BINARY_PATH_FALLBACK="./target/release/omni-daemon"
 
 # Virtual IPs for P2P tunnel
 VIP_A="10.200.0.10"
@@ -120,20 +117,21 @@ scp_to() {
 # =============================================================================
 
 preflight_check() {
-    print_header "Pre-flight Checks (Local)"
+    print_header "Pre-flight Checks"
     
     local errors=0
     
-    # Check local binary (prefer cross-compiled for Linux)
-    if [[ -f "$BINARY_PATH" ]]; then
-        echo -e "✅ Local binary found: $BINARY_PATH"
-    elif [[ -f "$BINARY_PATH_FALLBACK" ]]; then
-        BINARY_PATH="$BINARY_PATH_FALLBACK"
-        echo -e "⚠️  Using fallback binary: $BINARY_PATH"
-        echo "   Warning: Native binary may not work on Linux targets!"
+    # Get scripts directory
+    local SCRIPT_DIR
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    
+    # Check for pre-built binary
+    local LINUX_BINARY="$SCRIPT_DIR/omni-daemon-linux-amd64"
+    if [[ -f "$LINUX_BINARY" ]]; then
+        echo -e "✅ Pre-built binary found: $LINUX_BINARY"
     else
-        echo -e "❌ No binary found"
-        echo "   Run: cargo build -p omni-daemon --release --target x86_64-unknown-linux-gnu"
+        echo -e "❌ Pre-built binary not found: $LINUX_BINARY"
+        echo "   Download from GitHub releases or place in scripts folder"
         errors=$((errors + 1))
     fi
     
@@ -169,48 +167,28 @@ preflight_check() {
 }
 
 # =============================================================================
-# Deploy via Local Docker Build
+# Deploy Pre-built Binary
 # =============================================================================
 
 deploy_binaries() {
-    print_header "Building and Deploying"
+    print_header "Deploying Binary"
     
-    # Get the local repo root directory
-    local LOCAL_REPO_DIR
-    LOCAL_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    # Get the scripts directory
+    local SCRIPT_DIR
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     
-    local LINUX_BINARY="$LOCAL_REPO_DIR/target/docker-build/omni-daemon"
+    # Check for pre-built binary in same folder
+    local LINUX_BINARY="$SCRIPT_DIR/omni-daemon-linux-amd64"
     
-    # Build Linux binary locally using Docker
-    print_step "Building Linux x86_64 binary with Docker..."
-    
-    # Create output directory
-    mkdir -p "$LOCAL_REPO_DIR/target/docker-build"
-    
-    # Build the Docker image (this compiles the binary)
-    cd "$LOCAL_REPO_DIR"
-    docker build --platform linux/amd64 -t omni-daemon-builder:latest . 2>&1 | tail -20
-    
-    if [ $? -ne 0 ]; then
-        print_error "Docker build failed"
-        exit 1
-    fi
-    
-    # Extract the binary from the image
-    print_step "Extracting binary from Docker image..."
-    docker create --name omni-extract omni-daemon-builder:latest 2>/dev/null || \
-        (docker rm omni-extract 2>/dev/null && docker create --name omni-extract omni-daemon-builder:latest)
-    docker cp omni-extract:/usr/local/bin/omni-daemon "$LINUX_BINARY"
-    docker rm omni-extract
-    
-    # Verify binary
     if [ ! -f "$LINUX_BINARY" ]; then
-        print_error "Failed to extract binary from Docker image"
+        print_error "Pre-built binary not found: $LINUX_BINARY"
+        echo "   Download from GitHub releases or build with:"
+        echo "   docker build -t omni-daemon:latest . && docker cp \$(docker create omni-daemon:latest):/usr/local/bin/omni-daemon $LINUX_BINARY"
         exit 1
     fi
     
-    echo -e "✅ Linux binary built: $LINUX_BINARY"
-    file "$LINUX_BINARY" | grep -q "x86-64" && echo "   Architecture: x86_64 (correct)" || echo "⚠️  Architecture mismatch"
+    echo -e "✅ Using pre-built binary: $LINUX_BINARY"
+    file "$LINUX_BINARY" 2>/dev/null | grep -q "x86-64" && echo "   Architecture: x86_64" || echo "   Architecture: $(file "$LINUX_BINARY" | awk -F: '{print $2}')"
     
     # Deploy to all nodes
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
@@ -484,24 +462,6 @@ echo "Edge B:    $NODE_B → VIP $VIP_B"
 echo "Cluster:   $CLUSTER_NAME"
 echo "Auth:      $([ -n "$CLUSTER_SECRET" ] && echo "PSK enabled" || echo "OPEN (⚠️)")"
 
-# Build locally if needed
-if ! $SKIP_BUILD; then
-    print_header "Building Binary for Linux x86_64"
-    
-    # Try cross-compilation first (requires cross-compilation toolchain)
-    if cargo build -p omni-daemon --release --target x86_64-unknown-linux-gnu 2>/dev/null; then
-        BINARY_PATH="./target/x86_64-unknown-linux-gnu/release/omni-daemon"
-        echo "✅ Cross-compiled for Linux x86_64"
-    else
-        echo "⚠️  Cross-compilation failed, using native build"
-        echo "   Install: rustup target add x86_64-unknown-linux-gnu"
-        echo "   macOS: brew install SergioBenitez/osxct/x86_64-unknown-linux-gnu"
-        cargo build -p omni-daemon --release
-        BINARY_PATH="./target/release/omni-daemon"
-        echo "⚠️  WARNING: Native binary may not work on Linux cloud instances!"
-    fi
-fi
-
 # Run test sequence
 preflight_check
 
@@ -512,3 +472,4 @@ fi
 run_test
 
 echo -e "\n${GREEN}✅ 3-Node cloud test completed!${NC}"
+
