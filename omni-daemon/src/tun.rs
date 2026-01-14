@@ -55,7 +55,7 @@ impl VirtualInterface {
             .tun_name(&config.name)
             .address(config.address)
             .netmask(config.netmask)
-            .mtu(config.mtu as u16)
+            .mtu(config.mtu)
             .up();
         
         // Platform-specific configuration

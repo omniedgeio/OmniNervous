@@ -22,9 +22,7 @@ impl SessionManager {
     pub fn new() -> Self {
         // Generate a random server secret on startup
         let mut secret = [0u8; 32];
-        for i in 0..32 {
-            secret[i] = rand::random();
-        }
+        secret.iter_mut().for_each(|b| *b = rand::random());
         
         Self {
             sessions: HashMap::new(),
