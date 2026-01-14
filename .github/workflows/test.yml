@@ -23,16 +23,19 @@ jobs:
           # Create test network
           docker network create --driver bridge --subnet 10.99.0.0/24 omni-test-net || true
           
-          # Start lightweight test containers with networking tools
+          # Start containers with networking tools pre-installed
           docker run -d --name edge-a --network omni-test-net --ip 10.99.0.10 \
-            ubuntu:22.04 bash -c "apt-get update -qq && apt-get install -y -qq iputils-ping iperf3 > /dev/null && iperf3 -s -D && sleep 300"
+            ubuntu:22.04 bash -c "apt-get update -qq && apt-get install -y -qq iputils-ping iperf3 > /dev/null && tail -f /dev/null"
           
           docker run -d --name edge-b --network omni-test-net --ip 10.99.0.20 \
-            ubuntu:22.04 bash -c "apt-get update -qq && apt-get install -y -qq iputils-ping iperf3 > /dev/null && iperf3 -s -D && sleep 300"
+            ubuntu:22.04 bash -c "apt-get update -qq && apt-get install -y -qq iputils-ping iperf3 > /dev/null && tail -f /dev/null"
           
-          # Wait for containers to be ready
-          echo "Waiting for containers to initialize..."
-          sleep 15
+          echo "Waiting for containers to install packages..."
+          sleep 30
+          
+          # Verify containers are ready
+          docker exec edge-a which ping iperf3
+          docker exec edge-b which ping iperf3
 
       - name: Run network tests
         id: tests
@@ -81,23 +84,47 @@ jobs:
           
           # Test 2: iperf3 Throughput Edge A → Edge B
           echo "📈 iperf3 Throughput Test (Edge A → Edge B):"
-          IPERF_OUTPUT=$(docker exec edge-a iperf3 -c 10.99.0.20 -p 5201 -t 5 -J 2>&1)
           
-          if echo "$IPERF_OUTPUT" | grep -q '"bits_per_second"'; then
-            # Extract sender bits_per_second from JSON
-            BITS=$(echo "$IPERF_OUTPUT" | grep -o '"bits_per_second":[0-9.]*' | tail -1 | cut -d: -f2)
-            if [ -n "$BITS" ] && [ "$BITS" != "0" ]; then
-              IPERF_THROUGHPUT=$(echo "scale=2; $BITS / 1000000" | bc 2>/dev/null || echo "N/A")
-              echo "✅ iperf3: SUCCESS (${IPERF_THROUGHPUT} Mbps)"
-              IPERF_RESULT="PASSED"
-              TESTS_PASSED=$((TESTS_PASSED + 1))
+          # Start iperf3 server on edge-b
+          echo "   Starting iperf3 server on edge-b..."
+          docker exec -d edge-b iperf3 -s -p 5201
+          sleep 3
+          
+          # Verify server is listening
+          if docker exec edge-b pgrep iperf3 > /dev/null; then
+            echo "   iperf3 server running on edge-b"
+            
+            # Run iperf3 client on edge-a
+            echo "   Running iperf3 client on edge-a..."
+            IPERF_OUTPUT=$(docker exec edge-a iperf3 -c 10.99.0.20 -p 5201 -t 5 2>&1)
+            
+            # Check for success in output
+            if echo "$IPERF_OUTPUT" | grep -q "Mbits/sec\|Gbits/sec"; then
+              # Extract throughput from last sender line
+              THROUGHPUT_LINE=$(echo "$IPERF_OUTPUT" | grep "sender" | tail -1)
+              IPERF_THROUGHPUT=$(echo "$THROUGHPUT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /[0-9]/ && $(i+1) ~ /bits/) print $i}' | tail -1)
+              UNIT=$(echo "$THROUGHPUT_LINE" | grep -o "[MGK]bits/sec" | head -1)
+              
+              if [ -n "$IPERF_THROUGHPUT" ]; then
+                echo "✅ iperf3: SUCCESS (${IPERF_THROUGHPUT} ${UNIT})"
+                IPERF_RESULT="PASSED"
+                TESTS_PASSED=$((TESTS_PASSED + 1))
+              else
+                # Fallback: just show raw output
+                echo "✅ iperf3: SUCCESS"
+                echo "   $(echo "$IPERF_OUTPUT" | grep sender | tail -1)"
+                IPERF_THROUGHPUT=$(echo "$IPERF_OUTPUT" | grep sender | tail -1 | awk '{print $7}')
+                IPERF_RESULT="PASSED"
+                TESTS_PASSED=$((TESTS_PASSED + 1))
+              fi
             else
-              echo "⚠️ iperf3: No data transferred"
-              IPERF_RESULT="SKIPPED"
+              echo "❌ iperf3: Connection failed"
+              echo "   Output: $(echo "$IPERF_OUTPUT" | tail -5)"
+              IPERF_RESULT="FAILED"
+              TESTS_FAILED=$((TESTS_FAILED + 1))
             fi
           else
-            echo "❌ iperf3: FAILED"
-            echo "   Output: $(echo "$IPERF_OUTPUT" | tail -3)"
+            echo "❌ iperf3 server failed to start on edge-b"
             IPERF_RESULT="FAILED"
             TESTS_FAILED=$((TESTS_FAILED + 1))
           fi
