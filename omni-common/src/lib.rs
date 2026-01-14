@@ -72,3 +72,16 @@ pub struct TransportPacket {
     pub header: PacketHeader,
     pub payload: [u8; 1500], // Maximum L2 frame size
 }
+
+// Pod trait implementations for BPF map compatibility
+// SAFETY: All types are #[repr(C)] and contain only plain data
+#[cfg(feature = "aya")]
+mod pod_impl {
+    use super::*;
+    
+    // aya::Pod is a marker trait for types that can be safely used in BPF maps
+    unsafe impl aya::Pod for SessionKey {}
+    unsafe impl aya::Pod for SessionEntry {}
+    unsafe impl aya::Pod for FdbEntry {}
+}
+

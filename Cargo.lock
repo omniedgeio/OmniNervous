@@ -778,6 +778,9 @@ dependencies = [
 [[package]]
 name = "omni-common"
 version = "0.1.0"
+dependencies = [
+ "aya",
+]
 
 [[package]]
 name = "omni-daemon"

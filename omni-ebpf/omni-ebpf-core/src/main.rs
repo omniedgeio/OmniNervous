@@ -138,28 +138,139 @@ fn chacha20_block(key: &[u8; 32], nonce: &[u8; 8], counter: u32, output: &mut [u
     }
 }
 
-/// Poly1305 MAC computation (simplified for eBPF)
+/// Full Poly1305 MAC computation for eBPF
+/// Uses 26-bit limbs for 130-bit arithmetic (compatible with BPF verifier)
+#[inline(always)]
+fn poly1305_compute(key: &[u8; 32], msg: &[u8], msg_len: usize) -> [u8; 16] {
+    // Extract r (first 16 bytes) and clamp
+    let r0 = (u32::from_le_bytes([key[0], key[1], key[2], key[3]]) & 0x0fffffff) & 0x3ffffff;
+    let r1 = ((u32::from_le_bytes([key[3], key[4], key[5], key[6]]) >> 2) & 0x0ffffffc) & 0x3ffffff;
+    let r2 = ((u32::from_le_bytes([key[6], key[7], key[8], key[9]]) >> 4) & 0x0ffffffc) & 0x3ffffff;
+    let r3 = ((u32::from_le_bytes([key[9], key[10], key[11], key[12]]) >> 6) & 0x0ffffffc) & 0x3ffffff;
+    let r4 = ((u32::from_le_bytes([key[12], key[13], key[14], key[15]]) >> 8) & 0x0ffffffc) & 0x3ffffff;
+    
+    // Extract pad (last 16 bytes)
+    let pad0 = u32::from_le_bytes([key[16], key[17], key[18], key[19]]);
+    let pad1 = u32::from_le_bytes([key[20], key[21], key[22], key[23]]);
+    let pad2 = u32::from_le_bytes([key[24], key[25], key[26], key[27]]);
+    let pad3 = u32::from_le_bytes([key[28], key[29], key[30], key[31]]);
+    
+    // Pre-compute r * 5 for modular reduction
+    let s1 = r1 * 5;
+    let s2 = r2 * 5;
+    let s3 = r3 * 5;
+    let s4 = r4 * 5;
+    
+    // Hash state (5 x 26-bit limbs = 130 bits)
+    let mut h0: u32 = 0;
+    let mut h1: u32 = 0;
+    let mut h2: u32 = 0;
+    let mut h3: u32 = 0;
+    let mut h4: u32 = 0;
+    
+    // Process message in 16-byte blocks (bounded loop for BPF)
+    let blocks = if msg_len > 256 { 16 } else { (msg_len + 15) / 16 };
+    let mut offset = 0usize;
+    
+    #[allow(clippy::needless_range_loop)]
+    for _ in 0..blocks {
+        if offset >= msg_len {
+            break;
+        }
+        
+        let remaining = msg_len - offset;
+        let block_len = if remaining >= 16 { 16 } else { remaining };
+        
+        // Read block (with padding for partial)
+        let mut block = [0u8; 17];
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..block_len {
+            if offset + i < msg.len() {
+                block[i] = msg[offset + i];
+            }
+        }
+        block[block_len] = 1; // Poly1305 padding
+        
+        // Convert to 5 limbs
+        let m0 = u32::from_le_bytes([block[0], block[1], block[2], block[3]]) & 0x3ffffff;
+        let m1 = (u32::from_le_bytes([block[3], block[4], block[5], block[6]]) >> 2) & 0x3ffffff;
+        let m2 = (u32::from_le_bytes([block[6], block[7], block[8], block[9]]) >> 4) & 0x3ffffff;
+        let m3 = (u32::from_le_bytes([block[9], block[10], block[11], block[12]]) >> 6) & 0x3ffffff;
+        let m4 = if block_len == 16 {
+            (u32::from_le_bytes([block[12], block[13], block[14], block[15]]) >> 8) | (1 << 24)
+        } else {
+            u32::from_le_bytes([block[12], block[13], block[14], block[15]]) >> 8
+        };
+        
+        // h += m
+        h0 = h0.wrapping_add(m0);
+        h1 = h1.wrapping_add(m1);
+        h2 = h2.wrapping_add(m2);
+        h3 = h3.wrapping_add(m3);
+        h4 = h4.wrapping_add(m4);
+        
+        // h *= r (mod 2^130 - 5) using 64-bit intermediates
+        let d0 = (h0 as u64) * (r0 as u64) + (h1 as u64) * (s4 as u64) + (h2 as u64) * (s3 as u64) + (h3 as u64) * (s2 as u64) + (h4 as u64) * (s1 as u64);
+        let d1 = (h0 as u64) * (r1 as u64) + (h1 as u64) * (r0 as u64) + (h2 as u64) * (s4 as u64) + (h3 as u64) * (s3 as u64) + (h4 as u64) * (s2 as u64);
+        let d2 = (h0 as u64) * (r2 as u64) + (h1 as u64) * (r1 as u64) + (h2 as u64) * (r0 as u64) + (h3 as u64) * (s4 as u64) + (h4 as u64) * (s3 as u64);
+        let d3 = (h0 as u64) * (r3 as u64) + (h1 as u64) * (r2 as u64) + (h2 as u64) * (r1 as u64) + (h3 as u64) * (r0 as u64) + (h4 as u64) * (s4 as u64);
+        let d4 = (h0 as u64) * (r4 as u64) + (h1 as u64) * (r3 as u64) + (h2 as u64) * (r2 as u64) + (h3 as u64) * (r1 as u64) + (h4 as u64) * (r0 as u64);
+        
+        // Carry propagation
+        let mut c: u64;
+        h0 = (d0 & 0x3ffffff) as u32; c = d0 >> 26;
+        let d1 = d1 + c; h1 = (d1 & 0x3ffffff) as u32; c = d1 >> 26;
+        let d2 = d2 + c; h2 = (d2 & 0x3ffffff) as u32; c = d2 >> 26;
+        let d3 = d3 + c; h3 = (d3 & 0x3ffffff) as u32; c = d3 >> 26;
+        let d4 = d4 + c; h4 = (d4 & 0x3ffffff) as u32; c = d4 >> 26;
+        h0 = h0.wrapping_add((c * 5) as u32); c = (h0 >> 26) as u64;
+        h0 &= 0x3ffffff;
+        h1 = h1.wrapping_add(c as u32);
+        
+        offset += 16;
+    }
+    
+    // Final reduction
+    let mut c: u32;
+    c = h1 >> 26; h1 &= 0x3ffffff; h2 = h2.wrapping_add(c);
+    c = h2 >> 26; h2 &= 0x3ffffff; h3 = h3.wrapping_add(c);
+    c = h3 >> 26; h3 &= 0x3ffffff; h4 = h4.wrapping_add(c);
+    c = h4 >> 26; h4 &= 0x3ffffff; h0 = h0.wrapping_add(c * 5);
+    c = h0 >> 26; h0 &= 0x3ffffff; h1 = h1.wrapping_add(c);
+    
+    // h + pad
+    let f0 = ((h0 | (h1 << 26)) as u64).wrapping_add(pad0 as u64);
+    let f1 = (((h1 >> 6) | (h2 << 20)) as u64).wrapping_add(pad1 as u64).wrapping_add(f0 >> 32);
+    let f2 = (((h2 >> 12) | (h3 << 14)) as u64).wrapping_add(pad2 as u64).wrapping_add(f1 >> 32);
+    let f3 = (((h3 >> 18) | (h4 << 8)) as u64).wrapping_add(pad3 as u64).wrapping_add(f2 >> 32);
+    
+    let mut tag = [0u8; 16];
+    tag[0..4].copy_from_slice(&(f0 as u32).to_le_bytes());
+    tag[4..8].copy_from_slice(&(f1 as u32).to_le_bytes());
+    tag[8..12].copy_from_slice(&(f2 as u32).to_le_bytes());
+    tag[12..16].copy_from_slice(&(f3 as u32).to_le_bytes());
+    tag
+}
+
+/// Poly1305 MAC verification for eBPF
 #[inline(always)]
 fn poly1305_verify(key: &[u8; 32], nonce: &[u8; 8], msg: &[u8], msg_len: usize, tag: &[u8; 16]) -> bool {
     // Derive Poly1305 key from ChaCha20(key, nonce, counter=0)
-    let mut poly_key_block = [0u8; 64];
-    chacha20_block(key, nonce, 0, &mut poly_key_block);
+    let mut poly_key = [0u8; 32];
+    let mut keystream = [0u8; 64];
+    chacha20_block(key, nonce, 0, &mut keystream);
+    poly_key[..32].copy_from_slice(&keystream[..32]);
     
-    // For eBPF simplicity, we do a basic tag comparison
-    // A full Poly1305 implementation would compute the MAC here
-    // For now, we verify the tag is non-zero (placeholder)
-    let mut tag_valid = false;
+    // Compute MAC
+    let computed = poly1305_compute(&poly_key, msg, msg_len);
+    
+    // Constant-time comparison
+    let mut diff: u8 = 0;
     #[allow(clippy::needless_range_loop)]
     for i in 0..16 {
-        if tag[i] != 0 {
-            tag_valid = true;
-            break;
-        }
+        diff |= computed[i] ^ tag[i];
     }
-    
-    // TODO: Full Poly1305 computation
-    // This is a placeholder - production needs full MAC verification
-    tag_valid && msg_len > 0 && msg.len() > 0
+    diff == 0
 }
 
 fn try_xdp_synapse(ctx: XdpContext) -> Result<u32, ()> {

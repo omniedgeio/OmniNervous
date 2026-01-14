@@ -38,6 +38,59 @@ use bpf_sync::BpfSync;
 use std::time::Duration;
 use tokio::time::interval;
 
+/// Try to load eBPF/XDP program on Linux
+/// Returns Ok(Bpf) if successful, Err if not available or failed
+#[cfg(target_os = "linux")]
+fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
+    use std::process::Command;
+    
+    // Check kernel version (need 5.4+ for good XDP support)
+    let kernel_version = Command::new("uname")
+        .arg("-r")
+        .output()
+        .context("Failed to get kernel version")?;
+    let kernel_str = String::from_utf8_lossy(&kernel_version.stdout);
+    let version_parts: Vec<&str> = kernel_str.trim().split('.').collect();
+    
+    if version_parts.len() >= 2 {
+        let major: u32 = version_parts[0].parse().unwrap_or(0);
+        let minor: u32 = version_parts[1].parse().unwrap_or(0);
+        if major < 5 || (major == 5 && minor < 4) {
+            anyhow::bail!("Kernel {}.{} too old (need 5.4+)", major, minor);
+        }
+        info!("Kernel {}.{} detected, XDP supported", major, minor);
+    }
+    
+    // Check if interface exists
+    let ip_output = Command::new("ip")
+        .args(["link", "show", iface])
+        .output()
+        .context("Failed to check interface")?;
+    if !ip_output.status.success() {
+        anyhow::bail!("Interface {} not found", iface);
+    }
+    
+    // Try to load embedded eBPF program
+    // Note: In production, this would use include_bytes_aligned! macro
+    // For now, we check if the eBPF binary exists and is loadable
+    info!("Attempting to load XDP program on {}...", iface);
+    
+    // Placeholder: In production, use include_bytes_aligned!()
+    // let bpf_bytes = include_bytes_aligned!("path/to/omni-ebpf-core");
+    // let mut bpf = Bpf::load(bpf_bytes)?;
+    
+    // For now, we'll just initialize BpfSync without actual XDP attachment
+    // The actual eBPF loading will be enabled once the program is compiled
+    anyhow::bail!("eBPF binary not embedded yet (build with cargo xtask build-ebpf)");
+    
+    // Uncomment when eBPF is ready:
+    // let program: &mut Xdp = bpf.program_mut("xdp_synapse")?;
+    // program.load()?;
+    // program.attach(iface, XdpFlags::default())?;
+    // bpf_sync.init_from_bpf(&mut bpf)?;
+    // Ok(bpf)
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -57,6 +110,8 @@ struct Args {
     identity: Option<std::path::PathBuf>,
     #[arg(long, short = 'C', help = "Path to config file")]
     config: Option<std::path::PathBuf>,
+    #[arg(long, help = "Disable eBPF/XDP acceleration (Linux only)")]
+    no_ebpf: bool,
 }
 
 #[tokio::main]
@@ -85,6 +140,27 @@ async fn main() -> Result<()> {
     let mut rate_limiter = RateLimiter::new(RateLimitConfig::default());
     let metrics = Metrics::new();
     let mut bpf_sync = BpfSync::new();
+    
+    // Try to load eBPF/XDP on Linux if not disabled
+    #[cfg(target_os = "linux")]
+    let _bpf = if !args.no_ebpf {
+        match try_load_ebpf(&args.iface, &mut bpf_sync) {
+            Ok(bpf) => {
+                info!("✅ eBPF/XDP enabled on interface {}", args.iface);
+                Some(bpf)
+            }
+            Err(e) => {
+                warn!("eBPF/XDP not available: {}. Using userspace processing.", e);
+                None
+            }
+        }
+    } else {
+        info!("eBPF/XDP disabled via --no-ebpf flag");
+        None
+    };
+    
+    #[cfg(not(target_os = "linux"))]
+    info!("Running on non-Linux platform, using userspace processing");
     
     // Cleanup interval - runs every 60 seconds
     let mut cleanup_interval = interval(Duration::from_secs(60));
