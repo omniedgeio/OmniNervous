@@ -1,21 +1,24 @@
 # OmniNervous Daemon Docker Image
+# Simplified build - omni-daemon only (no eBPF for now)
+
 # Build stage
 FROM rust:1.79 AS builder
 
 WORKDIR /usr/src/omni
 
-# Copy only Cargo files first to cache dependencies
+# Copy workspace Cargo files
 COPY Cargo.toml Cargo.lock ./
+
+# Copy crate Cargo.toml files
 COPY omni-daemon/Cargo.toml ./omni-daemon/
 COPY omni-common/Cargo.toml ./omni-common/
-COPY omni-ebpf/Cargo.toml ./omni-ebpf/
 
 # Create dummy source files for dependency caching
 RUN mkdir -p omni-daemon/src omni-common/src && \
     echo "fn main() {}" > omni-daemon/src/main.rs && \
     echo "" > omni-common/src/lib.rs
 
-# Build dependencies only
+# Build dependencies only (this layer is cached)
 RUN cargo build -p omni-daemon --release 2>/dev/null || true
 
 # Copy actual source code
