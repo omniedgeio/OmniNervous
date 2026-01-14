@@ -38,7 +38,9 @@ SSH_USER="${SSH_USER:-ubuntu}"
 OMNI_PORT=${OMNI_PORT:-51820}
 TEST_DURATION=${TEST_DURATION:-10}
 RESULTS_DIR="./test_results"
-BINARY_PATH="./target/release/omni-daemon"
+# Use cross-compiled Linux binary path (x86_64)
+BINARY_PATH="./target/x86_64-unknown-linux-gnu/release/omni-daemon"
+BINARY_PATH_FALLBACK="./target/release/omni-daemon"
 
 # Virtual IPs for P2P tunnel
 VIP_A="10.200.0.10"
@@ -122,12 +124,16 @@ preflight_check() {
     
     local errors=0
     
-    # Check local binary
+    # Check local binary (prefer cross-compiled for Linux)
     if [[ -f "$BINARY_PATH" ]]; then
         echo -e "✅ Local binary found: $BINARY_PATH"
+    elif [[ -f "$BINARY_PATH_FALLBACK" ]]; then
+        BINARY_PATH="$BINARY_PATH_FALLBACK"
+        echo -e "⚠️  Using fallback binary: $BINARY_PATH"
+        echo "   Warning: Native binary may not work on Linux targets!"
     else
-        echo -e "❌ Local binary not found: $BINARY_PATH"
-        echo "   Run: cargo build -p omni-daemon --release"
+        echo -e "❌ No binary found"
+        echo "   Run: cargo build -p omni-daemon --release --target x86_64-unknown-linux-gnu"
         errors=$((errors + 1))
     fi
     
@@ -442,9 +448,20 @@ echo "Auth:      $([ -n "$CLUSTER_SECRET" ] && echo "PSK enabled" || echo "OPEN 
 
 # Build locally if needed
 if ! $SKIP_BUILD; then
-    print_header "Building Binary (Local)"
-    cargo build -p omni-daemon --release --target x86_64-unknown-linux-gnu 2>/dev/null || \
-    cargo build -p omni-daemon --release
+    print_header "Building Binary for Linux x86_64"
+    
+    # Try cross-compilation first (requires cross-compilation toolchain)
+    if cargo build -p omni-daemon --release --target x86_64-unknown-linux-gnu 2>/dev/null; then
+        BINARY_PATH="./target/x86_64-unknown-linux-gnu/release/omni-daemon"
+        echo "✅ Cross-compiled for Linux x86_64"
+    else
+        echo "⚠️  Cross-compilation failed, using native build"
+        echo "   Install: rustup target add x86_64-unknown-linux-gnu"
+        echo "   macOS: brew install SergioBenitez/osxct/x86_64-unknown-linux-gnu"
+        cargo build -p omni-daemon --release
+        BINARY_PATH="./target/release/omni-daemon"
+        echo "⚠️  WARNING: Native binary may not work on Linux cloud instances!"
+    fi
 fi
 
 # Run test sequence

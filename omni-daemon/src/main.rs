@@ -235,15 +235,19 @@ async fn main() -> Result<()> {
                 Some(tun)
             }
             Err(e) => {
-                error!("Failed to create TUN interface: {}", e);
+                error!("❌ Failed to create TUN interface: {}", e);
                 error!("   Ensure you have root/admin privileges");
+                error!("   On Linux: sudo or CAP_NET_ADMIN capability required");
+                #[cfg(target_os = "linux")]
+                error!("   Run: sudo modprobe tun (if TUN module not loaded)");
                 #[cfg(target_os = "windows")]
                 error!("   Windows: Ensure wintun.dll is in the same directory");
-                None
+                // Exit with error - TUN is required when --vip is specified
+                anyhow::bail!("TUN interface creation failed: {}. Cannot operate VPN without interface.", e);
             }
         }
     } else {
-        info!("No --vip specified, running without virtual interface");
+        info!("No --vip specified, running in signaling-only mode (Nucleus)");
         None
     };
     
