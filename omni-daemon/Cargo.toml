@@ -24,6 +24,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 tun2 = { version = "4", features = ["async"] }
 libc = "0.2"
+serde_cbor = "0.11"
 
 # Non-Linux: omni-common without aya
 [target.'cfg(not(target_os = "linux"))'.dependencies]

@@ -29,6 +29,7 @@ mod crypto_util;
 mod poly1305;
 mod tun;
 mod peers;
+mod signaling;
 
 use noise::NoiseSession;
 use session::{SessionManager, SessionState};
@@ -294,11 +295,55 @@ async fn main() -> Result<()> {
     
     // Cleanup interval - runs every 60 seconds
     let mut cleanup_interval = interval(Duration::from_secs(60));
+    // Heartbeat interval - runs every 30 seconds (for edge mode)
+    let mut heartbeat_interval = interval(Duration::from_secs(30));
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", args.port)).await
         .context("failed to bind UDP socket")?;
     
     info!("Ganglion listening on UDP/{}", args.port);
+
+    // Determine mode: Nucleus (signaling server) or Edge (P2P client)
+    let is_nucleus_mode = args.mode.as_ref().map(|m| m == "nucleus").unwrap_or(false);
+    
+    // Nucleus state (only used in nucleus mode)
+    let mut nucleus_state = signaling::NucleusState::new();
+    
+    // Nucleus client (only used in edge mode when --nucleus is specified)
+    let nucleus_client: Option<signaling::NucleusClient> = if !is_nucleus_mode {
+        if let (Some(nucleus_addr), Some(cluster)) = (&args.nucleus, &args.cluster) {
+            if let Some(vip) = args.vip {
+                match signaling::NucleusClient::new(
+                    nucleus_addr,
+                    cluster.clone(),
+                    identity.public_key_bytes(),
+                    vip,
+                    args.port,
+                ).await {
+                    Ok(client) => {
+                        // Register with nucleus immediately
+                        if let Err(e) = client.register(&socket).await {
+                            warn!("Failed to register with nucleus: {}", e);
+                        }
+                        Some(client)
+                    }
+                    Err(e) => {
+                        warn!("Failed to create nucleus client: {}", e);
+                        None
+                    }
+                }
+            } else {
+                warn!("--nucleus requires --vip to be specified");
+                None
+            }
+        } else {
+            info!("No nucleus specified, running in standalone mode");
+            None
+        }
+    } else {
+        info!("Running as Nucleus (signaling server)");
+        None
+    };
 
     // Spawn metrics HTTP server
     let metrics_clone = metrics.clone();
@@ -341,6 +386,19 @@ async fn main() -> Result<()> {
                 for sid in expired {
                     let _ = bpf_sync.remove_session(sid);
                     info!("Expired session {}", sid);
+                }
+                
+                // Nucleus mode: cleanup stale peers
+                if is_nucleus_mode {
+                    nucleus_state.cleanup();
+                }
+            }
+            _ = heartbeat_interval.tick() => {
+                // Edge mode: send heartbeat to nucleus
+                if let Some(ref client) = nucleus_client {
+                    if let Err(e) = client.heartbeat(&socket).await {
+                        warn!("Failed to send heartbeat: {}", e);
+                    }
                 }
             }
             // Read from TUN interface (local packets to send to VPN)
@@ -397,8 +455,51 @@ async fn main() -> Result<()> {
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, src)) => {
-                        info!("Received {} bytes from {}", len, src);
                         metrics.inc_packets_rx();
+                        
+                        // Check if this is a signaling message (first byte indicates type)
+                        if len > 0 && buf[0] < 0x10 {
+                            // Signaling message types are 0x01-0x0F
+                            if is_nucleus_mode {
+                                // Nucleus: handle registration/heartbeat
+                                if let Some(response) = signaling::handle_nucleus_message(
+                                    &mut nucleus_state,
+                                    &buf[..len],
+                                    src,
+                                ) {
+                                    if let Err(e) = socket.send_to(&response, src).await {
+                                        warn!("Failed to send signaling response: {}", e);
+                                    }
+                                }
+                            } else if signaling::is_signaling_message(&buf[..len]) {
+                                // Edge: received peer list from nucleus
+                                match signaling::parse_peer_list(&buf[..len]) {
+                                    Ok(peers) => {
+                                        info!("Received {} peers from nucleus", peers.len());
+                                        for peer_info in peers {
+                                            // Parse endpoint
+                                            if let Ok(endpoint) = peer_info.endpoint.parse::<std::net::SocketAddr>() {
+                                                // Add to peer table
+                                                let session_id = session_manager.generate_session_id(endpoint.ip());
+                                                peer_table.register(
+                                                    peer_info.public_key,
+                                                    endpoint,
+                                                    peer_info.vip,
+                                                    session_id,
+                                                );
+                                                info!("Added peer {} at {}", peer_info.vip, endpoint);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to parse peer list: {}", e);
+                                    }
+                                }
+                            }
+                            continue; // Skip normal packet processing for signaling
+                        }
+                        
+                        info!("Received {} bytes from {}", len, src);
                         
                         // For initial handshake, check if this is a new connection
                         // Client sends session_id in header (8 bytes), but we validate/generate our own
