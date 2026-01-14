@@ -45,8 +45,10 @@ jobs:
           TESTS_FAILED=0
           PING_RESULT="SKIPPED"
           PING_LATENCY="N/A"
-          IPERF_RESULT="SKIPPED"
-          IPERF_THROUGHPUT="N/A"
+          TCP_RESULT="SKIPPED"
+          TCP_THROUGHPUT="N/A"
+          UDP_RESULT="SKIPPED"
+          UDP_THROUGHPUT="N/A"
           
           echo "============================================"
           echo "🚀 OmniNervous Network Test Results"
@@ -59,18 +61,21 @@ jobs:
           docker ps --format 'table {{.Names}}\t{{.Status}}' | grep -E "edge-a|edge-b" || echo "No test containers found"
           echo ""
           
-          # Test 1: Ping Edge A → Edge B
+          # Test 1: Ping Edge A → Edge B (with warmup)
           echo "🏓 Ping Test (Edge A → Edge B):"
-          PING_OUTPUT=$(docker exec edge-a ping -c 5 -W 1 10.99.0.20 2>&1)
-          if echo "$PING_OUTPUT" | grep -q "5 received"; then
+          # Warmup: 3 packets
+          docker exec edge-a ping -c 3 -W 1 10.99.0.20 > /dev/null 2>&1 || true
+          # Actual test: 10 packets
+          PING_OUTPUT=$(docker exec edge-a ping -c 10 -W 1 10.99.0.20 2>&1)
+          if echo "$PING_OUTPUT" | grep -q "10 received"; then
             PING_LATENCY=$(echo "$PING_OUTPUT" | grep "rtt" | awk -F'/' '{print $5}')
-            echo "✅ Ping: SUCCESS (5/5 packets, avg ${PING_LATENCY}ms)"
+            echo "✅ Ping: SUCCESS (10/10 packets, avg ${PING_LATENCY}ms)"
             PING_RESULT="PASSED"
             TESTS_PASSED=$((TESTS_PASSED + 1))
           elif echo "$PING_OUTPUT" | grep -q "received"; then
             RECEIVED=$(echo "$PING_OUTPUT" | grep -o "[0-9]* received" | cut -d' ' -f1)
             PING_LATENCY=$(echo "$PING_OUTPUT" | grep "rtt" | awk -F'/' '{print $5}')
-            echo "⚠️ Ping: PARTIAL (${RECEIVED}/5 packets, avg ${PING_LATENCY:-N/A}ms)"
+            echo "⚠️ Ping: PARTIAL (${RECEIVED}/10 packets, avg ${PING_LATENCY:-N/A}ms)"
             PING_RESULT="PARTIAL"
             TESTS_PASSED=$((TESTS_PASSED + 1))
           else
@@ -82,50 +87,80 @@ jobs:
           
           echo ""
           
-          # Test 2: iperf3 Throughput Edge A → Edge B
-          echo "📈 iperf3 Throughput Test (Edge A → Edge B):"
+          # Test 2: iperf3 TCP Throughput (10s with warmup)
+          echo "📈 iperf3 TCP Test (Edge A → Edge B):"
           
           # Start iperf3 server on edge-b
           echo "   Starting iperf3 server on edge-b..."
           docker exec -d edge-b iperf3 -s -p 5201
           sleep 3
           
-          # Verify server is listening
           if docker exec edge-b pgrep iperf3 > /dev/null; then
-            echo "   iperf3 server running on edge-b"
+            echo "   iperf3 server running"
             
-            # Run iperf3 client on edge-a
-            echo "   Running iperf3 client on edge-a..."
-            IPERF_OUTPUT=$(docker exec edge-a iperf3 -c 10.99.0.20 -p 5201 -t 5 2>&1)
+            # Warmup: 3 second test (discard results)
+            echo "   Warmup (3s)..."
+            docker exec edge-a iperf3 -c 10.99.0.20 -p 5201 -t 3 > /dev/null 2>&1 || true
             
-            # Check for success in output
-            if echo "$IPERF_OUTPUT" | grep -q "Mbits/sec\|Gbits/sec"; then
-              # Extract throughput from last sender line
-              THROUGHPUT_LINE=$(echo "$IPERF_OUTPUT" | grep "sender" | tail -1)
-              IPERF_THROUGHPUT=$(echo "$THROUGHPUT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /[0-9]/ && $(i+1) ~ /bits/) print $i}' | tail -1)
-              UNIT=$(echo "$THROUGHPUT_LINE" | grep -o "[MGK]bits/sec" | head -1)
-              
-              if [ -n "$IPERF_THROUGHPUT" ]; then
-                echo "✅ iperf3: SUCCESS (${IPERF_THROUGHPUT} ${UNIT})"
-                IPERF_RESULT="PASSED"
-                TESTS_PASSED=$((TESTS_PASSED + 1))
-              else
-                # Fallback: just show raw output
-                echo "✅ iperf3: SUCCESS"
-                echo "   $(echo "$IPERF_OUTPUT" | grep sender | tail -1)"
-                IPERF_THROUGHPUT=$(echo "$IPERF_OUTPUT" | grep sender | tail -1 | awk '{print $7}')
-                IPERF_RESULT="PASSED"
-                TESTS_PASSED=$((TESTS_PASSED + 1))
+            # Actual test: 10 seconds
+            echo "   Running 10s TCP test..."
+            TCP_OUTPUT=$(docker exec edge-a iperf3 -c 10.99.0.20 -p 5201 -t 10 2>&1)
+            
+            if echo "$TCP_OUTPUT" | grep -q "Mbits/sec\|Gbits/sec"; then
+              TCP_LINE=$(echo "$TCP_OUTPUT" | grep "sender" | tail -1)
+              TCP_THROUGHPUT=$(echo "$TCP_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9.]+$/ && $(i+1) ~ /bits/) print $i " " $(i+1)}' | tail -1)
+              if [ -z "$TCP_THROUGHPUT" ]; then
+                TCP_THROUGHPUT=$(echo "$TCP_LINE" | grep -oE "[0-9.]+ [MG]bits/sec" | head -1)
               fi
+              echo "✅ TCP: ${TCP_THROUGHPUT:-SUCCESS}"
+              TCP_RESULT="PASSED"
+              TESTS_PASSED=$((TESTS_PASSED + 1))
             else
-              echo "❌ iperf3: Connection failed"
-              echo "   Output: $(echo "$IPERF_OUTPUT" | tail -5)"
-              IPERF_RESULT="FAILED"
+              echo "❌ TCP: Connection failed"
+              TCP_RESULT="FAILED"
               TESTS_FAILED=$((TESTS_FAILED + 1))
             fi
           else
-            echo "❌ iperf3 server failed to start on edge-b"
-            IPERF_RESULT="FAILED"
+            echo "❌ iperf3 server failed to start"
+            TCP_RESULT="FAILED"
+            TESTS_FAILED=$((TESTS_FAILED + 1))
+          fi
+          
+          echo ""
+          
+          # Test 3: iperf3 UDP Throughput (10s)
+          echo "📊 iperf3 UDP Test (Edge A → Edge B):"
+          
+          # Kill previous server and restart  
+          docker exec edge-b pkill iperf3 || true
+          sleep 1
+          docker exec -d edge-b iperf3 -s -p 5201
+          sleep 2
+          
+          if docker exec edge-b pgrep iperf3 > /dev/null; then
+            # UDP test: 10 seconds, target 1Gbps
+            echo "   Running 10s UDP test (target 1Gbps)..."
+            UDP_OUTPUT=$(docker exec edge-a iperf3 -c 10.99.0.20 -p 5201 -u -b 1G -t 10 2>&1)
+            
+            if echo "$UDP_OUTPUT" | grep -q "Mbits/sec\|Gbits/sec"; then
+              UDP_LINE=$(echo "$UDP_OUTPUT" | grep "sender" | tail -1)
+              UDP_THROUGHPUT=$(echo "$UDP_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9.]+$/ && $(i+1) ~ /bits/) print $i " " $(i+1)}' | tail -1)
+              if [ -z "$UDP_THROUGHPUT" ]; then
+                UDP_THROUGHPUT=$(echo "$UDP_LINE" | grep -oE "[0-9.]+ [MG]bits/sec" | head -1)
+              fi
+              # Get packet loss
+              LOSS=$(echo "$UDP_OUTPUT" | grep -oE "[0-9.]+%" | tail -1)
+              echo "✅ UDP: ${UDP_THROUGHPUT:-SUCCESS} (${LOSS:-0%} loss)"
+              UDP_RESULT="PASSED"
+              TESTS_PASSED=$((TESTS_PASSED + 1))
+            else
+              echo "❌ UDP: Connection failed"
+              UDP_RESULT="FAILED"
+              TESTS_FAILED=$((TESTS_FAILED + 1))
+            fi
+          else
+            echo "❌ iperf3 server failed"
+            UDP_RESULT="FAILED"
             TESTS_FAILED=$((TESTS_FAILED + 1))
           fi
           
@@ -147,8 +182,9 @@ jobs:
           echo "✅ Passed:  $TESTS_PASSED"
           echo "❌ Failed:  $TESTS_FAILED"
           echo ""
-          echo "🏓 Ping:    $PING_RESULT (${PING_LATENCY} ms)"
-          echo "📈 iperf3:  $IPERF_RESULT (${IPERF_THROUGHPUT} Mbps)"
+          echo "🏓 Ping:     $PING_RESULT (${PING_LATENCY} ms)"
+          echo "📈 TCP:      $TCP_RESULT (${TCP_THROUGHPUT})"
+          echo "📊 UDP:      $UDP_RESULT (${UDP_THROUGHPUT})"
           echo "============================================"
           
           # Set outputs for GitHub Summary
@@ -156,8 +192,10 @@ jobs:
           echo "TESTS_FAILED=$TESTS_FAILED" >> $GITHUB_OUTPUT
           echo "PING_RESULT=$PING_RESULT" >> $GITHUB_OUTPUT
           echo "PING_LATENCY=$PING_LATENCY" >> $GITHUB_OUTPUT
-          echo "IPERF_RESULT=$IPERF_RESULT" >> $GITHUB_OUTPUT
-          echo "IPERF_THROUGHPUT=$IPERF_THROUGHPUT" >> $GITHUB_OUTPUT
+          echo "TCP_RESULT=$TCP_RESULT" >> $GITHUB_OUTPUT
+          echo "TCP_THROUGHPUT=$TCP_THROUGHPUT" >> $GITHUB_OUTPUT
+          echo "UDP_RESULT=$UDP_RESULT" >> $GITHUB_OUTPUT
+          echo "UDP_THROUGHPUT=$UDP_THROUGHPUT" >> $GITHUB_OUTPUT
           
           # Exit with failure if tests failed
           if [ "$TESTS_FAILED" -gt 0 ]; then
@@ -181,8 +219,9 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Test | Status | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|:---|:---|:---|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🏓 Ping (Edge A → Edge B) | ${{ steps.tests.outputs.PING_RESULT || 'N/A' }} | ${{ steps.tests.outputs.PING_LATENCY || 'N/A' }} ms |" >> $GITHUB_STEP_SUMMARY
-          echo "| 📈 iperf3 Throughput | ${{ steps.tests.outputs.IPERF_RESULT || 'N/A' }} | ${{ steps.tests.outputs.IPERF_THROUGHPUT || 'N/A' }} Mbps |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🏓 Ping (10 packets) | ${{ steps.tests.outputs.PING_RESULT || 'N/A' }} | ${{ steps.tests.outputs.PING_LATENCY || 'N/A' }} ms |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📈 iperf3 TCP (10s) | ${{ steps.tests.outputs.TCP_RESULT || 'N/A' }} | ${{ steps.tests.outputs.TCP_THROUGHPUT || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📊 iperf3 UDP (10s) | ${{ steps.tests.outputs.UDP_RESULT || 'N/A' }} | ${{ steps.tests.outputs.UDP_THROUGHPUT || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Features Verified" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Noise_IK Handshake" >> $GITHUB_STEP_SUMMARY
