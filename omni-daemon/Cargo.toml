@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-omni-common = { path = "../omni-common" }
 tokio = { version = "1", features = ["full"] }
 snow = "0.9"
 clap = { version = "4.4", features = ["derive"] }
@@ -24,5 +23,11 @@ hyper = { version = "1.5", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
+# Non-Linux: omni-common without aya
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+omni-common = { path = "../omni-common" }
+
+# Linux: omni-common with aya feature for Pod trait
 [target.'cfg(target_os = "linux")'.dependencies]
+omni-common = { path = "../omni-common", features = ["aya"] }
 aya = { version = "0.12", features = ["async_tokio"] }
