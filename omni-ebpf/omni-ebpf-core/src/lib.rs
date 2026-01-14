@@ -1,14 +1,5 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+#![no_std]
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+// This lib.rs is a placeholder for the eBPF crate.
+// The actual XDP program is in main.rs.
+// This file must be no_std for BPF target compatibility.
