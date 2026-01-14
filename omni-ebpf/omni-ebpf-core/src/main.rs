@@ -8,11 +8,11 @@ use aya_bpf::{
     programs::XdpContext,
 };
 use aya_log_ebpf::info;
-use omni_common::{SessionEntry, FdbEntry};
+use omni_common::{SessionEntry, SessionKey, FdbEntry};
 
-// Session map keyed by session_id
+// Session map keyed by SessionKey (two u32s for 64-bit session ID)
 #[map]
-static mut SESSIONS: HashMap<u32, SessionEntry> = HashMap::with_max_entries(1024, 0);
+static mut SESSIONS: HashMap<SessionKey, SessionEntry> = HashMap::with_max_entries(1024, 0);
 
 // FDB map keyed by MAC address
 #[map]
@@ -23,7 +23,7 @@ const ETH_HDR_LEN: usize = 14;
 const IPV4_HDR_LEN: usize = 20;
 const IPV6_HDR_LEN: usize = 40;
 const UDP_HDR_LEN: usize = 8;
-const OMNI_HDR_LEN: usize = 12; // session_id (4) + nonce (8)
+const OMNI_HDR_LEN: usize = 24; // session_id (8) + sequence (8) + nonce (8)
 const ETH_P_IPV4: u16 = 0x0800;
 const ETH_P_IPV6: u16 = 0x86DD;
 const IPPROTO_UDP: u8 = 17;
@@ -205,20 +205,29 @@ fn try_xdp_synapse(ctx: XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     };
 
-    // Parse OmniNervous header: session_id (4 bytes) + nonce (8 bytes)
-    let session_id: *const u32 = ptr_at(&ctx, omni_offset)?;
-    let session_id = u32::from_be(unsafe { *session_id });
+    // Parse OmniNervous header: session_id (8 bytes) + sequence (8 bytes) + nonce (8 bytes)
+    // Read session_id as two u32 values for SessionKey
+    let session_id_high: *const u32 = ptr_at(&ctx, omni_offset)?;
+    let session_id_low: *const u32 = ptr_at(&ctx, omni_offset + 4)?;
+    let session_key = SessionKey {
+        id_high: u32::from_be(unsafe { *session_id_high }),
+        id_low: u32::from_be(unsafe { *session_id_low }),
+    };
+    let session_id = session_key.to_u64();
 
-    // Extract nonce
+    // Skip sequence number (we'll add replay check later)
+    // let _sequence: *const u64 = ptr_at(&ctx, omni_offset + 8)?;
+
+    // Extract nonce (at offset 16 after session_id(8) + sequence(8))
     let mut nonce = [0u8; 8];
     #[allow(clippy::needless_range_loop)]
     for i in 0..8 {
-        let byte_ptr: *const u8 = ptr_at(&ctx, omni_offset + 4 + i)?;
+        let byte_ptr: *const u8 = ptr_at(&ctx, omni_offset + 16 + i)?;
         nonce[i] = unsafe { *byte_ptr };
     }
 
-    // Lookup session in map
-    let session = unsafe { SESSIONS.get(&session_id) };
+    // Lookup session in map using SessionKey
+    let session = unsafe { SESSIONS.get(&session_key) };
 
     match session {
         Some(entry) => {

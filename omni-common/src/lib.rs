@@ -9,6 +9,36 @@ pub struct PacketHeader {
     pub nonce: [u8; 8],   // ChaCha20 nonce
 }
 
+/// Session key for BPF HashMap compatibility (aya requires Pod trait)
+/// Wraps u64 as two u32 values for proper BPF map support
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionKey {
+    pub id_high: u32,
+    pub id_low: u32,
+}
+
+impl SessionKey {
+    /// Create from u64 session ID
+    pub const fn from_u64(id: u64) -> Self {
+        SessionKey {
+            id_high: (id >> 32) as u32,
+            id_low: id as u32,
+        }
+    }
+
+    /// Convert back to u64
+    pub const fn to_u64(self) -> u64 {
+        ((self.id_high as u64) << 32) | (self.id_low as u64)
+    }
+}
+
+impl From<u64> for SessionKey {
+    fn from(id: u64) -> Self {
+        Self::from_u64(id)
+    }
+}
+
 /// Session entry stored in BPF map with replay protection
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
