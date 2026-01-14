@@ -1,9 +1,12 @@
-//! Cross-platform virtual network interface (TUN/TAP)
+//! Cross-platform virtual network interface (TUN)
 //!
-//! Provides Layer 2/3 virtual interface support:
+//! Provides Layer 3 TUN interface support:
 //! - Linux: TUN via /dev/net/tun
-//! - macOS: utun via socket API  
+//! - macOS: utun via socket API
 //! - Windows: Wintun driver (requires wintun.dll)
+//!
+//! Note: Layer 2 TAP support requires tap-windows driver on Windows
+//! and is planned for future implementation.
 
 use anyhow::{Context, Result};
 use log::{info};
@@ -34,7 +37,7 @@ impl Default for TunConfig {
     }
 }
 
-/// Cross-platform virtual network interface
+/// Cross-platform virtual network interface (Layer 3 TUN)
 pub struct VirtualInterface {
     device: tun2::AsyncDevice,
     config: TunConfig,
@@ -43,7 +46,7 @@ pub struct VirtualInterface {
 impl VirtualInterface {
     /// Create and configure a virtual network interface
     pub async fn create(config: TunConfig) -> Result<Self> {
-        info!("Creating virtual interface '{}' with IP {}/{}", 
+        info!("Creating TUN interface '{}' with IP {}/{}", 
               config.name, config.address, config.netmask);
         
         let mut tun_config = tun2::Configuration::default();
@@ -69,7 +72,7 @@ impl VirtualInterface {
         let device = tun2::create_as_async(&tun_config)
             .context("Failed to create TUN device")?;
         
-        info!("✅ Virtual interface '{}' created successfully", config.name);
+        info!("✅ TUN interface '{}' created successfully", config.name);
         info!("   Address: {}/{}", config.address, config.netmask);
         info!("   MTU: {}", config.mtu);
         
@@ -114,7 +117,6 @@ pub fn check_tun_permissions() -> Result<()> {
         if fs::metadata("/dev/net/tun").is_err() {
             anyhow::bail!("TUN device not available. Is the tun module loaded?");
         }
-        // Check if we're root or have CAP_NET_ADMIN
         if unsafe { libc::geteuid() } != 0 {
             warn!("Not running as root. TUN creation may fail without CAP_NET_ADMIN.");
         }
