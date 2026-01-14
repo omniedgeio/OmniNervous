@@ -64,13 +64,13 @@ fn ptr_at_mut<T>(ctx: &XdpContext, offset: usize) -> Result<*mut T, ()> {
     Ok((start + offset) as *mut T)
 }
 
-/// ChaCha20 quarter round operation
+/// ChaCha20 quarter round operation - operates on array with indices to avoid borrow conflicts
 #[inline(always)]
-fn quarter_round(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32) {
-    *a = a.wrapping_add(*b); *d ^= *a; *d = d.rotate_left(16);
-    *c = c.wrapping_add(*d); *b ^= *c; *b = b.rotate_left(12);
-    *a = a.wrapping_add(*b); *d ^= *a; *d = d.rotate_left(8);
-    *c = c.wrapping_add(*d); *b ^= *c; *b = b.rotate_left(7);
+fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+    state[a] = state[a].wrapping_add(state[b]); state[d] ^= state[a]; state[d] = state[d].rotate_left(16);
+    state[c] = state[c].wrapping_add(state[d]); state[b] ^= state[c]; state[b] = state[b].rotate_left(12);
+    state[a] = state[a].wrapping_add(state[b]); state[d] ^= state[a]; state[d] = state[d].rotate_left(8);
+    state[c] = state[c].wrapping_add(state[d]); state[b] ^= state[c]; state[b] = state[b].rotate_left(7);
 }
 
 /// ChaCha20 block function - produces 64 bytes of keystream
@@ -109,16 +109,16 @@ fn chacha20_block(key: &[u8; 32], nonce: &[u8; 8], counter: u32, output: &mut [u
     #[allow(clippy::needless_range_loop)]
     for _ in 0..10 {
         // Column rounds
-        quarter_round(&mut working[0], &mut working[4], &mut working[8], &mut working[12]);
-        quarter_round(&mut working[1], &mut working[5], &mut working[9], &mut working[13]);
-        quarter_round(&mut working[2], &mut working[6], &mut working[10], &mut working[14]);
-        quarter_round(&mut working[3], &mut working[7], &mut working[11], &mut working[15]);
+        quarter_round(&mut working, 0, 4, 8, 12);
+        quarter_round(&mut working, 1, 5, 9, 13);
+        quarter_round(&mut working, 2, 6, 10, 14);
+        quarter_round(&mut working, 3, 7, 11, 15);
         
         // Diagonal rounds
-        quarter_round(&mut working[0], &mut working[5], &mut working[10], &mut working[15]);
-        quarter_round(&mut working[1], &mut working[6], &mut working[11], &mut working[12]);
-        quarter_round(&mut working[2], &mut working[7], &mut working[8], &mut working[13]);
-        quarter_round(&mut working[3], &mut working[4], &mut working[9], &mut working[14]);
+        quarter_round(&mut working, 0, 5, 10, 15);
+        quarter_round(&mut working, 1, 6, 11, 12);
+        quarter_round(&mut working, 2, 7, 8, 13);
+        quarter_round(&mut working, 3, 4, 9, 14);
     }
     
     // Add original state
@@ -341,7 +341,7 @@ fn try_xdp_synapse(ctx: XdpContext) -> Result<u32, ()> {
     let session = unsafe { SESSIONS.get(&session_key) };
 
     match session {
-        Some(entry) => {
+        Some(_entry) => {
             // Payload: [encrypted_data][16-byte Poly1305 tag]
             let payload_offset = omni_offset + OMNI_HDR_LEN;
             
