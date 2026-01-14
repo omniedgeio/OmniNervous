@@ -400,6 +400,52 @@ async fn main() -> Result<()> {
                         warn!("Failed to send heartbeat: {}", e);
                     }
                 }
+                
+                // Initiate handshakes to discovered peers that haven't been contacted yet
+                if !is_nucleus_mode {
+                    let peers_to_connect = peer_table.peers_needing_handshake();
+                    for peer in peers_to_connect {
+                        if let Some(pubkey) = peer.public_key {
+                            // Create initiator session
+                            match NoiseSession::new_initiator(&identity.private_key, &pubkey, psk.as_ref()) {
+                                Ok(mut session) => {
+                                    // Build handshake message 1 with our VIP
+                                    let mut payload = vec![];
+                                    if let Some(our_vip) = args.vip {
+                                        payload.extend_from_slice(&our_vip.octets());
+                                    }
+                                    
+                                    let mut msg = vec![0u8; 128];
+                                    match session.handshake.write_message(&payload, &mut msg) {
+                                        Ok(len) => {
+                                            // Build packet: [session_id(8)] [handshake]
+                                            let mut packet = peer.session_id.to_be_bytes().to_vec();
+                                            packet.extend_from_slice(&msg[..len]);
+                                            
+                                            if let Err(e) = socket.send_to(&packet, peer.endpoint).await {
+                                                warn!("Failed to send handshake to {}: {}", peer.virtual_ip, e);
+                                            } else {
+                                                // Store session and mark peer
+                                                session_manager.create_session(
+                                                    peer.session_id,
+                                                    SessionState::Handshaking(session)
+                                                );
+                                                peer_table.mark_handshake_initiated(&peer.virtual_ip);
+                                                info!("Initiated handshake to {} at {}", peer.virtual_ip, peer.endpoint);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to write handshake message: {}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to create initiator session for {}: {}", peer.virtual_ip, e);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             // Read from TUN interface (local packets to send to VPN)
             tun_result = tun_read => {
@@ -536,8 +582,19 @@ async fn main() -> Result<()> {
                             }
 
                             // Advance handshake (skip 8-byte session header)
+                            // Store peer VIP from handshake payload
+                            let mut peer_vip_from_handshake: Option<std::net::Ipv4Addr> = None;
+                            
                             match session_manager.advance_handshake(session_id, &buf[8..len]) {
-                                Ok(Some(response)) => {
+                                Ok(Some((response, peer_payload))) => {
+                                    // Extract peer VIP from payload (first 4 bytes)
+                                    if peer_payload.len() >= 4 {
+                                        peer_vip_from_handshake = Some(std::net::Ipv4Addr::new(
+                                            peer_payload[0], peer_payload[1], 
+                                            peer_payload[2], peer_payload[3]
+                                        ));
+                                    }
+                                    
                                     let mut reply = session_id.to_be_bytes().to_vec();
                                     reply.extend(response);
                                     if let Err(e) = socket.send_to(&reply, src).await {
@@ -563,11 +620,16 @@ async fn main() -> Result<()> {
                                     info!("Session {} finalized and synced to BPF!", session_id);
                                 }
                                 
-                                // Register peer in routing table
-                                // For now, derive VIP from last octet of session ID (TODO: exchange VIP in handshake)
-                                let peer_vip = std::net::Ipv4Addr::new(
-                                    10, 200, 0, ((session_id % 250) + 1) as u8
-                                );
+                                // Register peer with VIP from handshake (or fallback)
+                                let peer_vip = peer_vip_from_handshake.unwrap_or_else(|| {
+                                    // Fallback: check if peer already exists in table (from signaling)
+                                    if let Some(peer) = peer_table.lookup_by_session(session_id) {
+                                        peer.virtual_ip
+                                    } else {
+                                        // Last resort: derive from session (not ideal)
+                                        std::net::Ipv4Addr::new(10, 200, 0, ((session_id % 250) + 1) as u8)
+                                    }
+                                });
                                 peer_table.upsert(peer_vip, session_id, src);
                                 info!("Registered peer: {} at {} (session {})", peer_vip, src, session_id);
                             }
