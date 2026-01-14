@@ -1,7 +1,8 @@
 #!/bin/bash
 # =============================================================================
-# OmniNervous Cloud-to-Cloud Test Orchestrator
-# Run from LOCAL machine, orchestrates tests between TWO remote cloud instances
+# OmniNervous Cloud-to-Cloud Test Orchestrator (3-Node Architecture)
+# Run from LOCAL machine, orchestrates tests between cloud instances
+# Architecture: Nucleus (signaling) + Edge A + Edge B (P2P tunnel)
 # =============================================================================
 
 set -e
@@ -29,6 +30,7 @@ print_error() {
 # Configuration
 # =============================================================================
 
+NUCLEUS=""
 NODE_A=""
 NODE_B=""
 SSH_KEY=""
@@ -36,44 +38,57 @@ SSH_USER="${SSH_USER:-ubuntu}"
 OMNI_PORT=${OMNI_PORT:-51820}
 TEST_DURATION=${TEST_DURATION:-10}
 RESULTS_DIR="./test_results"
-BINARY_PATH="./target/release/omni-daemon-linux-amd64"
+BINARY_PATH="./target/release/omni-daemon"
+
+# Virtual IPs for P2P tunnel
+VIP_A="10.200.0.10"
+VIP_B="10.200.0.20"
+CLUSTER_NAME="${CLUSTER_NAME:-omni-test}"
+CLUSTER_SECRET="${CLUSTER_SECRET:-}"
 
 show_help() {
     cat << EOF
-OmniNervous Cloud-to-Cloud Test Orchestrator
+OmniNervous 3-Node Cloud Test Orchestrator
 
-Runs from your LOCAL machine, SSHs into two cloud instances, deploys binaries,
-runs P2P connectivity test, and collects results locally.
+Architecture:
+  ┌──────────┐      ┌──────────┐      ┌──────────┐
+  │ Nucleus  │◄────►│  Edge A  │◄────►│  Edge B  │
+  │ Signaling│      │ $VIP_A │      │ $VIP_B │
+  └──────────┘      └──────────┘      └──────────┘
 
 Usage:
-  $0 --node-a <IP_A> --node-b <IP_B> [OPTIONS]
+  $0 --nucleus <IP> --node-a <IP> --node-b <IP> [OPTIONS]
 
 Required:
-  --node-a        IP address of Node A (initiator)
-  --node-b        IP address of Node B (responder)
+  --nucleus       IP address of Nucleus (signaling server)
+  --node-a        IP address of Edge A
+  --node-b        IP address of Edge B
 
 Options:
-  --ssh-key       Path to SSH private key (default: ~/.ssh/id_rsa)
+  --ssh-key       Path to SSH private key
   --ssh-user      SSH username (default: ubuntu)
   --port          OmniNervous UDP port (default: 51820)
-  --duration      iperf3 test duration in seconds (default: 10)
+  --duration      iperf3 test duration (default: 10s)
+  --cluster       Cluster name (default: omni-test)
+  --secret        Cluster secret (min 16 chars, recommended)
   --skip-build    Skip local cargo build
-  --skip-deploy   Skip binary deployment (use existing)
+  --skip-deploy   Skip binary deployment
   --help          Show this help
 
 Environment Variables:
-  SSH_USER        SSH username (default: ubuntu)
-  OMNI_PORT       UDP port (default: 51820)
-  TEST_DURATION   iperf3 test duration
+  SSH_USER        SSH username
+  OMNI_PORT       UDP port
+  CLUSTER_SECRET  Cluster authentication secret
 
 Example:
-  # Test between AWS (us-west-2) and GCP (us-central1)
-  $0 --node-a 54.x.x.x --node-b 35.x.x.x --ssh-key ~/.ssh/cloud.pem
+  $0 --nucleus 104.x.x.x --node-a 54.x.x.x --node-b 35.x.x.x \\
+     --ssh-key ~/.ssh/cloud.pem --secret "my-secure-secret-16"
 
-Prerequisites on cloud nodes:
-  - iperf3 installed (apt-get install iperf3)
-  - UDP port $OMNI_PORT open in firewall/security group
+Prerequisites:
+  - iperf3 installed on edge nodes
+  - UDP port $OMNI_PORT open in firewalls
   - SSH access with key authentication
+  - Root access for TUN device creation
 EOF
 }
 
@@ -116,32 +131,25 @@ preflight_check() {
         errors=$((errors + 1))
     fi
     
-    # Check SSH connectivity to Node A
-    print_step "Testing SSH to Node A ($NODE_A)..."
-    if ssh_cmd "$NODE_A" "echo ok" &>/dev/null; then
-        echo -e "✅ SSH to Node A successful"
-    else
-        echo -e "❌ SSH to Node A failed"
-        errors=$((errors + 1))
-    fi
+    # Check SSH connectivity
+    for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
+        print_step "Testing SSH to $node..."
+        if ssh_cmd "$node" "echo ok" &>/dev/null; then
+            echo -e "✅ SSH to $node successful"
+        else
+            echo -e "❌ SSH to $node failed"
+            errors=$((errors + 1))
+        fi
+    done
     
-    # Check SSH connectivity to Node B
-    print_step "Testing SSH to Node B ($NODE_B)..."
-    if ssh_cmd "$NODE_B" "echo ok" &>/dev/null; then
-        echo -e "✅ SSH to Node B successful"
-    else
-        echo -e "❌ SSH to Node B failed"
-        errors=$((errors + 1))
-    fi
-    
-    # Check iperf3 on nodes
-    print_step "Checking iperf3 on remote nodes..."
+    # Check iperf3 on edge nodes
+    print_step "Checking iperf3 on edge nodes..."
     for node in "$NODE_A" "$NODE_B"; do
         if ssh_cmd "$node" "which iperf3" &>/dev/null; then
             echo -e "✅ iperf3 installed on $node"
         else
             echo -e "❌ iperf3 not installed on $node"
-            echo "   Run: ssh $SSH_USER@$node 'sudo apt-get update && sudo apt-get install -y iperf3'"
+            echo "   Run: ssh $SSH_USER@$node 'sudo apt-get install -y iperf3'"
             errors=$((errors + 1))
         fi
     done
@@ -161,7 +169,7 @@ preflight_check() {
 deploy_binaries() {
     print_header "Deploying Binaries"
     
-    for node in "$NODE_A" "$NODE_B"; do
+    for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
         print_step "Deploying to $node..."
         
         # Create remote directory
@@ -182,7 +190,7 @@ deploy_binaries() {
 # =============================================================================
 
 run_test() {
-    print_header "Running P2P Test"
+    print_header "Running 3-Node P2P Test"
     
     # Create local results directory
     mkdir -p "$RESULTS_DIR"
@@ -190,95 +198,145 @@ run_test() {
     timestamp=$(date +%Y%m%d_%H%M%S)
     local result_file="$RESULTS_DIR/cloud_test_$timestamp.json"
     
+    # Build secret args
+    local secret_args=""
+    if [[ -n "$CLUSTER_SECRET" ]]; then
+        if [[ ${#CLUSTER_SECRET} -lt 16 ]]; then
+            print_error "Secret must be at least 16 characters"
+            exit 1
+        fi
+        secret_args="--secret $CLUSTER_SECRET"
+        echo -e "🔐 Cluster authentication enabled"
+    else
+        echo -e "⚠️  No secret specified, running in OPEN mode"
+    fi
+    
     # Kill any existing processes
     print_step "Cleaning up old processes..."
-    for node in "$NODE_A" "$NODE_B"; do
-        ssh_cmd "$node" "pkill -f omni-daemon || true; pkill -f iperf3 || true" 2>/dev/null || true
+    for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
+        ssh_cmd "$node" "sudo pkill -f omni-daemon || true; pkill -f iperf3 || true" 2>/dev/null || true
     done
     sleep 2
     
-    # Start responder on Node B
-    print_step "Starting responder on Node B ($NODE_B)..."
-    ssh_cmd "$NODE_B" "cd ~/omni-test && nohup ./omni-daemon --port $OMNI_PORT > daemon.log 2>&1 &"
-    ssh_cmd "$NODE_B" "nohup iperf3 -s -p 5201 > iperf_server.log 2>&1 &"
+    # Start Nucleus (signaling server)
+    print_step "Starting Nucleus on $NUCLEUS..."
+    ssh_cmd "$NUCLEUS" "cd ~/omni-test && sudo nohup ./omni-daemon --mode nucleus --port $OMNI_PORT > nucleus.log 2>&1 &"
     sleep 3
     
-    # Start initiator on Node A and connect to Node B
-    print_step "Starting initiator on Node A ($NODE_A), connecting to Node B..."
-    ssh_cmd "$NODE_A" "cd ~/omni-test && nohup ./omni-daemon --port $OMNI_PORT --endpoint $NODE_B:$OMNI_PORT > daemon.log 2>&1 &"
+    # Start Edge A with VIP
+    print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
+    ssh_cmd "$NODE_A" "cd ~/omni-test && sudo nohup ./omni-daemon \
+        --nucleus $NUCLEUS:$OMNI_PORT \
+        --cluster $CLUSTER_NAME $secret_args \
+        --vip $VIP_A \
+        --port $OMNI_PORT \
+        > edge_a.log 2>&1 &"
+    sleep 3
+    
+    # Start Edge B with VIP
+    print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
+    ssh_cmd "$NODE_B" "cd ~/omni-test && sudo nohup ./omni-daemon \
+        --nucleus $NUCLEUS:$OMNI_PORT \
+        --cluster $CLUSTER_NAME $secret_args \
+        --vip $VIP_B \
+        --port $OMNI_PORT \
+        > edge_b.log 2>&1 &"
     sleep 5
     
-    # Run connectivity tests from Node A to Node B
-    print_header "Network Metrics (A → B)"
+    # Wait for P2P tunnel establishment
+    print_step "Waiting for P2P tunnel establishment..."
+    sleep 5
     
-    # Latency test (via Node A to Node B)
-    print_step "Measuring latency..."
-    local latency_output
-    latency_output=$(ssh_cmd "$NODE_A" "ping -c 10 $NODE_B 2>/dev/null | tail -1" 2>/dev/null || echo "")
-    local avg_latency
-    avg_latency=$(echo "$latency_output" | awk -F'/' '{print $5}' 2>/dev/null || echo "N/A")
-    echo -e "  Average Latency: ${YELLOW}${avg_latency} ms${NC}"
+    # Check interfaces on edges
+    print_step "Verifying TUN interfaces..."
+    echo "Edge A interfaces:"
+    ssh_cmd "$NODE_A" "ip addr show omni0 2>/dev/null || echo 'omni0 not found'"
+    echo ""
+    echo "Edge B interfaces:"
+    ssh_cmd "$NODE_B" "ip addr show omni0 2>/dev/null || echo 'omni0 not found'"
     
-    # Throughput test
-    print_step "Running iperf3 throughput test ($TEST_DURATION seconds)..."
+    # Network tests over P2P tunnel
+    print_header "Network Metrics (P2P Tunnel: A → B)"
+    
+    # Ping test over tunnel
+    print_step "Ping over tunnel ($VIP_A → $VIP_B)..."
+    local ping_output
+    ping_output=$(ssh_cmd "$NODE_A" "ping -c 10 -W 2 $VIP_B 2>&1" || echo "PING_FAILED")
+    local avg_latency="N/A"
+    if echo "$ping_output" | grep -q "rtt"; then
+        avg_latency=$(echo "$ping_output" | grep "rtt" | awk -F'/' '{print $5}')
+        echo -e "  ✅ Ping: ${YELLOW}${avg_latency} ms${NC}"
+    else
+        echo -e "  ❌ Ping failed over tunnel"
+        echo "     (This may be expected if tunnel not fully established)"
+    fi
+    
+    # iperf3 over tunnel
+    print_step "Starting iperf3 server on Edge B..."
+    ssh_cmd "$NODE_B" "nohup iperf3 -s -p 5201 --bind $VIP_B > iperf_server.log 2>&1 &"
+    sleep 2
+    
+    print_step "Running iperf3 throughput test ($TEST_DURATION seconds) over tunnel..."
     local iperf_json
-    iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $NODE_B -p 5201 -t $TEST_DURATION --json 2>/dev/null" || echo "{}")
+    iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $VIP_B -p 5201 -t $TEST_DURATION --json 2>/dev/null" || echo "{}")
     
     local throughput_bps
     throughput_bps=$(echo "$iperf_json" | jq '.end.sum_sent.bits_per_second // 0' 2>/dev/null || echo "0")
     local throughput_mbps
     throughput_mbps=$(echo "scale=2; $throughput_bps / 1000000" | bc 2>/dev/null || echo "N/A")
     
-    local retransmits
-    retransmits=$(echo "$iperf_json" | jq '.end.sum_sent.retransmits // 0' 2>/dev/null || echo "0")
+    if [[ "$throughput_mbps" != "N/A" && "$throughput_mbps" != "0" ]]; then
+        echo -e "  ✅ Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
+    else
+        echo -e "  ❌ iperf3 test failed (tunnel may not be active)"
+    fi
     
-    echo -e "  Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
-    echo -e "  Retransmits: $retransmits"
-    
-    # Collect daemon logs
+    # Collect logs
     print_step "Collecting logs..."
-    ssh_cmd "$NODE_A" "cat ~/omni-test/daemon.log" > "$RESULTS_DIR/node_a_daemon.log" 2>/dev/null || true
-    ssh_cmd "$NODE_B" "cat ~/omni-test/daemon.log" > "$RESULTS_DIR/node_b_daemon.log" 2>/dev/null || true
+    ssh_cmd "$NUCLEUS" "cat ~/omni-test/nucleus.log" > "$RESULTS_DIR/nucleus.log" 2>/dev/null || true
+    ssh_cmd "$NODE_A" "cat ~/omni-test/edge_a.log" > "$RESULTS_DIR/edge_a.log" 2>/dev/null || true
+    ssh_cmd "$NODE_B" "cat ~/omni-test/edge_b.log" > "$RESULTS_DIR/edge_b.log" 2>/dev/null || true
     
     # Create results JSON
     cat > "$result_file" << EOF
 {
   "timestamp": "$timestamp",
-  "node_a": "$NODE_A",
-  "node_b": "$NODE_B",
+  "architecture": "3-node (Nucleus + 2 Edges)",
+  "nucleus": "$NUCLEUS",
+  "edge_a": {"public_ip": "$NODE_A", "vip": "$VIP_A"},
+  "edge_b": {"public_ip": "$NODE_B", "vip": "$VIP_B"},
+  "cluster": "$CLUSTER_NAME",
+  "authenticated": $([ -n "$CLUSTER_SECRET" ] && echo "true" || echo "false"),
   "test_duration_sec": $TEST_DURATION,
   "results": {
-    "latency_ms": "$avg_latency",
-    "throughput_mbps": $throughput_mbps,
-    "throughput_bps": $throughput_bps,
-    "retransmits": $retransmits
-  },
-  "raw_iperf": $iperf_json
+    "tunnel_ping_ms": "$avg_latency",
+    "tunnel_throughput_mbps": $throughput_mbps
+  }
 }
 EOF
     
-    # Cleanup remote processes
+    # Cleanup
     print_step "Cleaning up remote processes..."
-    for node in "$NODE_A" "$NODE_B"; do
-        ssh_cmd "$node" "pkill -f omni-daemon || true; pkill -f iperf3 || true" 2>/dev/null || true
+    for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
+        ssh_cmd "$node" "sudo pkill -f omni-daemon || true; pkill -f iperf3 || true" 2>/dev/null || true
     done
     
     # Summary
     print_header "Test Complete"
     
-    echo -e "Node A (Initiator): $NODE_A"
-    echo -e "Node B (Responder): $NODE_B"
-    echo ""
-    echo -e "┌──────────────────────────────────────┐"
-    echo -e "│  ${GREEN}RESULTS${NC}                             │"
-    echo -e "├──────────────────────────────────────┤"
-    echo -e "│  Latency:     ${YELLOW}${avg_latency} ms${NC}"
-    echo -e "│  Throughput:  ${YELLOW}${throughput_mbps} Mbps${NC}"
-    echo -e "│  Retransmits: $retransmits"
-    echo -e "└──────────────────────────────────────┘"
+    echo -e "┌──────────────────────────────────────────────┐"
+    echo -e "│  ${GREEN}3-NODE P2P TEST RESULTS${NC}                      │"
+    echo -e "├──────────────────────────────────────────────┤"
+    echo -e "│  Nucleus:     $NUCLEUS"
+    echo -e "│  Edge A:      $NODE_A → $VIP_A"
+    echo -e "│  Edge B:      $NODE_B → $VIP_B"
+    echo -e "├──────────────────────────────────────────────┤"
+    echo -e "│  Tunnel Latency:    ${YELLOW}${avg_latency} ms${NC}"
+    echo -e "│  Tunnel Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
+    echo -e "└──────────────────────────────────────────────┘"
     echo ""
     echo -e "Results saved to: ${CYAN}$result_file${NC}"
-    echo -e "Daemon logs: ${CYAN}$RESULTS_DIR/node_*_daemon.log${NC}"
+    echo -e "Logs: ${CYAN}$RESULTS_DIR/*.log${NC}"
 }
 
 # =============================================================================
@@ -290,6 +348,10 @@ SKIP_DEPLOY=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --nucleus)
+            NUCLEUS="$2"
+            shift 2
+            ;;
         --node-a)
             NODE_A="$2"
             shift 2
@@ -314,6 +376,14 @@ while [[ $# -gt 0 ]]; do
             TEST_DURATION="$2"
             shift 2
             ;;
+        --cluster)
+            CLUSTER_NAME="$2"
+            shift 2
+            ;;
+        --secret)
+            CLUSTER_SECRET="$2"
+            shift 2
+            ;;
         --skip-build)
             SKIP_BUILD=true
             shift
@@ -335,15 +405,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate required args
-if [[ -z "$NODE_A" || -z "$NODE_B" ]]; then
-    print_error "Both --node-a and --node-b are required"
+if [[ -z "$NUCLEUS" || -z "$NODE_A" || -z "$NODE_B" ]]; then
+    print_error "--nucleus, --node-a, and --node-b are all required"
     show_help
     exit 1
 fi
 
-print_header "OmniNervous Cloud-to-Cloud Test"
-echo "Node A (Initiator): $NODE_A"
-echo "Node B (Responder): $NODE_B"
+print_header "OmniNervous 3-Node Cloud Test"
+echo "Nucleus:   $NUCLEUS (signaling)"
+echo "Edge A:    $NODE_A → VIP $VIP_A"
+echo "Edge B:    $NODE_B → VIP $VIP_B"
+echo "Cluster:   $CLUSTER_NAME"
+echo "Auth:      $([ -n "$CLUSTER_SECRET" ] && echo "PSK enabled" || echo "OPEN (⚠️)")"
 
 # Build locally if needed
 if ! $SKIP_BUILD; then
@@ -361,4 +434,4 @@ fi
 
 run_test
 
-echo -e "\n${GREEN}✅ Cloud test completed successfully!${NC}"
+echo -e "\n${GREEN}✅ 3-Node cloud test completed!${NC}"
