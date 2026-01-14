@@ -169,14 +169,15 @@ preflight_check() {
 }
 
 # =============================================================================
-# Deploy via Docker
+# Deploy via Docker (rsync local repo)
 # =============================================================================
 
 deploy_binaries() {
     print_header "Deploying via Docker"
     
-    # GitHub repo for cloning
-    local REPO_URL="https://github.com/omniedgeio/OmniNervous.git"
+    # Get the local repo root directory
+    local LOCAL_REPO_DIR
+    LOCAL_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
         print_step "Setting up Docker on $node..."
@@ -184,9 +185,15 @@ deploy_binaries() {
         # Check if Docker is installed, install if needed
         ssh_cmd "$node" "command -v docker >/dev/null 2>&1 || (curl -fsSL https://get.docker.com | sudo sh && sudo usermod -aG docker \$USER)"
         
-        # Clone or update repo
-        print_step "Cloning repository on $node..."
-        ssh_cmd "$node" "if [ -d ~/OmniNervous ]; then cd ~/OmniNervous && git pull; else git clone $REPO_URL ~/OmniNervous; fi"
+        # Sync local repo to remote using rsync
+        print_step "Syncing repository to $node..."
+        rsync -avz --delete \
+            --exclude 'target/' \
+            --exclude '.git/' \
+            --exclude 'test_results/' \
+            -e "ssh -o StrictHostKeyChecking=no ${SSH_KEY:+-i \"$SSH_KEY\"}" \
+            "$LOCAL_REPO_DIR/" \
+            "$SSH_USER@$node:~/OmniNervous/"
         
         # Build Docker image on this node
         print_step "Building Docker image on $node (this may take a few minutes first time)..."
