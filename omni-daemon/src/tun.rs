@@ -9,7 +9,7 @@
 //! and is planned for future implementation.
 
 use anyhow::{Context, Result};
-use log::{info};
+use log::{info, warn};
 use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
