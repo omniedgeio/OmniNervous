@@ -111,33 +111,74 @@ fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    name = "omni-daemon",
+    author = "OmniEdge <contact@omniedge.io>",
+    version,
+    about = "OmniNervous P2P VPN Daemon - Secure mesh networking for edge devices",
+    long_about = "OmniNervous Ganglion Daemon\n\n\
+        A high-performance P2P VPN daemon with:\n\
+        - Noise_IKpsk2 protocol (X25519 + ChaCha20-Poly1305)\n\
+        - Cluster-based PSK authentication\n\
+        - XDP/eBPF acceleration (Linux)\n\
+        - Cross-platform TUN support\n\n\
+        Examples:\n  \
+          # Run as Nucleus (signaling server)\n  \
+          omni-daemon --mode nucleus --port 51820\n\n  \
+          # Run as Edge (P2P client)\n  \
+          omni-daemon --nucleus 1.2.3.4:51820 --cluster mynet --secret MySecret123456 --vip 10.200.0.1"
+)]
 struct Args {
+    /// Network interface for eBPF attachment (Linux only)
     #[arg(short, long, default_value = "eth0")]
     iface: String,
+    
+    /// UDP port for VPN traffic
     #[arg(short, long, default_value = "51820")]
     port: u16,
+    
+    /// Run mode: 'nucleus' for signaling server, omit for edge client
     #[arg(short, long)]
     mode: Option<String>,
+    
+    /// Nucleus server address (host:port) for edge clients
     #[arg(short, long)]
     nucleus: Option<String>,
-    #[arg(short, long, help = "Cluster/network name to join")]
+    
+    /// Cluster/network name to join
+    #[arg(short, long)]
     cluster: Option<String>,
-    #[arg(long, help = "Cluster secret for authentication (min 16 chars)")]
+    
+    /// Cluster secret for authentication (minimum 16 characters)
+    #[arg(long)]
     secret: Option<String>,
-    #[arg(long, help = "Initialize new identity and exit")]
+    
+    /// Initialize new identity and exit
+    #[arg(long)]
     init: bool,
-    #[arg(long, help = "Path to identity directory")]
+    
+    /// Path to identity directory
+    #[arg(long)]
     identity: Option<std::path::PathBuf>,
-    #[arg(long, short = 'C', help = "Path to config file")]
+    
+    /// Path to config file
+    #[arg(long, short = 'C')]
     config: Option<std::path::PathBuf>,
-    #[arg(long, help = "Disable eBPF/XDP acceleration (Linux only)")]
+    
+    /// Disable eBPF/XDP acceleration (Linux only)
+    #[arg(long)]
     no_ebpf: bool,
-    #[arg(long, help = "Virtual IP address (e.g., 10.200.0.1)")]
+    
+    /// Virtual IP address (e.g., 10.200.0.1)
+    #[arg(long)]
     vip: Option<std::net::Ipv4Addr>,
-    #[arg(long, default_value = "255.255.255.0", help = "Virtual network mask")]
+    
+    /// Virtual network mask
+    #[arg(long, default_value = "255.255.255.0")]
     netmask: std::net::Ipv4Addr,
-    #[arg(long, default_value = "omni0", help = "Virtual interface name")]
+    
+    /// Virtual interface name
+    #[arg(long, default_value = "omni0")]
     tun_name: String,
 }
 
