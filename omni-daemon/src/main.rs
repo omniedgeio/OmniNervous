@@ -25,6 +25,7 @@ mod nonce;
 mod crypto_util;
 mod poly1305;
 mod tun;
+mod peers;
 
 use noise::NoiseSession;
 use session::{SessionManager, SessionState};
