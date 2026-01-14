@@ -169,40 +169,61 @@ preflight_check() {
 }
 
 # =============================================================================
-# Deploy via Docker (rsync local repo)
+# Deploy via Local Docker Build
 # =============================================================================
 
 deploy_binaries() {
-    print_header "Deploying via Docker"
+    print_header "Building and Deploying"
     
     # Get the local repo root directory
     local LOCAL_REPO_DIR
     LOCAL_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     
+    local LINUX_BINARY="$LOCAL_REPO_DIR/target/docker-build/omni-daemon"
+    
+    # Build Linux binary locally using Docker
+    print_step "Building Linux x86_64 binary with Docker..."
+    
+    # Create output directory
+    mkdir -p "$LOCAL_REPO_DIR/target/docker-build"
+    
+    # Build the Docker image (this compiles the binary)
+    cd "$LOCAL_REPO_DIR"
+    docker build --platform linux/amd64 -t omni-daemon-builder:latest . 2>&1 | tail -20
+    
+    if [ $? -ne 0 ]; then
+        print_error "Docker build failed"
+        exit 1
+    fi
+    
+    # Extract the binary from the image
+    print_step "Extracting binary from Docker image..."
+    docker create --name omni-extract omni-daemon-builder:latest 2>/dev/null || \
+        (docker rm omni-extract 2>/dev/null && docker create --name omni-extract omni-daemon-builder:latest)
+    docker cp omni-extract:/usr/local/bin/omni-daemon "$LINUX_BINARY"
+    docker rm omni-extract
+    
+    # Verify binary
+    if [ ! -f "$LINUX_BINARY" ]; then
+        print_error "Failed to extract binary from Docker image"
+        exit 1
+    fi
+    
+    echo -e "✅ Linux binary built: $LINUX_BINARY"
+    file "$LINUX_BINARY" | grep -q "x86-64" && echo "   Architecture: x86_64 (correct)" || echo "⚠️  Architecture mismatch"
+    
+    # Deploy to all nodes
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
-        print_step "Setting up Docker on $node..."
+        print_step "Deploying to $node..."
         
-        # Check if Docker is installed, install if needed
-        ssh_cmd "$node" "command -v docker >/dev/null 2>&1 || (curl -fsSL https://get.docker.com | sudo sh && sudo usermod -aG docker \$USER)"
+        # Create remote directory
+        ssh_cmd "$node" "mkdir -p ~/omni-test"
         
-        # Sync local repo to remote using rsync
-        print_step "Syncing repository to $node..."
-        rsync -avz --delete \
-            --exclude 'target/' \
-            --exclude '.git/' \
-            --exclude 'test_results/' \
-            -e "ssh -o StrictHostKeyChecking=no ${SSH_KEY:+-i \"$SSH_KEY\"}" \
-            "$LOCAL_REPO_DIR/" \
-            "$SSH_USER@$node:~/OmniNervous/"
+        # Copy binary
+        scp_to "$LINUX_BINARY" "$node" "~/omni-test/omni-daemon"
         
-        # Build Docker image on this node
-        print_step "Building Docker image on $node (this may take a few minutes first time)..."
-        ssh_cmd "$node" "cd ~/OmniNervous && sudo docker build -t omni-daemon:latest . 2>&1 | tail -5"
-        
-        if [ $? -ne 0 ]; then
-            print_error "Docker build failed on $node"
-            # Continue anyway - might already have the image
-        fi
+        # Make executable
+        ssh_cmd "$node" "chmod +x ~/omni-test/omni-daemon"
         
         echo -e "✅ Deployed to $node"
     done
@@ -234,73 +255,62 @@ run_test() {
         echo -e "⚠️  No secret specified, running in OPEN mode"
     fi
     
-    # Kill any existing containers/processes
-    print_step "Cleaning up old containers..."
+    # Kill any existing processes
+    print_step "Cleaning up old processes..."
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
-        ssh_cmd "$node" "sudo docker stop omni-nucleus omni-edge 2>/dev/null; sudo docker rm omni-nucleus omni-edge 2>/dev/null; pkill -f iperf3 || true" 2>/dev/null || true
+        ssh_cmd "$node" "sudo pkill -f omni-daemon 2>/dev/null; pkill -f iperf3 2>/dev/null" || true
     done
     sleep 2
     
-    # Start Nucleus Docker container
+    # Start Nucleus (signaling server)
     print_step "Starting Nucleus on $NUCLEUS..."
-    ssh_cmd "$NUCLEUS" "sudo docker run -d --name omni-nucleus \
-        --network=host \
-        omni-daemon:latest \
-        --mode nucleus --port $OMNI_PORT"
+    ssh_cmd "$NUCLEUS" "cd ~/omni-test && sudo nohup ./omni-daemon --mode nucleus --port $OMNI_PORT > nucleus.log 2>&1 &"
     sleep 3
     
-    # Start Edge A Docker container with VIP
+    # Start Edge A with VIP
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
-    ssh_cmd "$NODE_A" "sudo docker run -d --name omni-edge \
-        --network=host \
-        --privileged \
-        --cap-add=NET_ADMIN \
-        -v /dev/net/tun:/dev/net/tun \
-        omni-daemon:latest \
+    ssh_cmd "$NODE_A" "cd ~/omni-test && sudo nohup ./omni-daemon \
         --nucleus $NUCLEUS:$OMNI_PORT \
         --cluster $CLUSTER_NAME $secret_args \
         --vip $VIP_A \
-        --port $OMNI_PORT"
+        --port $OMNI_PORT \
+        > edge_a.log 2>&1 &"
     sleep 3
     
-    # Start Edge B Docker container with VIP
+    # Start Edge B with VIP
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
-    ssh_cmd "$NODE_B" "sudo docker run -d --name omni-edge \
-        --network=host \
-        --privileged \
-        --cap-add=NET_ADMIN \
-        -v /dev/net/tun:/dev/net/tun \
-        omni-daemon:latest \
+    ssh_cmd "$NODE_B" "cd ~/omni-test && sudo nohup ./omni-daemon \
         --nucleus $NUCLEUS:$OMNI_PORT \
         --cluster $CLUSTER_NAME $secret_args \
         --vip $VIP_B \
-        --port $((OMNI_PORT + 1))"
+        --port $((OMNI_PORT + 1)) \
+        > edge_b.log 2>&1 &"
     sleep 5
     
     # Wait for P2P tunnel establishment
     print_step "Waiting for P2P tunnel establishment..."
     sleep 5
     
-    # Check if containers are running
-    print_step "Checking Docker containers..."
-    echo "Nucleus container:"
-    ssh_cmd "$NUCLEUS" "sudo docker ps --filter name=omni-nucleus --format '{{.Names}} {{.Status}}' || echo 'NOT RUNNING'"
-    echo "Edge A container:"
-    ssh_cmd "$NODE_A" "sudo docker ps --filter name=omni-edge --format '{{.Names}} {{.Status}}' || echo 'NOT RUNNING'"
-    echo "Edge B container:"
-    ssh_cmd "$NODE_B" "sudo docker ps --filter name=omni-edge --format '{{.Names}} {{.Status}}' || echo 'NOT RUNNING'"
+    # Check if daemons are running
+    print_step "Checking daemon processes..."
+    echo "Nucleus process:"
+    ssh_cmd "$NUCLEUS" "pgrep -a omni-daemon || echo 'NOT RUNNING'"
+    echo "Edge A process:"
+    ssh_cmd "$NODE_A" "pgrep -a omni-daemon || echo 'NOT RUNNING'"
+    echo "Edge B process:"
+    ssh_cmd "$NODE_B" "pgrep -a omni-daemon || echo 'NOT RUNNING'"
     echo ""
     
-    # Show container logs for debugging
-    print_step "Container logs (last 10 lines)..."
+    # Show logs for debugging
+    print_step "Daemon logs (last 10 lines)..."
     echo "--- Nucleus log ---"
-    ssh_cmd "$NUCLEUS" "sudo docker logs omni-nucleus --tail 10 2>&1 || echo 'No container'"
+    ssh_cmd "$NUCLEUS" "tail -10 ~/omni-test/nucleus.log 2>/dev/null || echo 'No log'"
     echo ""
     echo "--- Edge A log ---"
-    ssh_cmd "$NODE_A" "sudo docker logs omni-edge --tail 10 2>&1 || echo 'No container'"
+    ssh_cmd "$NODE_A" "tail -10 ~/omni-test/edge_a.log 2>/dev/null || echo 'No log'"
     echo ""
     echo "--- Edge B log ---"
-    ssh_cmd "$NODE_B" "sudo docker logs omni-edge --tail 10 2>&1 || echo 'No container'"
+    ssh_cmd "$NODE_B" "tail -10 ~/omni-test/edge_b.log 2>/dev/null || echo 'No log'"
     echo ""
     
     # Check interfaces on edges
