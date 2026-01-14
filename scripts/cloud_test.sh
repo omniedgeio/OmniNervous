@@ -36,7 +36,7 @@ SSH_USER="${SSH_USER:-ubuntu}"
 OMNI_PORT=${OMNI_PORT:-51820}
 TEST_DURATION=${TEST_DURATION:-10}
 RESULTS_DIR="./test_results"
-BINARY_PATH="./target/release/omni-daemon"
+BINARY_PATH="./target/release/omni-daemon-linux-amd64"
 
 show_help() {
     cat << EOF
