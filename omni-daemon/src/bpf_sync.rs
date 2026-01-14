@@ -1,6 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(target_os = "linux")]
+use anyhow::Context;
 use log::info;
-use omni_common::{SessionEntry, SessionKey};
+#[cfg(target_os = "linux")]
+use omni_common::SessionKey;
+use omni_common::SessionEntry;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
