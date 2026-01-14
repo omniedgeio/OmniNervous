@@ -21,12 +21,11 @@
 
 ## Phase 4: Virtual Interface ✅
 - [x] Cross-platform TUN (tun2 crate)
-  - Linux: `/dev/net/tun`
-  - macOS: utun (native)
-  - Windows: Wintun
 - [x] Virtual IP assignment (`--vip`)
-- [ ] FDB learning & forwarding (TODO)
-- [ ] TAP/Layer 2 for Windows (TODO: tap-windows6)
+- [x] Peer routing table (`peers.rs`)
+- [x] Packet forwarding: TUN→encrypt→UDP
+- [x] Packet forwarding: UDP→decrypt→TUN
+- [x] Peer registration after handshake
 
 ## Phase 5: Cloud Testing 🔄
 - [x] 3-node cloud_test.sh (Nucleus + 2 Edges)
@@ -46,28 +45,6 @@
 - Humanoid robots accessing cloud GPUs for AI inference
 - Industrial automation GPU pooling
 - Distributed ML training across sites
-
-**Architecture**:
-```
-┌─────────────┐    OmniNervous    ┌─────────────┐
-│  Robot/Edge │    Encrypted     │  GPU Server │
-│  (No GPU)   │ ═══════L2═════>  │  (NVIDIA)   │
-│  CUDA Shim  │    P2P Tunnel    │  GPU Driver │
-└─────────────┘                  └─────────────┘
-```
-
-**Features**:
-- [ ] CUDA/OpenCL call interception (client-side shim)
-- [ ] GPU memory transfer over L2 tunnel
-- [ ] Dynamic GPU allocation & scheduling
-- [ ] Sub-millisecond latency optimizations
-- [ ] Multi-GPU pooling support
-
-**Dependencies**: 
-- Phase 4 (TUN interface) required ✅
-- eBPF for low-latency memory transfers ✅
-
----
 
 ### 🤖 ROS2 Transport Plugin
 **Goal**: Native ROS2 DDS transport over OmniNervous.
