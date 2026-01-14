@@ -117,8 +117,10 @@ struct Args {
     mode: Option<String>,
     #[arg(short, long)]
     nucleus: Option<String>,
-    #[arg(short, long)]
+    #[arg(short, long, help = "Cluster/network name to join")]
     cluster: Option<String>,
+    #[arg(long, help = "Cluster secret for authentication (min 16 chars)")]
+    secret: Option<String>,
     #[arg(long, help = "Initialize new identity and exit")]
     init: bool,
     #[arg(long, help = "Path to identity directory")]
@@ -148,6 +150,28 @@ async fn main() -> Result<()> {
     // Load or generate identity
     let identity = Identity::load_or_generate(args.identity.as_ref())?;
     info!("Using identity: {}", identity.public_key_hex());
+
+    // Derive PSK from cluster + secret if provided
+    let psk: Option<[u8; 32]> = match (&args.cluster, &args.secret) {
+        (Some(cluster), Some(secret)) => {
+            // Validate secret length
+            noise::validate_secret(secret)?;
+            let psk = noise::derive_psk(cluster, secret);
+            info!("Cluster '{}' with authenticated secret (PSK enabled)", cluster);
+            Some(psk)
+        }
+        (Some(cluster), None) => {
+            warn!("⚠️ Cluster '{}' without secret - OPEN MODE (any peer can join)", cluster);
+            None
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("--secret requires --cluster to be specified");
+        }
+        (None, None) => {
+            info!("No cluster specified, running in standalone mode");
+            None
+        }
+    };
 
     let mut session_manager = SessionManager::new();
     let _fdb = Fdb::new();
@@ -239,7 +263,7 @@ async fn main() -> Result<()> {
                                     continue;
                                 }
                                 
-                                match NoiseSession::new_responder(&identity.private_key) {
+                                match NoiseSession::new_responder(&identity.private_key, psk.as_ref()) {
                                     Ok(new_session) => {
                                         session_manager.create_session(session_id, SessionState::Handshaking(new_session));
                                         rate_limiter.record_session_start(session_id);

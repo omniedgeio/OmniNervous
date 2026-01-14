@@ -141,7 +141,7 @@ preflight_check() {
             echo -e "✅ iperf3 installed on $node"
         else
             echo -e "❌ iperf3 not installed on $node"
-            echo "   Run: ssh $SSH_USER@$node 'sudo apt-get install -y iperf3'"
+            echo "   Run: ssh $SSH_USER@$node 'sudo apt-get update && sudo apt-get install -y iperf3'"
             errors=$((errors + 1))
         fi
     done
