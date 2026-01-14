@@ -11,9 +11,7 @@ impl NonceManager {
     /// Create a new nonce manager with random initialization
     pub fn new() -> Result<Self> {
         let mut random_base = [0u8; 8];
-        for i in 0..8 {
-            random_base[i] = rand::random();
-        }
+        random_base.iter_mut().for_each(|b| *b = rand::random());
         
         Ok(Self {
             counter: AtomicU64::new(0),
@@ -28,9 +26,9 @@ impl NonceManager {
         let counter_bytes = counter.to_le_bytes();
         
         let mut nonce = [0u8; 8];
-        for i in 0..8 {
-            nonce[i] = self.random_base[i] ^ counter_bytes[i];
-        }
+        nonce.iter_mut()
+            .zip(self.random_base.iter().zip(counter_bytes.iter()))
+            .for_each(|(n, (r, c))| *n = r ^ c);
         
         nonce
     }

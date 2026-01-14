@@ -117,7 +117,7 @@ pub struct P2PDiscovery {
 impl P2PDiscovery {
     pub fn new(stun_server: Option<&str>) -> Result<Self> {
         let stun_client = stun_server
-            .map(|s| StunClient::new(s))
+            .map(StunClient::new)
             .transpose()?;
         Ok(Self {
             stun_client,
