@@ -169,11 +169,36 @@ preflight_check() {
 }
 
 # =============================================================================
-# Deploy Binaries
+# Deploy and Build on Remote
 # =============================================================================
 
 deploy_binaries() {
-    print_header "Deploying Binaries"
+    print_header "Building on Remote Instances"
+    
+    # Build on first node and copy to others (saves time)
+    local BUILD_NODE="$NUCLEUS"
+    
+    print_step "Setting up build environment on $BUILD_NODE..."
+    
+    # Install Rust if needed
+    ssh_cmd "$BUILD_NODE" "command -v cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source ~/.cargo/env)"
+    
+    # Clone or update repo
+    print_step "Cloning/updating repository on $BUILD_NODE..."
+    ssh_cmd "$BUILD_NODE" "source ~/.cargo/env 2>/dev/null; if [ -d ~/OmniNervous ]; then cd ~/OmniNervous && git pull; else git clone https://github.com/omniedgeio/OmniNervous.git ~/OmniNervous; fi"
+    
+    # Build daemon
+    print_step "Building omni-daemon on $BUILD_NODE (this may take a few minutes)..."
+    ssh_cmd "$BUILD_NODE" "source ~/.cargo/env && cd ~/OmniNervous && cargo build -p omni-daemon --release"
+    
+    if [ $? -ne 0 ]; then
+        print_error "Build failed on $BUILD_NODE"
+        exit 1
+    fi
+    echo -e "✅ Build completed on $BUILD_NODE"
+    
+    # Setup directory and copy binary from build node  
+    REMOTE_BINARY="~/OmniNervous/target/release/omni-daemon"
     
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
         print_step "Deploying to $node..."
@@ -181,8 +206,13 @@ deploy_binaries() {
         # Create remote directory
         ssh_cmd "$node" "mkdir -p ~/omni-test"
         
-        # Copy binary
-        scp_to "$BINARY_PATH" "$node" "~/omni-test/omni-daemon"
+        if [ "$node" = "$BUILD_NODE" ]; then
+            # Just copy from build location
+            ssh_cmd "$node" "cp $REMOTE_BINARY ~/omni-test/omni-daemon"
+        else
+            # Copy from build node to this node
+            ssh_cmd "$BUILD_NODE" "scp -o StrictHostKeyChecking=no $REMOTE_BINARY $SSH_USER@$node:~/omni-test/omni-daemon"
+        fi
         
         # Make executable
         ssh_cmd "$node" "chmod +x ~/omni-test/omni-daemon"
