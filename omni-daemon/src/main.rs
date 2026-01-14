@@ -411,6 +411,46 @@ async fn main() -> Result<()> {
                                     metrics.inc_handshakes_completed();
                                     info!("Session {} finalized and synced to BPF!", session_id);
                                 }
+                                
+                                // Register peer in routing table
+                                // For now, derive VIP from last octet of session ID (TODO: exchange VIP in handshake)
+                                let peer_vip = std::net::Ipv4Addr::new(
+                                    10, 200, 0, ((session_id % 250) + 1) as u8
+                                );
+                                peer_table.upsert(peer_vip, session_id, src);
+                                info!("Registered peer: {} at {} (session {})", peer_vip, src, session_id);
+                            }
+                        } else if len > 8 {
+                            // Data packet with session_id header (8 bytes)
+                            // Format: [session_id(8)] [encrypted_payload]
+                            let session_id = u64::from_be_bytes([
+                                buf[0], buf[1], buf[2], buf[3], 
+                                buf[4], buf[5], buf[6], buf[7]
+                            ]);
+                            
+                            if let Some(SessionState::Active(transport)) = session_manager.get_session_mut(session_id) {
+                                let mut decrypted = vec![0u8; len - 8];
+                                match transport.read_message(session_id, &buf[8..len], &mut decrypted) {
+                                    Ok(dec_len) => {
+                                        // Write decrypted IP packet to TUN
+                                        if let Some(ref mut tun) = _tun {
+                                            if let Err(e) = tun.write(&decrypted[..dec_len]).await {
+                                                error!("TUN write error: {}", e);
+                                            } else {
+                                                info!("UDP→TUN: {} bytes from session {}", dec_len, session_id);
+                                            }
+                                        }
+                                        
+                                        // Update peer last_seen
+                                        if let Some(peer) = peer_table.lookup_by_session(session_id) {
+                                            let vip = peer.virtual_ip;
+                                            peer_table.touch(&vip);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Decryption failed: {}", e);
+                                    }
+                                }
                             }
                         }
                     }
