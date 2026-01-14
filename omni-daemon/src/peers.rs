@@ -3,7 +3,7 @@
 //! Maps virtual IPs to peer UDP endpoints for packet routing.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 use log::info;
 

@@ -6,7 +6,7 @@
 //! - Windows: Wintun driver (requires wintun.dll)
 
 use anyhow::{Context, Result};
-use log::{info, warn};
+use log::{info};
 use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -49,7 +49,7 @@ impl VirtualInterface {
         let mut tun_config = tun2::Configuration::default();
         
         tun_config
-            .name(&config.name)
+            .tun_name(&config.name)
             .address(config.address)
             .netmask(config.netmask)
             .mtu(config.mtu as u16)

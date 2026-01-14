@@ -31,7 +31,7 @@ impl Identity {
     }
 
     /// Derive public key from private key (X25519 compatible).
-    fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
+    fn derive_public_key(_private_key: &[u8; 32]) -> [u8; 32] {
         // Use snow's built-in key derivation for X25519
         let builder = snow::Builder::new("Noise_IK_25519_ChaChaPoly_BLAKE2s".parse().unwrap());
         let keypair = builder.generate_keypair().unwrap();
