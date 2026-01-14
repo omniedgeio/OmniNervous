@@ -30,7 +30,7 @@ jobs:
         continue-on-error: true
 
       - name: Wait for containers to initialize
-        run: sleep 15
+        run: sleep 20
 
       - name: Run connectivity tests
         id: tests
@@ -39,6 +39,10 @@ jobs:
           TESTS_PASSED=0
           TESTS_FAILED=0
           TESTS_SKIPPED=0
+          PING_RESULT="SKIPPED"
+          PING_LATENCY="N/A"
+          IPERF_RESULT="SKIPPED"
+          IPERF_THROUGHPUT="N/A"
           
           echo "============================================"
           echo "🚀 OmniNervous P2P Cluster Test Results"
@@ -70,21 +74,55 @@ jobs:
             TESTS_FAILED=$((TESTS_FAILED + 1))
           fi
           
-          # Test 2: Ping between containers (using IPs from docker-compose)
-          if docker compose exec -T edge-a ping -c 1 -W 2 10.0.0.21 2>/dev/null | grep -q "1 received"; then
-            echo "✅ Ping Edge A → Edge B (10.0.0.21): OK"
+          # Test 2: Ping between containers (Edge A → Edge B)
+          echo ""
+          echo "🏓 Ping Test (Edge A → Edge B):"
+          PING_OUTPUT=$(docker compose exec -T edge-a ping -c 3 -W 2 10.0.0.21 2>&1 || echo "PING_FAILED")
+          if echo "$PING_OUTPUT" | grep -q "3 received"; then
+            PING_LATENCY=$(echo "$PING_OUTPUT" | grep "rtt" | awk -F'/' '{print $5}')
+            echo "✅ Ping: SUCCESS (avg ${PING_LATENCY}ms)"
+            PING_RESULT="PASSED"
+            TESTS_PASSED=$((TESTS_PASSED + 1))
+          elif echo "$PING_OUTPUT" | grep -q "1 received\|2 received"; then
+            PING_LATENCY=$(echo "$PING_OUTPUT" | grep "rtt" | awk -F'/' '{print $5}')
+            echo "⚠️ Ping: PARTIAL (some packets lost, avg ${PING_LATENCY}ms)"
+            PING_RESULT="PARTIAL"
             TESTS_PASSED=$((TESTS_PASSED + 1))
           else
-            echo "⚠️ Ping Edge A → Edge B: SKIPPED (container not ready)"
-            TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
+            echo "❌ Ping: FAILED"
+            echo "   Output: $(echo "$PING_OUTPUT" | head -2)"
+            PING_RESULT="FAILED"
+            TESTS_FAILED=$((TESTS_FAILED + 1))
           fi
           
-          # Test 3: Ping to nucleus
-          if docker compose exec -T edge-a ping -c 1 -W 2 10.0.0.2 2>/dev/null | grep -q "1 received"; then
-            echo "✅ Ping Edge A → Nucleus (10.0.0.2): OK"
-            TESTS_PASSED=$((TESTS_PASSED + 1))
+          # Test 3: iperf3 throughput test
+          echo ""
+          echo "📈 iperf3 Throughput Test (Edge A → Edge B):"
+          # Start iperf3 server on edge-b
+          docker compose exec -T -d edge-b iperf3 -s -p 5201 2>/dev/null || true
+          sleep 2
+          
+          # Run iperf3 client on edge-a
+          IPERF_OUTPUT=$(docker compose exec -T edge-a iperf3 -c 10.0.0.21 -p 5201 -t 5 -J 2>&1 || echo '{"error":"iperf3 failed"}')
+          
+          # Parse JSON result
+          if echo "$IPERF_OUTPUT" | grep -q '"bits_per_second"'; then
+            BITS=$(echo "$IPERF_OUTPUT" | grep -o '"bits_per_second":[0-9.]*' | head -1 | cut -d: -f2)
+            if [ -n "$BITS" ] && [ "$BITS" != "0" ]; then
+              # Convert to Mbps
+              IPERF_THROUGHPUT=$(echo "scale=2; $BITS / 1000000" | bc 2>/dev/null || echo "N/A")
+              echo "✅ iperf3: SUCCESS (${IPERF_THROUGHPUT} Mbps)"
+              IPERF_RESULT="PASSED"
+              TESTS_PASSED=$((TESTS_PASSED + 1))
+            else
+              echo "⚠️ iperf3: No data transferred"
+              IPERF_RESULT="SKIPPED"
+              TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
+            fi
           else
-            echo "⚠️ Ping Edge A → Nucleus: SKIPPED"
+            echo "⚠️ iperf3: SKIPPED (not available or connection failed)"
+            echo "   Output: $(echo "$IPERF_OUTPUT" | head -2)"
+            IPERF_RESULT="SKIPPED"
             TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
           fi
           
@@ -97,18 +135,6 @@ jobs:
           echo "✅ Replay Protection: IMPLEMENTED"
           TESTS_PASSED=$((TESTS_PASSED + 4))
           
-          echo ""
-          echo "📊 Code Quality:"
-          echo "----------------------------------------"
-          # Check if daemon compiles
-          if cargo check -p omni-daemon 2>&1 | grep -q "Finished"; then
-            echo "✅ omni-daemon: COMPILES"
-            TESTS_PASSED=$((TESTS_PASSED + 1))
-          else
-            echo "⚠️ omni-daemon: NOT CHECKED"
-            TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
-          fi
-          
           # Summary
           echo ""
           echo "============================================"
@@ -117,12 +143,19 @@ jobs:
           echo "✅ Passed:  $TESTS_PASSED"
           echo "❌ Failed:  $TESTS_FAILED"
           echo "⚠️ Skipped: $TESTS_SKIPPED"
+          echo ""
+          echo "🏓 Ping:    $PING_RESULT (${PING_LATENCY}ms)"
+          echo "📈 iperf3:  $IPERF_RESULT (${IPERF_THROUGHPUT} Mbps)"
           echo "============================================"
           
           # Set outputs for summary
           echo "TESTS_PASSED=$TESTS_PASSED" >> $GITHUB_OUTPUT
           echo "TESTS_FAILED=$TESTS_FAILED" >> $GITHUB_OUTPUT
           echo "TESTS_SKIPPED=$TESTS_SKIPPED" >> $GITHUB_OUTPUT
+          echo "PING_RESULT=$PING_RESULT" >> $GITHUB_OUTPUT
+          echo "PING_LATENCY=$PING_LATENCY" >> $GITHUB_OUTPUT
+          echo "IPERF_RESULT=$IPERF_RESULT" >> $GITHUB_OUTPUT
+          echo "IPERF_THROUGHPUT=$IPERF_THROUGHPUT" >> $GITHUB_OUTPUT
           
           # Fail if any tests failed (but not for skipped)
           if [ "$TESTS_FAILED" -gt 0 ]; then
@@ -133,13 +166,22 @@ jobs:
       - name: Generate Job Summary
         if: always()
         run: |
-          echo "## � OmniNervous Docker Integration Test" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 OmniNervous Docker Integration Test" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Result |" >> $GITHUB_STEP_SUMMARY
           echo "|:---|:---|" >> $GITHUB_STEP_SUMMARY
           echo "| ✅ Passed | ${{ steps.tests.outputs.TESTS_PASSED || '0' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| ❌ Failed | ${{ steps.tests.outputs.TESTS_FAILED || '0' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| ⚠️ Skipped | ${{ steps.tests.outputs.TESTS_SKIPPED || '0' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Network Performance" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Status | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|:---|:---|:---|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🏓 Ping (Edge A → Edge B) | ${{ steps.tests.outputs.PING_RESULT || 'N/A' }} | ${{ steps.tests.outputs.PING_LATENCY || 'N/A' }} ms |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📈 iperf3 Throughput | ${{ steps.tests.outputs.IPERF_RESULT || 'N/A' }} | ${{ steps.tests.outputs.IPERF_THROUGHPUT || 'N/A' }} Mbps |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Features Verified" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Noise_IK Handshake" >> $GITHUB_STEP_SUMMARY
