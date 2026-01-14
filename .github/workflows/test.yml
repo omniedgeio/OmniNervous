@@ -49,7 +49,9 @@ jobs:
             omni-daemon:test \
             --mode nucleus --port $NUCLEUS_PORT
           sleep 3
-          echo "Nucleus started on 10.88.0.2:$NUCLEUS_PORT"
+          echo "Nucleus status:"
+          docker ps -a --filter name=nucleus --format '{{.Status}}'
+          docker logs nucleus --tail 10 || true
 
       - name: Start Edge A container
         run: |
@@ -66,7 +68,16 @@ jobs:
             --vip $VIP_A \
             --port 51820
           sleep 3
-          echo "Edge A started with VIP $VIP_A"
+          echo "Edge A status:"
+          docker ps -a --filter name=edge-a --format '{{.Status}}'
+          docker logs edge-a --tail 20 || true
+          
+          # Check if running
+          if ! docker ps --filter name=edge-a --filter status=running -q | grep -q .; then
+            echo "ERROR: Edge A container not running!"
+            echo "Full logs:"
+            docker logs edge-a
+          fi
 
       - name: Start Edge B container
         run: |
@@ -83,7 +94,16 @@ jobs:
             --vip $VIP_B \
             --port 51821
           sleep 5
-          echo "Edge B started with VIP $VIP_B"
+          echo "Edge B status:"
+          docker ps -a --filter name=edge-b --format '{{.Status}}'
+          docker logs edge-b --tail 20 || true
+          
+          # Check if running
+          if ! docker ps --filter name=edge-b --filter status=running -q | grep -q .; then
+            echo "ERROR: Edge B container not running!"
+            echo "Full logs:"
+            docker logs edge-b
+          fi
 
       - name: Wait for P2P tunnel
         run: |
