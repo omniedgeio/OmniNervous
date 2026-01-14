@@ -1,3 +1,6 @@
+// Allow dead_code for utility modules with functions ready for future use
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
 use aya::{
@@ -34,7 +37,6 @@ use fdb::Fdb;
 use identity::Identity;
 use ratelimit::{RateLimiter, RateLimitConfig};
 use metrics::Metrics;
-use config::Config;
 use bpf_sync::BpfSync;
 
 use std::time::Duration;

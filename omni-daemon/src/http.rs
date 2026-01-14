@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::net::SocketAddr;
 use std::convert::Infallible;
-use hyper::{Request, Response, StatusCode, body::Body};
+use hyper::{Request, Response, StatusCode};
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use log::{info, error};
