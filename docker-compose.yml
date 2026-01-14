@@ -1,69 +1,86 @@
 services:
   # The Nucleus (Rendezvous & Signaling Node)
   nucleus:
-    image: rust:1.79
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: omni-nucleus
-    volumes:
-      - .:/usr/src/omni
-    working_dir: /usr/src/omni
-    command: cargo run -p omni-daemon -- --mode nucleus
+    command: ["--mode", "nucleus", "--port", "51820"]
     networks:
       omni-fabric:
         ipv4_address: 10.0.0.2
-        ipv6_address: fd00:abcd::2
 
-  # Edge Node A (Cloud Edge - Running with Nucleus)
+  # Edge Node A
   edge-a:
-    image: rust:1.79
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: omni-edge-a
-    privileged: true # Required for XDP/BPF
-    volumes:
-      - .:/usr/src/omni
-    working_dir: /usr/src/omni
-    command: >
-      sh -c "apt-get update -qq && apt-get install -y -qq iperf3 > /dev/null && iperf3 -s -D && sleep 5 && cargo run -p omni-daemon -- --nucleus 10.0.0.2 --cluster local-test"
+    privileged: true  # Required for TUN device
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    command: [
+      "--nucleus", "10.0.0.2:51820",
+      "--cluster", "local-test",
+      "--secret", "test-secret-minimum16",
+      "--vip", "10.200.0.10",
+      "--port", "51820"
+    ]
+    depends_on:
+      - nucleus
+    networks:
+      omni-fabric:
+        ipv4_address: 10.0.0.10
+
+  # Edge Node B
+  edge-b:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omni-edge-b
+    privileged: true  # Required for TUN device
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    command: [
+      "--nucleus", "10.0.0.2:51820",
+      "--cluster", "local-test",
+      "--secret", "test-secret-minimum16",
+      "--vip", "10.200.0.20",
+      "--port", "51821"
+    ]
+    depends_on:
+      - nucleus
     networks:
       omni-fabric:
         ipv4_address: 10.0.0.20
-        ipv6_address: fd00:abcd::20
 
-  # Edge Node B (Local Edge)
-  edge-b:
-    image: rust:1.79
-    container_name: omni-edge-b
-    privileged: true # Required for XDP/BPF
-    volumes:
-      - .:/usr/src/omni
-    working_dir: /usr/src/omni
-    command: >
-      sh -c "apt-get update -qq && apt-get install -y -qq iperf3 > /dev/null && iperf3 -s -D && sleep 5 && cargo run -p omni-daemon -- --nucleus 10.0.0.2 --cluster local-test"
-    networks:
-      omni-fabric:
-        ipv4_address: 10.0.0.21
-        ipv6_address: fd00:abcd::21
-
-  # Automated Connectivity Tester
+  # Test runner
   tester:
-    image: rust:1.79
+    image: ubuntu:22.04
     container_name: omni-tester
-    volumes:
-      - .:/usr/src/omni
-    working_dir: /usr/src/omni
+    privileged: true
     depends_on:
       - nucleus
       - edge-a
       - edge-b
-    command: ./scripts/auto_test_docker.sh
+    volumes:
+      - ./scripts:/scripts:ro
+    command: >
+      bash -c "apt-get update -qq && apt-get install -y -qq iputils-ping iperf3 > /dev/null && 
+               sleep 15 && /scripts/auto_test_docker.sh"
     networks:
       omni-fabric:
         ipv4_address: 10.0.0.100
-        ipv6_address: fd00:abcd::100
 
 networks:
   omni-fabric:
     driver: bridge
-    enable_ipv6: true
     ipam:
       config:
         - subnet: 10.0.0.0/24
-        - subnet: fd00:abcd::/64
