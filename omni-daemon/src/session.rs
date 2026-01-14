@@ -31,6 +31,7 @@ impl SessionManager {
     }
 
     /// Generate a cryptographically secure 64-bit session ID
+    /// NOTE: First byte is always >= 0x10 to avoid collision with signaling message types (0x01-0x0F)
     pub fn generate_session_id(&self, src_ip: IpAddr) -> u64 {
         let mut mac = HmacSha256::new_from_slice(&self.secret)
             .expect("HMAC init failed");
@@ -50,11 +51,19 @@ impl SessionManager {
         
         // Take first 8 bytes of HMAC as 64-bit session ID
         let result = mac.finalize();
-        let bytes = result.into_bytes();
-        u64::from_be_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7]
-        ])
+        let hash_bytes = result.into_bytes();
+        let mut bytes: [u8; 8] = [
+            hash_bytes[0], hash_bytes[1], hash_bytes[2], hash_bytes[3],
+            hash_bytes[4], hash_bytes[5], hash_bytes[6], hash_bytes[7]
+        ];
+        
+        // Ensure first byte >= 0x10 to avoid collision with signaling message types
+        // Signaling uses 0x01-0x0F, so we reserve 0x00-0x0F for signaling
+        if bytes[0] < 0x10 {
+            bytes[0] = 0x10 | (bytes[0] & 0x0F); // Set high nibble to 1
+        }
+        
+        u64::from_be_bytes(bytes)
     }
 
     pub fn create_session(&mut self, session_id: u64, state: SessionState) {
