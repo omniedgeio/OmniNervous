@@ -189,8 +189,8 @@ async fn main() -> Result<()> {
     let mut bpf_sync = BpfSync::new();
     let mut peer_table = peers::PeerTable::new();
     
-    // Our virtual IP (if assigned)
-    let our_vip = args.vip;
+    // Our virtual IP (used for self-identification in peer exchange)
+    let _our_vip = args.vip;
     
     // Try to load eBPF/XDP on Linux if not disabled
     #[cfg(target_os = "linux")]
@@ -354,9 +354,12 @@ async fn main() -> Result<()> {
                         metrics.inc_packets_rx();
                         
                         // For initial handshake, check if this is a new connection
-                        // Client sends session_id in header, but we validate/generate our own
-                        if len >= 4 {
-                            let client_session_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                        // Client sends session_id in header (8 bytes), but we validate/generate our own
+                        if len >= 8 {
+                            let client_session_id = u64::from_be_bytes([
+                                buf[0], buf[1], buf[2], buf[3],
+                                buf[4], buf[5], buf[6], buf[7]
+                            ]);
                             
                             // Generate secure session ID based on source IP
                             let session_id = session_manager.generate_session_id(src.ip());
@@ -384,8 +387,8 @@ async fn main() -> Result<()> {
                                 }
                             }
 
-                            // Advance handshake
-                            match session_manager.advance_handshake(session_id, &buf[4..len]) {
+                            // Advance handshake (skip 8-byte session header)
+                            match session_manager.advance_handshake(session_id, &buf[8..len]) {
                                 Ok(Some(response)) => {
                                     let mut reply = session_id.to_be_bytes().to_vec();
                                     reply.extend(response);
