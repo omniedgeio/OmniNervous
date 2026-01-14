@@ -1,39 +1,21 @@
 # OmniNervous Daemon Docker Image
-# Build stage
+# Simplified build - copy all sources at once
+
 FROM rust:1.79 AS builder
 
 WORKDIR /usr/src/omni
 
-# Copy workspace Cargo files
+# Copy entire project (except what's in .dockerignore)
 COPY Cargo.toml Cargo.lock ./
-
-# Copy all crate Cargo.toml files (including omni-ebpf for workspace resolution)
-COPY omni-daemon/Cargo.toml ./omni-daemon/
-COPY omni-common/Cargo.toml ./omni-common/
-COPY omni-ebpf/omni-ebpf-core/Cargo.toml ./omni-ebpf/omni-ebpf-core/
-
-# Create dummy source files for dependency caching
-RUN mkdir -p omni-daemon/src omni-common/src omni-ebpf/omni-ebpf-core/src && \
-    echo "fn main() {}" > omni-daemon/src/main.rs && \
-    echo "" > omni-common/src/lib.rs && \
-    echo "#![no_std]" > omni-ebpf/omni-ebpf-core/src/lib.rs && \
-    echo "#![no_std] #![no_main] fn main() {}" > omni-ebpf/omni-ebpf-core/src/main.rs
+COPY omni-daemon ./omni-daemon/
+COPY omni-common ./omni-common/
+COPY omni-ebpf ./omni-ebpf/
 
 # Create placeholder eBPF binary (for include_bytes! in main.rs)
 RUN mkdir -p omni-daemon/ebpf && \
-    echo "PLACEHOLDER_EBPF_BINARY" > omni-daemon/ebpf/omni-ebpf-core
+    echo "PLACEHOLDER_EBPF" > omni-daemon/ebpf/omni-ebpf-core
 
-# Build dependencies only (this layer is cached)
-RUN cargo build -p omni-daemon --release 2>/dev/null || true
-
-# Copy actual source code
-COPY omni-daemon/src ./omni-daemon/src
-COPY omni-common/src ./omni-common/src
-
-# Touch to force rebuild with actual sources
-RUN touch omni-daemon/src/main.rs
-
-# Build release binary (omni-daemon only)
+# Build release binary
 RUN cargo build -p omni-daemon --release
 
 # Runtime stage - minimal image
@@ -48,6 +30,6 @@ RUN apt-get update && apt-get install -y \
 # Copy binary from builder
 COPY --from=builder /usr/src/omni/target/release/omni-daemon /usr/local/bin/
 
-# Default command - run as nucleus
+# Default command
 ENTRYPOINT ["/usr/local/bin/omni-daemon"]
 CMD ["--mode", "nucleus", "--port", "51820"]
