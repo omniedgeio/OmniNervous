@@ -5,6 +5,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: omni-nucleus
+    environment:
+      - RUST_LOG=debug
     command: ["--mode", "nucleus", "--port", "51820"]
     networks:
       omni-fabric:
@@ -17,6 +19,8 @@ services:
       dockerfile: Dockerfile
     container_name: omni-edge-a
     privileged: true  # Required for TUN device
+    environment:
+      - RUST_LOG=debug
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
@@ -43,6 +47,8 @@ services:
       dockerfile: Dockerfile
     container_name: omni-edge-b
     privileged: true  # Required for TUN device
+    environment:
+      - RUST_LOG=debug
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
