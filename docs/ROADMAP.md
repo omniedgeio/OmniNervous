@@ -29,8 +29,14 @@
 
 ## Phase 5: Cloud Testing 🔄
 - [x] 3-node cloud_test.sh (Nucleus + 2 Edges)
-- [ ] Real-world WAN testing
-- [ ] P2P tunnel throughput benchmarks
+- [/] Real-world WAN testing (GDC Edge focus)
+- [ ] P2P tunnel throughput benchmarks (10Gbps+ targets)
+
+## Phase 6: AI & Infrastructure 🚀
+- [ ] **Geo-distributed Nucleus**: Signaling cluster for global low-latency.
+- [ ] **Observability Stack**: OpenTelemetry integration for high-frequency metrics.
+- [ ] **Hardware Acceleration**: Research for NVIDIA DPU (BlueField-3) offloading.
+- [ ] **Zero-Copy RDMA**: Interaction between eBPF and RDMA for AI training.
 
 ---
 
@@ -49,8 +55,11 @@
 ### 🤖 ROS2 Transport Plugin
 **Goal**: Native ROS2 DDS transport over OmniNervous.
 
-### 🏭 EtherCAT Bridge Plugin  
-**Goal**: Industrial automation protocol bridging.
+### ☁️ Vertex AI Connect Plugin
+**Goal**: Sub-millisecond pipeline from edge robots to Vertex AI clusters.
 
-### 📊 Observability Plugin
-**Goal**: Prometheus/Grafana dashboards for VPN metrics.
+### 📊 Observability Plugin (OTel)
+**Goal**: OpenTelemetry/Prometheus dashboards for machine-to-machine metrics.
+
+### 🏭 Industrial Bridge (EtherCAT/PROFINET)
+**Goal**: Modernizing brownfield industrial hardware with AI-cloud connectivity.

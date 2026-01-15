@@ -8,13 +8,13 @@ Version 1.0 | January 2026
 
 ## Executive Summary
 
-OmniNervous is a high-performance, identity-driven Layer 2 VPN protocol designed specifically for **real-time AI workloads**, **robotics fleets**, and **industrial automation**. Unlike traditional VPN solutions optimized for human users and web traffic, OmniNervous targets sub-millisecond latency through XDP/eBPF kernel acceleration.
+OmniNervous is a high-performance, identity-driven Layer 2 VPN protocol designed specifically for **Embodied AI**, **autonomous robotics fleets**, and **cloud-to-edge control loops**. As AI workloads shift from centralized data centers to geographically distributed edge environments (e.g., Google Distributed Cloud Edge), OmniNervous provides the secure, sub-millisecond connective tissue required for real-time sensor-to-inference pipelines.
 
 **Key Differentiators**:
-- **XDP/eBPF Data Plane**: Kernel-level packet processing bypasses the network stack
-- **Layer 2 Native**: Full Ethernet frame encapsulation for EtherCAT/PROFINET/ROS2
-- **Identity-Driven Routing**: Public key = Network Address
-- **Zero-Copy Decryption**: ChaCha20-Poly1305 AEAD in XDP
+- **XDP/eBPF Data Plane**: Kernel-level packet processing for sub-millisecond precision.
+- **Embodied AI Native**: Optimized for high-frequency control loops (>1kHz) and ROS2/DDS.
+- **Identity-Driven Routing**: "BeyondCorp for Machines" — Public key = Network Address.
+- **Hardware-Agile**: Designed to leverage NVIDIA DPU/BlueField-3 and GDC Edge hardware acceleration.
 
 ---
 
@@ -63,11 +63,15 @@ OmniNervous is a high-performance, identity-driven Layer 2 VPN protocol designed
 └─────────────────────────────────────────────┘
 ```
 
-**Ganglion** (Control): Handles handshakes, session management, STUN
-**Synapse** (Data): XDP program for wire-speed packet processing
-**Nucleus**: Scalable signaling server for NAT traversal (no relay, pure rendezvous)
+**Ganglion** (Control): Handles handshakes, session management, and NAT traversal.
+**Synapse** (Data): XDP program for wire-speed packet processing and zero-copy decryption.
+**Nucleus**: Highly available signaling service designed for the **Google Distributed Cloud (GDC)** ecosystem.
 
-### 2.2 Nucleus Signaling Protocol
+### 2.2 Google Distributed Cloud (GDC) Edge Alignment
+
+OmniNervous is architected to thrive in decentralized environments like GDC Edge. By offloading encryption and routing to the kernel via eBPF, OmniNervous enables:
+- **Local Control Loops**: High-frequency robotics tasks remain local to the GDC Edge node while maintaining secure connectivity to central Vertex AI models.
+- **Zero-Trust for Robotics**: Every packet is authenticated at the kernel level, implementing a "BeyondCorp" security model for machines without the latency overhead of userspace proxies.
 
 The Nucleus implements a **scalable signaling protocol** designed for 1000+ edges per cluster:
 
@@ -245,15 +249,15 @@ Traditional Hub-and-Spoke:          OmniNervous P2P Mesh:
 
 > **Note**: These are target use cases based on architecture design, not deployed production systems.
 
-### 6.1 Warehouse Robotics
-- 500 AMRs (Autonomous Mobile Robots)
-- ROS2 navigation + EtherCAT motor control
-- Target: Sub-1ms response for collision avoidance*
+### 6.1 GPU-as-a-Service for Robots (Cloud-to-Edge)
+- **Problem**: AMRs (Autonomous Mobile Robots) lack the on-board compute for large-scale Vision-Language-Action (VLA) models.
+- **Solution**: OmniNervous creates a sub-millisecond L2 tunnel between the robot and a **Vertex AI GPU cluster**.
+- **Result**: Real-time sensor streaming to cloud GPUs with inference results returned as L2 Ethernet frames, appearing local to the robot's control system.
 
-### 6.2 Multi-Cloud AI Training
-- GPU clusters across AWS, GCP, Azure
-- NCCL/RDMA-compatible L2 overlay
-- Target: High aggregate throughput*
+### 6.2 Multi-Cloud AI Training & Distributed GPU Clusters
+- GPU clusters across AWS, GCP, and GDC Edge environments.
+- NCCL/RDMA-compatible L2 overlay for unified training fabrics.
+- Bypassing userspace bottlenecks for 100Gbps+ intra-cluster synchronization.
 
 ### 6.3 Autonomous Vehicle Fleet
 - OTA updates over encrypted tunnel
