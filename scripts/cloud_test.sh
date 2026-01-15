@@ -307,6 +307,54 @@ run_test() {
     ssh_cmd "$NODE_B" "tail -10 ~/omni-test/edge_b.log 2>/dev/null || echo 'No log'"
     echo ""
     
+    # ==========================================================================
+    # BASELINE TESTS: Public IP (before VPN comparison)
+    # ==========================================================================
+    print_header "Baseline Network Metrics (Public IP: A → B)"
+    echo "   These tests use public IPs WITHOUT the VPN tunnel."
+    echo "   Results will be compared against VPN tunnel performance."
+    echo ""
+    
+    # Baseline ping test (public IP)
+    print_step "Baseline ping over public IP ($NODE_A → $NODE_B)..."
+    local baseline_ping_output
+    baseline_ping_output=$(ssh_cmd "$NODE_A" "ping -c 5 -W 5 $NODE_B 2>&1" || echo "PING_FAILED")
+    local baseline_latency="N/A"
+    if echo "$baseline_ping_output" | grep -q "rtt"; then
+        baseline_latency=$(echo "$baseline_ping_output" | grep "rtt" | awk -F'/' '{print $5}')
+        echo -e "  ✅ Baseline Ping: ${YELLOW}${baseline_latency} ms${NC}"
+    else
+        echo -e "  ⚠️ Baseline ping failed (firewall may be blocking ICMP)"
+    fi
+    
+    # Baseline iperf3 test (public IP)
+    print_step "Starting iperf3 server on Edge B (public IP)..."
+    ssh_cmd "$NODE_B" "pkill iperf3 2>/dev/null; nohup iperf3 -s -p 5201 > /tmp/iperf_baseline.log 2>&1 &"
+    sleep 3
+    
+    print_step "Baseline iperf3 throughput test ($TEST_DURATION seconds) over public IP..."
+    local baseline_iperf_json
+    baseline_iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $NODE_B -p 5201 -t $TEST_DURATION --json 2>/dev/null" || echo "{}")
+    
+    local baseline_throughput_bps
+    baseline_throughput_bps=$(echo "$baseline_iperf_json" | jq '.end.sum_sent.bits_per_second // 0' 2>/dev/null || echo "0")
+    local baseline_throughput_mbps
+    baseline_throughput_mbps=$(echo "scale=2; $baseline_throughput_bps / 1000000" | bc 2>/dev/null || echo "N/A")
+    
+    if [[ "$baseline_throughput_mbps" != "N/A" && "$baseline_throughput_mbps" != "0" && "$baseline_throughput_mbps" != ".00" ]]; then
+        echo -e "  ✅ Baseline Throughput: ${YELLOW}${baseline_throughput_mbps} Mbps${NC}"
+    else
+        echo -e "  ⚠️ Baseline iperf3 failed (port 5201 may be blocked)"
+        baseline_throughput_mbps="N/A"
+    fi
+    
+    # Stop baseline iperf3 server
+    ssh_cmd "$NODE_B" "pkill iperf3 2>/dev/null" || true
+    
+    # ==========================================================================
+    # VPN TUNNEL TESTS
+    # ==========================================================================
+    
     # Check interfaces on edges
     print_step "Verifying TUN interfaces..."
     echo "Edge A interfaces:"
@@ -316,8 +364,9 @@ run_test() {
     ssh_cmd "$NODE_B" "ip addr show omni0 2>/dev/null || echo 'omni0 not found'"
     
     # Network tests over P2P tunnel
-    print_header "Network Metrics (P2P Tunnel: A → B)"
-    
+    print_header "VPN Tunnel Metrics (Encrypted P2P: A → B)"
+    echo "   These tests use VPN IPs ($VIP_A → $VIP_B) over encrypted tunnel."
+    echo ""
     # Ping test over tunnel with retry
     print_step "Ping over tunnel ($VIP_A → $VIP_B) with retries..."
     local ping_output=""
@@ -399,9 +448,13 @@ run_test() {
   "cluster": "$CLUSTER_NAME",
   "authenticated": $([ -n "$CLUSTER_SECRET" ] && echo "true" || echo "false"),
   "test_duration_sec": $TEST_DURATION,
-  "results": {
-    "tunnel_ping_ms": "$avg_latency",
-    "tunnel_throughput_mbps": $throughput_mbps
+  "baseline": {
+    "ping_ms": "$baseline_latency",
+    "throughput_mbps": "$baseline_throughput_mbps"
+  },
+  "vpn_tunnel": {
+    "ping_ms": "$avg_latency",
+    "throughput_mbps": "$throughput_mbps"
   }
 }
 EOF
@@ -415,16 +468,21 @@ EOF
     # Summary
     print_header "Test Complete"
     
-    echo -e "┌──────────────────────────────────────────────┐"
-    echo -e "│  ${GREEN}3-NODE P2P TEST RESULTS${NC}                      │"
-    echo -e "├──────────────────────────────────────────────┤"
+    echo -e "┌─────────────────────────────────────────────────────────┐"
+    echo -e "│  ${GREEN}3-NODE P2P TEST RESULTS${NC}                                 │"
+    echo -e "├─────────────────────────────────────────────────────────┤"
     echo -e "│  Nucleus:     $NUCLEUS"
     echo -e "│  Edge A:      $NODE_A → $VIP_A"
     echo -e "│  Edge B:      $NODE_B → $VIP_B"
-    echo -e "├──────────────────────────────────────────────┤"
-    echo -e "│  Tunnel Latency:    ${YELLOW}${avg_latency} ms${NC}"
-    echo -e "│  Tunnel Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
-    echo -e "└──────────────────────────────────────────────┘"
+    echo -e "├─────────────────────────────────────────────────────────┤"
+    echo -e "│  ${CYAN}BASELINE (Public IP)${NC}                                    │"
+    echo -e "│    Latency:    ${YELLOW}${baseline_latency} ms${NC}"
+    echo -e "│    Throughput: ${YELLOW}${baseline_throughput_mbps} Mbps${NC}"
+    echo -e "├─────────────────────────────────────────────────────────┤"
+    echo -e "│  ${CYAN}VPN TUNNEL (Encrypted P2P)${NC}                              │"
+    echo -e "│    Latency:    ${YELLOW}${avg_latency} ms${NC}"
+    echo -e "│    Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
+    echo -e "└─────────────────────────────────────────────────────────┘"
     echo ""
     echo -e "Results saved to: ${CYAN}$result_file${NC}"
     echo -e "Logs: ${CYAN}$RESULTS_DIR/*.log${NC}"
