@@ -44,14 +44,18 @@ impl PeerTable {
     }
     
     /// Add or update a peer (without public key - for handshake completion)
+    /// This is called when handshake completes, so set handshake_initiated=true
     pub fn upsert(&mut self, virtual_ip: Ipv4Addr, session_id: u64, endpoint: SocketAddr) {
+        // Preserve existing public_key if peer already exists
+        let existing_pubkey = self.by_vip.get(&virtual_ip).and_then(|p| p.public_key);
+        
         let peer = PeerInfo {
             session_id,
             endpoint,
             virtual_ip,
-            public_key: None,
+            public_key: existing_pubkey,
             last_seen: Instant::now(),
-            handshake_initiated: false,
+            handshake_initiated: true, // Handshake completed!
         };
         
         // Remove old session mapping if VIP was mapped to different session
@@ -68,14 +72,20 @@ impl PeerTable {
     }
     
     /// Register a peer from signaling (includes public key for handshake)
+    /// Preserves handshake_initiated state if peer already exists
     pub fn register(&mut self, public_key: [u8; 32], endpoint: SocketAddr, vip: Ipv4Addr, session_id: u64) {
+        // Preserve handshake_initiated state if peer already exists
+        let handshake_initiated = self.by_vip.get(&vip)
+            .map(|p| p.handshake_initiated)
+            .unwrap_or(false);
+        
         let peer = PeerInfo {
             session_id,
             endpoint,
             virtual_ip: vip,
             public_key: Some(public_key),
             last_seen: Instant::now(),
-            handshake_initiated: false,
+            handshake_initiated, // Preserve existing state!
         };
         
         // Remove old session mapping if VIP was mapped to different session
