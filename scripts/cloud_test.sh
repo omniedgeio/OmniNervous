@@ -249,25 +249,25 @@ run_test() {
     fi
     
     # Kill any existing processes
-    print_step "Cleaning up old processes..."
+    print_step "Cleaning up old processes and logs..."
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
-        ssh_cmd "$node" "sudo pkill -f omni-daemon 2>/dev/null; pkill -f iperf3 2>/dev/null" || true
+        ssh_cmd "$node" "sudo pkill -9 -f omni-daemon 2>/dev/null; sudo pkill -9 -f iperf3 2>/dev/null; sudo rm -f /tmp/omni-*.log" || true
     done
     sleep 2
     
     # Start Nucleus (signaling server)
     print_step "Starting Nucleus on $NUCLEUS..."
-    ssh_cmd "$NUCLEUS" "cd ~/omni-test && sudo sh -c \"RUST_LOG=debug nohup ./omni-daemon --mode nucleus --port $OMNI_PORT > nucleus.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NUCLEUS" "sudo sh -c \"RUST_LOG=debug nohup ./omni-test/omni-daemon --mode nucleus --port $OMNI_PORT > /tmp/omni-nucleus.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Start Edge A with VIP
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
-    ssh_cmd "$NODE_A" "cd ~/omni-test && sudo sh -c \"RUST_LOG=debug nohup ./omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_A --port $OMNI_PORT > edge_a.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=debug nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_A --port $OMNI_PORT > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Start Edge B with VIP
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
-    ssh_cmd "$NODE_B" "cd ~/omni-test && sudo sh -c \"RUST_LOG=debug nohup ./omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_B --port $((OMNI_PORT + 1)) > edge_b.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=debug nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_B --port $((OMNI_PORT + 1)) > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Wait for P2P tunnel establishment (heartbeat cycle is 30s)
@@ -286,15 +286,15 @@ run_test() {
     echo ""
     
     # Show logs for debugging
-    print_step "Daemon logs (last 10 lines)..."
+    print_step "Daemon logs (last 15 lines from /tmp)..."
     echo "--- Nucleus log ---"
-    ssh_cmd "$NUCLEUS" "tail -10 ~/omni-test/nucleus.log 2>/dev/null || echo 'No log'"
+    ssh_cmd "$NUCLEUS" "tail -15 /tmp/omni-nucleus.log 2>/dev/null || echo 'No log in /tmp/omni-nucleus.log'"
     echo ""
     echo "--- Edge A log ---"
-    ssh_cmd "$NODE_A" "tail -10 ~/omni-test/edge_a.log 2>/dev/null || echo 'No log'"
+    ssh_cmd "$NODE_A" "tail -15 /tmp/omni-edge-a.log 2>/dev/null || echo 'No log in /tmp/omni-edge-a.log'"
     echo ""
     echo "--- Edge B log ---"
-    ssh_cmd "$NODE_B" "tail -10 ~/omni-test/edge_b.log 2>/dev/null || echo 'No log'"
+    ssh_cmd "$NODE_B" "tail -15 /tmp/omni-edge-b.log 2>/dev/null || echo 'No log in /tmp/omni-edge-b.log'"
     echo ""
     
     # ==========================================================================
@@ -423,9 +423,9 @@ run_test() {
     
     # Collect logs
     print_step "Collecting logs..."
-    ssh_cmd "$NUCLEUS" "cat ~/omni-test/nucleus.log" > "$RESULTS_DIR/nucleus.log" 2>/dev/null || true
-    ssh_cmd "$NODE_A" "cat ~/omni-test/edge_a.log" > "$RESULTS_DIR/edge_a.log" 2>/dev/null || true
-    ssh_cmd "$NODE_B" "cat ~/omni-test/edge_b.log" > "$RESULTS_DIR/edge_b.log" 2>/dev/null || true
+    ssh_cmd "$NUCLEUS" "cat /tmp/omni-nucleus.log" > "$RESULTS_DIR/nucleus.log" 2>/dev/null || true
+    ssh_cmd "$NODE_A" "cat /tmp/omni-edge-a.log" > "$RESULTS_DIR/edge_a.log" 2>/dev/null || true
+    ssh_cmd "$NODE_B" "cat /tmp/omni-edge-b.log" > "$RESULTS_DIR/edge_b.log" 2>/dev/null || true
     
     # Create results JSON
     cat > "$result_file" << EOF
