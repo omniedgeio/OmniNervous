@@ -463,22 +463,22 @@ async fn main() -> Result<()> {
                             if let Some(peer) = peer_table.lookup_by_vip(&dst_ip) {
                                 // Get session for encryption
                                 if let Some(SessionState::Active(transport)) = session_manager.get_session_mut(peer.session_id) {
-                                    // Encrypt packet: [session_id(8)] [nonce(8)] [encrypted_data] [tag(16)]
-                                    let mut nonce_counter = [0u8; 8];
-                                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce_counter);
+                                    // Generate random nonce for this packet
+                                    let nonce: u64 = rand::random();
                                     
                                     let mut encrypted = vec![0u8; len + 16]; // 16 bytes for tag
-                                    match transport.write_message(peer.session_id, &tun_buf[..len], &mut encrypted) {
+                                    match transport.write_message(nonce, &tun_buf[..len], &mut encrypted) {
                                         Ok(enc_len) => {
-                                            // Build packet: session_id + encrypted
+                                            // Build packet: [session_id(8)] [nonce(8)] [encrypted_data]
                                             let mut packet = peer.session_id.to_be_bytes().to_vec();
+                                            packet.extend_from_slice(&nonce.to_be_bytes());
                                             packet.extend_from_slice(&encrypted[..enc_len]);
                                             
                                             if let Err(e) = socket.send_to(&packet, peer.endpoint).await {
                                                 error!("Failed to send encrypted packet: {}", e);
                                             } else {
                                                 metrics.inc_packets_tx();
-                                                info!("TUN→UDP: {} bytes to {} (session {})", len, dst_ip, peer.session_id);
+                                                info!("TUN→UDP: {} bytes to {} (session {}, nonce {})", len, dst_ip, peer.session_id, nonce);
                                             }
                                         }
                                         Err(e) => {
@@ -628,30 +628,41 @@ async fn main() -> Result<()> {
                             
                             match session_state {
                                 Some("active") => {
-                                    // DATA PACKET: decrypt and forward to TUN
-                                    if let Some(SessionState::Active(transport)) = session_manager.get_session_mut(session_id) {
-                                        let mut decrypted = vec![0u8; len - 8];
-                                        match transport.read_message(session_id, &buf[8..len], &mut decrypted) {
-                                            Ok(dec_len) => {
-                                                // Write decrypted IP packet to TUN
-                                                if let Some(ref mut tun) = _tun {
-                                                    if let Err(e) = tun.write(&decrypted[..dec_len]).await {
-                                                        error!("TUN write error: {}", e);
-                                                    } else {
-                                                        info!("UDP→TUN: {} bytes from session {}", dec_len, session_id);
+                                    // DATA PACKET: [session_id(8)] [nonce(8)] [encrypted_data]
+                                    // Minimum length: 8 (session) + 8 (nonce) + 1 (data) = 17
+                                    if len >= 17 {
+                                        // Extract nonce from bytes 8-15
+                                        let nonce = u64::from_be_bytes([
+                                            buf[8], buf[9], buf[10], buf[11],
+                                            buf[12], buf[13], buf[14], buf[15]
+                                        ]);
+                                        
+                                        if let Some(SessionState::Active(transport)) = session_manager.get_session_mut(session_id) {
+                                            let mut decrypted = vec![0u8; len - 16]; // Subtract session_id + nonce
+                                            match transport.read_message(nonce, &buf[16..len], &mut decrypted) {
+                                                Ok(dec_len) => {
+                                                    // Write decrypted IP packet to TUN
+                                                    if let Some(ref mut tun) = _tun {
+                                                        if let Err(e) = tun.write(&decrypted[..dec_len]).await {
+                                                            error!("TUN write error: {}", e);
+                                                        } else {
+                                                            info!("UDP→TUN: {} bytes from session {} (nonce {})", dec_len, session_id, nonce);
+                                                        }
+                                                    }
+                                                    
+                                                    // Update peer last_seen
+                                                    if let Some(peer) = peer_table.lookup_by_session(session_id) {
+                                                        let vip = peer.virtual_ip;
+                                                        peer_table.touch(&vip);
                                                     }
                                                 }
-                                                
-                                                // Update peer last_seen
-                                                if let Some(peer) = peer_table.lookup_by_session(session_id) {
-                                                    let vip = peer.virtual_ip;
-                                                    peer_table.touch(&vip);
+                                                Err(e) => {
+                                                    error!("Decryption failed: {}", e);
                                                 }
                                             }
-                                            Err(e) => {
-                                                error!("Decryption failed: {}", e);
-                                            }
                                         }
+                                    } else {
+                                        warn!("Data packet too short: {} bytes", len);
                                     }
                                 }
                                 Some("handshaking") => {
