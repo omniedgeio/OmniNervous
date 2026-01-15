@@ -242,22 +242,22 @@ run_test() {
     
     # Start Nucleus (signaling server)
     print_step "Starting Nucleus on $NUCLEUS..."
-    ssh_cmd "$NUCLEUS" "cd ~/omni-test && sudo nohup ./omni-daemon --mode nucleus --port $OMNI_PORT > nucleus.log 2>&1 &"
-    sleep 3
+    ssh_cmd "$NUCLEUS" "cd ~/omni-test && RUST_LOG=debug sudo -E nohup ./omni-daemon --mode nucleus --port $OMNI_PORT > nucleus.log 2>&1 &"
+    sleep 5
     
     # Start Edge A with VIP
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
-    ssh_cmd "$NODE_A" "cd ~/omni-test && sudo nohup ./omni-daemon \
+    ssh_cmd "$NODE_A" "cd ~/omni-test && RUST_LOG=debug sudo -E nohup ./omni-daemon \
         --nucleus $NUCLEUS:$OMNI_PORT \
         --cluster $CLUSTER_NAME $secret_args \
         --vip $VIP_A \
         --port $OMNI_PORT \
         > edge_a.log 2>&1 &"
-    sleep 3
+    sleep 5
     
     # Start Edge B with VIP
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
-    ssh_cmd "$NODE_B" "cd ~/omni-test && sudo nohup ./omni-daemon \
+    ssh_cmd "$NODE_B" "cd ~/omni-test && RUST_LOG=debug sudo -E nohup ./omni-daemon \
         --nucleus $NUCLEUS:$OMNI_PORT \
         --cluster $CLUSTER_NAME $secret_args \
         --vip $VIP_B \
@@ -265,9 +265,10 @@ run_test() {
         > edge_b.log 2>&1 &"
     sleep 5
     
-    # Wait for P2P tunnel establishment
-    print_step "Waiting for P2P tunnel establishment..."
-    sleep 5
+    # Wait for P2P tunnel establishment (heartbeat cycle is 30s)
+    print_step "Waiting for P2P tunnel establishment (40s for heartbeat cycle)..."
+    echo "   This includes registration, heartbeat + delta update, and handshake."
+    sleep 40
     
     # Check if daemons are running
     print_step "Checking daemon processes..."
@@ -302,37 +303,68 @@ run_test() {
     # Network tests over P2P tunnel
     print_header "Network Metrics (P2P Tunnel: A → B)"
     
-    # Ping test over tunnel
-    print_step "Ping over tunnel ($VIP_A → $VIP_B)..."
-    local ping_output
-    ping_output=$(ssh_cmd "$NODE_A" "ping -c 10 -W 2 $VIP_B 2>&1" || echo "PING_FAILED")
+    # Ping test over tunnel with retry
+    print_step "Ping over tunnel ($VIP_A → $VIP_B) with retries..."
+    local ping_output=""
     local avg_latency="N/A"
-    if echo "$ping_output" | grep -q "rtt"; then
-        avg_latency=$(echo "$ping_output" | grep "rtt" | awk -F'/' '{print $5}')
-        echo -e "  ✅ Ping: ${YELLOW}${avg_latency} ms${NC}"
-    else
-        echo -e "  ❌ Ping failed over tunnel"
-        echo "     (This may be expected if tunnel not fully established)"
+    for attempt in 1 2 3; do
+        echo "   Attempt $attempt/3..."
+        ping_output=$(ssh_cmd "$NODE_A" "ping -c 5 -W 5 $VIP_B 2>&1" || echo "PING_FAILED")
+        if echo "$ping_output" | grep -q "rtt"; then
+            avg_latency=$(echo "$ping_output" | grep "rtt" | awk -F'/' '{print $5}')
+            echo -e "  ✅ Ping: ${YELLOW}${avg_latency} ms${NC}"
+            break
+        else
+            echo "   Ping failed, retrying in 10s..."
+            sleep 10
+        fi
+    done
+    if [[ "$avg_latency" == "N/A" ]]; then
+        echo -e "  ❌ Ping failed over tunnel after 3 attempts"
+        echo "     Check logs for handshake/session errors"
     fi
     
-    # iperf3 over tunnel
-    print_step "Starting iperf3 server on Edge B..."
-    ssh_cmd "$NODE_B" "nohup iperf3 -s -p 5201 --bind $VIP_B > iperf_server.log 2>&1 &"
-    sleep 2
-    
-    print_step "Running iperf3 throughput test ($TEST_DURATION seconds) over tunnel..."
-    local iperf_json
-    iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $VIP_B -p 5201 -t $TEST_DURATION --json 2>/dev/null" || echo "{}")
-    
-    local throughput_bps
-    throughput_bps=$(echo "$iperf_json" | jq '.end.sum_sent.bits_per_second // 0' 2>/dev/null || echo "0")
-    local throughput_mbps
-    throughput_mbps=$(echo "scale=2; $throughput_bps / 1000000" | bc 2>/dev/null || echo "N/A")
-    
-    if [[ "$throughput_mbps" != "N/A" && "$throughput_mbps" != "0" ]]; then
-        echo -e "  ✅ Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
+    # Check TUN interfaces are up before iperf3
+    print_step "Verifying TUN interfaces before iperf3..."
+    local tun_a_up=false
+    local tun_b_up=false
+    if ssh_cmd "$NODE_A" "ip addr show omni0 2>/dev/null | grep -q 'state UP'"; then
+        tun_a_up=true
+        echo "  ✅ Edge A omni0: UP"
     else
-        echo -e "  ❌ iperf3 test failed (tunnel may not be active)"
+        echo "  ⚠️ Edge A omni0: DOWN or not found"
+    fi
+    if ssh_cmd "$NODE_B" "ip addr show omni0 2>/dev/null | grep -q 'state UP'"; then
+        tun_b_up=true
+        echo "  ✅ Edge B omni0: UP"
+    else
+        echo "  ⚠️ Edge B omni0: DOWN or not found"
+    fi
+    
+    # iperf3 over tunnel (only if TUN is up)
+    if [[ "$tun_a_up" == "true" && "$tun_b_up" == "true" ]]; then
+        print_step "Starting iperf3 server on Edge B..."
+        ssh_cmd "$NODE_B" "nohup iperf3 -s -p 5201 --bind $VIP_B > iperf_server.log 2>&1 &"
+        sleep 3
+    
+        print_step "Running iperf3 throughput test ($TEST_DURATION seconds) over tunnel..."
+        local iperf_json
+        iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $VIP_B -p 5201 -t $TEST_DURATION --json 2>/dev/null" || echo "{}")
+        
+        local throughput_bps
+        throughput_bps=$(echo "$iperf_json" | jq '.end.sum_sent.bits_per_second // 0' 2>/dev/null || echo "0")
+        local throughput_mbps
+        throughput_mbps=$(echo "scale=2; $throughput_bps / 1000000" | bc 2>/dev/null || echo "N/A")
+        
+        if [[ "$throughput_mbps" != "N/A" && "$throughput_mbps" != "0" && "$throughput_mbps" != ".00" ]]; then
+            echo -e "  ✅ Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
+        else
+            echo -e "  ❌ iperf3 test failed (tunnel may not be active)"
+            throughput_mbps="0"
+        fi
+    else
+        echo -e "  ⚠️ Skipping iperf3 test - TUN interfaces not ready"
+        local throughput_mbps="0"
     fi
     
     # Collect logs
