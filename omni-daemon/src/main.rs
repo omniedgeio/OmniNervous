@@ -47,6 +47,28 @@ use tokio::time::interval;
 #[cfg(target_os = "linux")]
 static EBPF_PROGRAM: &[u8] = include_bytes!("../ebpf/omni-ebpf-core");
 
+/// Detect the default network interface on Linux
+#[cfg(target_os = "linux")]
+fn get_default_interface() -> Option<String> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    
+    if let Ok(file) = File::open("/proc/net/route") {
+        let reader = BufReader::new(file);
+        // Skip header
+        for line in reader.lines().skip(1) {
+            if let Ok(l) = line {
+                let parts: Vec<&str> = l.split_whitespace().collect();
+                // parts[1] is destination, "00000000" is default route
+                if parts.len() >= 2 && parts[1] == "00000000" {
+                    return Some(parts[0].to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Try to load eBPF/XDP program on Linux
 /// Returns Ok(Bpf) if successful, Err if not available or failed
 #[cfg(target_os = "linux")]
@@ -75,17 +97,28 @@ fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
         info!("Kernel {}.{} detected, XDP supported", major, minor);
     }
     
-    // Check if interface exists
+    // Check if interface exists, if not try to find default
+    let mut target_iface = iface.to_string();
     let ip_output = Command::new("ip")
-        .args(["link", "show", iface])
+        .args(["link", "show", &target_iface])
         .output()
         .context("Failed to check interface")?;
+    
     if !ip_output.status.success() {
-        anyhow::bail!("Interface {} not found", iface);
+        if iface == "eth0" {
+            if let Some(default_iface) = get_default_interface() {
+                info!("Interface eth0 not found, auto-detected default: {}", default_iface);
+                target_iface = default_iface;
+            } else {
+                anyhow::bail!("Interface eth0 not found and no default interface detected");
+            }
+        } else {
+            anyhow::bail!("Interface {} not found", iface);
+        }
     }
     
     // Load embedded eBPF program
-    info!("Loading embedded XDP program ({} bytes)...", EBPF_PROGRAM.len());
+    info!("Loading embedded XDP program ({} bytes) on {}...", EBPF_PROGRAM.len(), target_iface);
     let mut bpf = Bpf::load(EBPF_PROGRAM)
         .context("Failed to load eBPF program")?;
     
@@ -99,10 +132,10 @@ fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
         .context("Failed to load XDP program into kernel")?;
     
     // Attach to interface
-    program.attach(iface, XdpFlags::default())
-        .context(format!("Failed to attach XDP to {}", iface))?;
+    program.attach(&target_iface, XdpFlags::default())
+        .context(format!("Failed to attach XDP to {}", target_iface))?;
     
-    info!("XDP program attached to interface {}", iface);
+    info!("XDP program attached to interface {}", target_iface);
     
     // Initialize BPF map sync
     bpf_sync.init_from_bpf(&mut bpf)
@@ -732,7 +765,8 @@ async fn main() -> Result<()> {
                                             session_manager.create_session(session_id, SessionState::Handshaking(new_session));
                                             rate_limiter.record_session_start(session_id);
                                             metrics.inc_sessions();
-                                            info!("Created new session: {} from {}", session_id, src);
+                                            info!("Created new session: {} from {} (PSK: {})", 
+                                                session_id, src, if psk.is_some() { "Enabled" } else { "None" });
                                             
                                             // Process first handshake message
                                             let mut peer_vip_from_handshake: Option<std::net::Ipv4Addr> = None;
