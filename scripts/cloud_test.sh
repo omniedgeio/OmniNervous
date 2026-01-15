@@ -128,10 +128,25 @@ preflight_check() {
     # Check for pre-built binary
     local LINUX_BINARY="$SCRIPT_DIR/omni-daemon-linux-amd64"
     if [[ -f "$LINUX_BINARY" ]]; then
-        echo -e "✅ Pre-built binary found: $LINUX_BINARY"
+        # Verify it's actually an x86_64 ELF binary
+        if file "$LINUX_BINARY" | grep -q "ELF 64-bit.*x86-64"; then
+            local binary_size
+            binary_size=$(ls -lh "$LINUX_BINARY" | awk '{print $5}')
+            echo -e "✅ Pre-built binary found: $LINUX_BINARY ($binary_size)"
+            echo "   Architecture: x86-64 ELF (correct for cloud deployment)"
+        else
+            echo -e "❌ Binary exists but is NOT x86-64 ELF!"
+            echo "   Found: $(file "$LINUX_BINARY" | cut -d: -f2)"
+            echo "   Run: ./scripts/build_linux_amd64.sh to build correct binary"
+            errors=$((errors + 1))
+        fi
     else
         echo -e "❌ Pre-built binary not found: $LINUX_BINARY"
-        echo "   Download from GitHub releases or place in scripts folder"
+        echo ""
+        echo "   To build the binary, run:"
+        echo "   ${CYAN}./scripts/build_linux_amd64.sh${NC}"
+        echo ""
+        echo "   This will cross-compile for linux-amd64 using Docker."
         errors=$((errors + 1))
     fi
     
