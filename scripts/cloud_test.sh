@@ -242,7 +242,7 @@ run_test() {
             print_error "Secret must be at least 16 characters"
             exit 1
         fi
-        secret_args="--secret $CLUSTER_SECRET"
+        secret_args="--secret '$CLUSTER_SECRET'"
         echo -e "🔐 Cluster authentication enabled"
     else
         echo -e "⚠️  No secret specified, running in OPEN mode"
@@ -257,17 +257,17 @@ run_test() {
     
     # Start Nucleus (signaling server)
     print_step "Starting Nucleus on $NUCLEUS..."
-    ssh_cmd "$NUCLEUS" "cd ~/omni-test && sudo sh -c 'RUST_LOG=debug nohup ./omni-daemon --mode nucleus --port $OMNI_PORT > nucleus.log 2>&1 &'"
+    ssh_cmd "$NUCLEUS" "cd ~/omni-test && sudo sh -c \"RUST_LOG=debug nohup ./omni-daemon --mode nucleus --port $OMNI_PORT > nucleus.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Start Edge A with VIP
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
-    ssh_cmd "$NODE_A" "cd ~/omni-test && sudo sh -c 'RUST_LOG=debug nohup ./omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_A --port $OMNI_PORT > edge_a.log 2>&1 &'"
+    ssh_cmd "$NODE_A" "cd ~/omni-test && sudo sh -c \"RUST_LOG=debug nohup ./omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_A --port $OMNI_PORT > edge_a.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Start Edge B with VIP
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
-    ssh_cmd "$NODE_B" "cd ~/omni-test && sudo sh -c 'RUST_LOG=debug nohup ./omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_B --port $((OMNI_PORT + 1)) > edge_b.log 2>&1 &'"
+    ssh_cmd "$NODE_B" "cd ~/omni-test && sudo sh -c \"RUST_LOG=debug nohup ./omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_B --port $((OMNI_PORT + 1)) > edge_b.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Wait for P2P tunnel establishment (heartbeat cycle is 30s)
