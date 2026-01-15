@@ -108,20 +108,28 @@ impl NoiseSession {
     }
 
     /// Process handshake and return both response and peer's payload (which may contain VIP)
+    /// Note: For Noise IK, after initiator reads msg2, handshake is done - no msg3 needed.
     pub fn process_handshake_with_payload(&mut self, message: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         let mut read_buf = vec![0u8; 256];
-        let mut write_buf = vec![0u8; 256];
 
         // Read peer's message and extract payload
         let payload_len = self.handshake.read_message(message, &mut read_buf)
             .context("Handshake failed - wrong secret or invalid message")?;
         
-        // Write our response (include our VIP if we have one - but for responder, done separately)
-        let response_len = self.handshake.write_message(&[], &mut write_buf)?;
-
         let peer_payload = read_buf[..payload_len].to_vec();
-        write_buf.truncate(response_len);
-        Ok((write_buf, peer_payload))
+        
+        // Only write a response if handshake is not yet finished
+        // In Noise IK: Initiator finishes after reading msg2 (no msg3 to write)
+        let response = if !self.handshake.is_handshake_finished() {
+            let mut write_buf = vec![0u8; 256];
+            let response_len = self.handshake.write_message(&[], &mut write_buf)?;
+            write_buf.truncate(response_len);
+            write_buf
+        } else {
+            vec![] // No response needed - handshake complete
+        };
+        
+        Ok((response, peer_payload))
     }
 
     /// Check if the handshake is complete.
