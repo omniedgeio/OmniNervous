@@ -258,7 +258,7 @@ run_test() {
     # Start Nucleus (signaling server)
     print_step "Starting Nucleus on $NUCLEUS..."
     ssh_cmd "$NUCLEUS" "cd ~/omni-test && RUST_LOG=debug sudo -E nohup ./omni-daemon --mode nucleus --port $OMNI_PORT > nucleus.log 2>&1 &"
-    sleep 5
+    sleep 2
     
     # Start Edge A with VIP
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
@@ -268,7 +268,7 @@ run_test() {
         --vip $VIP_A \
         --port $OMNI_PORT \
         > edge_a.log 2>&1 &"
-    sleep 5
+    sleep 2
     
     # Start Edge B with VIP
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
@@ -278,7 +278,7 @@ run_test() {
         --vip $VIP_B \
         --port $((OMNI_PORT + 1)) \
         > edge_b.log 2>&1 &"
-    sleep 5
+    sleep 2
     
     # Wait for P2P tunnel establishment (heartbeat cycle is 30s)
     print_step "Waiting for P2P tunnel establishment (40s for heartbeat cycle)..."
