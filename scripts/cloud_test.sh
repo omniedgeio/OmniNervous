@@ -209,8 +209,8 @@ deploy_binaries() {
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
         print_step "Deploying to $node..."
         
-        # Create remote directory
-        ssh_cmd "$node" "mkdir -p ~/omni-test"
+        # Clean up and create remote directory
+        ssh_cmd "$node" "rm -rf ~/omni-test && mkdir -p ~/omni-test"
         
         # Copy binary
         scp_to "$LINUX_BINARY" "$node" "~/omni-test/omni-daemon"
