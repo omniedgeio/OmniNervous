@@ -51,18 +51,24 @@ graph TB
 ### 🛠️ Building
 
 #### 1. The Ganglion Daemon
-The userspace daemon is gated and can be verified across platforms (macOS/Linux).
+The userspace daemon can be built natively or via Docker.
 ```bash
-cargo build -p omni-daemon
+# Native Build
+cargo build -p omni-daemon --release
+
+# native Docker Build (Fastest on amd64 Linux)
+./scripts/build_local_docker.sh
 ```
 
-#### 2. The Synapse Engine (Linux Only)
+#### 2. Cross-Compilation (macOS → Linux)
+If you are developing on Apple Silicon and targeting Linux amd64:
+```bash
+./scripts/build_linux_amd64.sh
+```
+
+#### 3. The Synapse Engine (Linux Only)
 To compile the eBPF kernel program:
 ```bash
-# Install bpf-linker (requires Rust nightly)
-rustup install nightly
-cargo +nightly install bpf-linker
-
 # Build eBPF program
 cargo +nightly build -p omni-ebpf-core --target bpfel-unknown-none -Z build-std=core --release
 ```
@@ -212,20 +218,33 @@ This single command handles the entire lifecycle:
 
 *\* Localhost benchmarks validate functionality, not production throughput.*
 
-#### ☁️ Hybrid Cloud Connectivity
+#### ☁️ Hybrid Cloud & Full Cluster Deployment
 
-To test connectivity between your local machine and a remote cloud service:
+To test connectivity across real cloud instances:
 
-1.  **Deploy Nucleus to Cloud**: Use the helper script to set up a signaling node on a VPS (e.g., AWS, GCP, DigitalOcean).
+1.  **Sync Codebase to Cloud**: Use `rsync` with smart excludes to quickly deploy the source to a VPS.
     ```bash
-    ./scripts/deploy_nucleus.sh <user@remote-ip> [ssh-key-path]
+    ./scripts/deploy_to_cloud.sh root@<REMOTE_IP>
     ```
-2.  **Connect Local Edge**: Launch the daemon on your local machine pointing to the remote IP.
-    ```bash
-    ./omni-daemon --nucleus <REMOTE_PUBLIC_IP> --cluster cloud-test
-    ```
-3.  **Verify Handshake**: Monitor logs to confirm the Noise session is established through the public internet.
 
+2.  **Automated 3-Node Cloud Test**: Orchestrate a full test (Nucleus + 2 Edges) across three cloud instances.
+    ```bash
+    ./scripts/cloud_test.sh \
+      --nucleus <NUCLEUS_IP> \
+      --node-a <EDGE_A_IP> \
+      --node-b <EDGE_B_IP> \
+      --secret "your-secure-secret-16-chars"
+    ```
+    This script handles:
+    - Process cleanup and log management (in `/tmp/`)
+    - Daemon startup with background detachment
+    - Baseline performance measurement (Public IP ping/iperf3)
+    - VPN tunnel verification (Handshake + iperf3)
+
+3.  **Manual Nucleus Setup**:
+    ```bash
+    ./scripts/deploy_nucleus.sh <user@remote-ip>
+    ```
 ### 🪜 Peer Usage Flow
 
 Using OmniNervous is designed to be as simple as plugging in a physical cable:
