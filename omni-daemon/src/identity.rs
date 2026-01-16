@@ -71,6 +71,14 @@ impl Identity {
         private_key.copy_from_slice(&data[0..32]);
         public_key.copy_from_slice(&data[32..64]);
 
+        // Validate keypair integrity
+        let derived = Self::derive_public_key(&private_key);
+        if derived != public_key {
+            anyhow::bail!("Invalid identity file: public key does not match private key. The file may be corrupted.");
+        }
+
+
+
         info!("Loaded identity from {:?}", key_path);
         Ok(Self { private_key, public_key })
     }

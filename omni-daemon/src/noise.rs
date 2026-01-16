@@ -51,7 +51,7 @@ impl NoiseSession {
         psk: Option<&[u8; 32]>
     ) -> Result<Self> {
         let pattern = if psk.is_some() {
-            "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"
+            "Noise_IKpsk1_25519_ChaChaPoly_BLAKE2s"
         } else {
             "Noise_IK_25519_ChaChaPoly_BLAKE2s"
         };
@@ -66,7 +66,7 @@ impl NoiseSession {
         if let Some(key) = psk {
             log::debug!("Initiator using PSK with fingerprint: {:02x}{:02x}{:02x}{:02x}", 
                 key[0], key[1], key[2], key[3]);
-            builder = builder.psk(2, key);
+            builder = builder.psk(1, key);
         } else {
             log::debug!("Initiator NOT using PSK (open mode)");
         }
@@ -80,7 +80,7 @@ impl NoiseSession {
     /// Create responder with optional PSK authentication
     pub fn new_responder(local_priv_key: &[u8], psk: Option<&[u8; 32]>) -> Result<Self> {
         let pattern = if psk.is_some() {
-            "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"
+            "Noise_IKpsk1_25519_ChaChaPoly_BLAKE2s"
         } else {
             "Noise_IK_25519_ChaChaPoly_BLAKE2s"
         };
@@ -94,7 +94,7 @@ impl NoiseSession {
         if let Some(key) = psk {
             log::debug!("Responder using PSK with fingerprint: {:02x}{:02x}{:02x}{:02x}", 
                 key[0], key[1], key[2], key[3]);
-            builder = builder.psk(2, key);
+            builder = builder.psk(1, key);
         } else {
             log::debug!("Responder NOT using PSK (open mode)");
         }
