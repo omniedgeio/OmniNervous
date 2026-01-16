@@ -570,9 +570,13 @@ async fn main() -> Result<()> {
                                         match signaling::parse_register_ack(&buf[..len]) {
                                             Ok(ack) => {
                                                 info!("Registration confirmed, {} recent peers", ack.recent_peers.len());
-                                                for peer_info in ack.recent_peers {
+                                            for peer_info in ack.recent_peers {
                                                     if let Ok(endpoint) = peer_info.endpoint.parse::<std::net::SocketAddr>() {
-                                                        let session_id = session_manager.generate_session_id(endpoint.ip());
+                                                        // Reuse existing session ID if peer exists to avoid resetting handshake
+                                                        let session_id = peer_table.lookup_by_vip(&peer_info.vip)
+                                                            .map(|p| p.session_id)
+                                                            .unwrap_or_else(|| session_manager.generate_session_id(endpoint.ip()));
+
                                                         peer_table.register(
                                                             peer_info.public_key,
                                                             endpoint,
@@ -593,7 +597,11 @@ async fn main() -> Result<()> {
                                                 // Add new peers
                                                 for peer_info in ack.new_peers {
                                                     if let Ok(endpoint) = peer_info.endpoint.parse::<std::net::SocketAddr>() {
-                                                        let session_id = session_manager.generate_session_id(endpoint.ip());
+                                                        // Reuse existing session ID if peer exists
+                                                        let session_id = peer_table.lookup_by_vip(&peer_info.vip)
+                                                            .map(|p| p.session_id)
+                                                            .unwrap_or_else(|| session_manager.generate_session_id(endpoint.ip()));
+
                                                         peer_table.register(
                                                             peer_info.public_key,
                                                             endpoint,
@@ -619,7 +627,11 @@ async fn main() -> Result<()> {
                                                 if info.found {
                                                     if let Some(peer_info) = info.peer {
                                                         if let Ok(endpoint) = peer_info.endpoint.parse::<std::net::SocketAddr>() {
-                                                            let session_id = session_manager.generate_session_id(endpoint.ip());
+                                                            // Reuse existing session ID if peer exists
+                                                            let session_id = peer_table.lookup_by_vip(&peer_info.vip)
+                                                                .map(|p| p.session_id)
+                                                                .unwrap_or_else(|| session_manager.generate_session_id(endpoint.ip()));
+
                                                             peer_table.register(
                                                                 peer_info.public_key,
                                                                 endpoint,
