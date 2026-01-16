@@ -52,16 +52,28 @@ graph TB
 
 #### 1. The Ganglion Daemon
 The userspace daemon can be built natively or via Docker.
-```bash
-# Native Build
-cargo build -p omni-daemon --release
 
-# native Docker Build (Fastest on amd64 Linux)
+**Local Native Build:**
+```bash
+cargo build -p omni-daemon --release
+```
+
+**Local Docker Build (Recommended for Linux):**
+```bash
 ./scripts/build_local_docker.sh
 ```
 
-#### 2. Cross-Compilation (macOS → Linux)
-If you are developing on Apple Silicon and targeting Linux amd64:
+#### 2. Cross-Compilation (macOS → Linux amd64)
+If you are developing on Apple Silicon (M1/M2/M3), choose your speed:
+
+**A. High-Speed (Recommended):**
+Uses native cross-compilation (no emulation). Requires `brew install zig`.
+```bash
+./scripts/build_cross_fast.sh
+```
+
+**B. Docker-based (Slow):**
+Uses QEMU emulation. Note: This can take 30+ minutes due to project complexity (`aya`, `tokio`).
 ```bash
 ./scripts/build_linux_amd64.sh
 ```
