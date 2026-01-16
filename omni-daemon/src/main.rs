@@ -4,8 +4,6 @@
 use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
 use aya::{
-    include_bytes_aligned,
-    maps::HashMap,
     programs::{Xdp, XdpFlags},
     Bpf,
 };
@@ -442,7 +440,7 @@ async fn main() -> Result<()> {
                         if let Some(pubkey) = peer.public_key {
                             // Create initiator session
                             info!("Initiated handshake to {} (Remote: {})", 
-                                peer.vip, 
+                                peer.virtual_ip, 
                                 hex::encode(&pubkey[..4]));
                             match NoiseSession::new_initiator(&identity.private_key, &pubkey, psk.as_ref()) {
                                 Ok(mut session) => {

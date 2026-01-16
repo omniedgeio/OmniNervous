@@ -60,16 +60,7 @@ impl VirtualInterface {
             .mtu(config.mtu)
             .up();
         
-        // Platform-specific configuration
-        #[cfg(target_os = "linux")]
-        tun_config.platform_config(|p| {
-            p.packet_information(false);
-        });
-        
-        #[cfg(target_os = "macos")]
-        tun_config.platform_config(|p| {
-            p.packet_information(false);
-        });
+
         
         let device = tun2::create_as_async(&tun_config)
             .context("Failed to create TUN device")?;
