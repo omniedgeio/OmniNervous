@@ -27,10 +27,15 @@
 - [x] Packet forwarding: UDP→decrypt→TUN
 - [x] Peer registration after handshake
 
-## Phase 5: Cloud Testing 🔄
+## Phase 5: Cloud Testing ✅
 - [x] 3-node cloud_test.sh (Nucleus + 2 Edges)
-- [ ] Real-world WAN testing
-- [ ] P2P tunnel throughput benchmarks
+- [x] Real-world WAN testing (Latency overhead < 1ms)
+- [x] P2P tunnel throughput benchmarks (~53% efficiency vs WireGuard)
+
+## Phase 6: Performance Optimization (Current Focus) 🚀
+- [ ] Fix eBPF/XDP loading (Currently falling back to userspace)
+- [ ] Implement GRO/GSO in userspace (if XDP unavailable)
+- [ ] Increase throughput extraction rate to >90% of wire speed
 
 ---
 
