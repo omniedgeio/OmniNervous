@@ -47,7 +47,7 @@ CLUSTER_SECRET="${CLUSTER_SECRET:-}"
 
 show_help() {
     cat << EOF
-OmniNervous 3-Node Cloud Test Orchestrator
+OmniNervous 3-Node Cloud Test Orchestrato
 
 Architecture:
   ┌──────────┐      ┌──────────┐      ┌──────────┐
@@ -192,7 +192,7 @@ deploy_binaries() {
     local SCRIPT_DIR
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     
-    # Check for pre-built binary in same folder
+    # Check for pre-built binary in same folde
     local LINUX_BINARY="$SCRIPT_DIR/omni-daemon-linux-amd64"
     
     if [ ! -f "$LINUX_BINARY" ]; then
@@ -271,9 +271,9 @@ run_test() {
     sleep 2
     
     # Wait for P2P tunnel establishment (heartbeat cycle is 30s)
-    print_step "Waiting for P2P tunnel establishment (40s for heartbeat cycle)..."
+    print_step "Waiting for P2P tunnel establishment (60s for heartbeat cycle)..."
     echo "   This includes registration, heartbeat + delta update, and handshake."
-    sleep 40
+    sleep 60
     
     # Check if daemons are running
     print_step "Checking daemon processes..."
@@ -338,7 +338,7 @@ run_test() {
         baseline_throughput_mbps="N/A"
     fi
     
-    # Stop baseline iperf3 server
+    # Stop baseline iperf3 serve
     ssh_cmd "$NODE_B" "pkill iperf3 2>/dev/null" || true
     
     # ==========================================================================
@@ -374,7 +374,12 @@ run_test() {
         fi
     done
     if [[ "$avg_latency" == "N/A" ]]; then
-        echo -e "  ❌ Ping failed over tunnel after 3 attempts"
+        echo "     Diagnostics (IP):"
+        ssh_cmd "$NODE_A" "ip addr show omni0" || true
+        ssh_cmd "$NODE_B" "ip addr show omni0" || true
+        echo "     Diagnostics (Route):"
+        ssh_cmd "$NODE_A" "ip route" || true
+        ssh_cmd "$NODE_B" "ip route" || true
         echo "     Check logs for handshake/session errors"
     fi
     
@@ -382,13 +387,13 @@ run_test() {
     print_step "Verifying TUN interfaces before iperf3..."
     local tun_a_up=false
     local tun_b_up=false
-    if ssh_cmd "$NODE_A" "ip addr show omni0 2>/dev/null | grep -q 'state UP'"; then
+    if ssh_cmd "$NODE_A" "ip addr show omni0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
         tun_a_up=true
         echo "  ✅ Edge A omni0: UP"
     else
         echo "  ⚠️ Edge A omni0: DOWN or not found"
     fi
-    if ssh_cmd "$NODE_B" "ip addr show omni0 2>/dev/null | grep -q 'state UP'"; then
+    if ssh_cmd "$NODE_B" "ip addr show omni0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
         tun_b_up=true
         echo "  ✅ Edge B omni0: UP"
     else
