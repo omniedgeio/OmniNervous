@@ -441,6 +441,9 @@ async fn main() -> Result<()> {
                     for peer in peers_to_connect {
                         if let Some(pubkey) = peer.public_key {
                             // Create initiator session
+                            info!("Initiated handshake to {} (Remote: {})", 
+                                peer.vip, 
+                                hex::encode(&pubkey[..4]));
                             match NoiseSession::new_initiator(&identity.private_key, &pubkey, psk.as_ref()) {
                                 Ok(mut session) => {
                                     // Build handshake message 1 with our VIP
@@ -765,8 +768,8 @@ async fn main() -> Result<()> {
                                             session_manager.create_session(session_id, SessionState::Handshaking(new_session));
                                             rate_limiter.record_session_start(session_id);
                                             metrics.inc_sessions();
-                                            info!("Created new session: {} from {} (PSK: {})", 
-                                                session_id, src, if psk.is_some() { "Enabled" } else { "None" });
+                                            info!("Created new session: {} from {} (Local: {}, PSK: {})", 
+                                                session_id, src, hex::encode(&identity.public_key[..4]), if psk.is_some() { "Enabled" } else { "None" });
                                             
                                             // Process first handshake message
                                             let mut peer_vip_from_handshake: Option<std::net::Ipv4Addr> = None;
