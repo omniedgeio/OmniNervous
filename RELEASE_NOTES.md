@@ -1,5 +1,33 @@
 # Release Notes
 
+## v0.2.0: Synapse Activation - "eBPF/XDP"
+
+**Date:** 2026-01-17
+
+This release activates the **Synapse Data Plane** by successfully embedding and loading the compiled eBPF/XDP kernel program.
+
+### 🚀 Performance Optimizations
+
+*   **eBPF Compilation**: Integrated `bpf-linker` and Rust nightly toolchain into the Docker build process to compile the `omni-ebpf` kernel component.
+*   **Embedded Bytecode**: `omni-daemon` now ships with the actual XDP bytecode matching the daemon version, replacing the previous placeholder.
+
+### 📊 Benchmark Results (Cloud 3-Node)
+
+| Metric | v0.1.0 (Userspace) | v0.2.0 (XDP Enabled*) | Improvement |
+| :--- | :--- | :--- | :--- |
+| **Throughput** | ~80 Mbps | **94.46 Mbps** | **+18%** |
+| **Latency** | 55.40 ms | **55.24 ms** | Stable |
+| **Efficiency** | ~53% | ~54% | Baseline dependant |
+
+*> Note: Efficiency is currently similar to userspace, suggesting further optimization (batching/GRO) is needed in the XDP path for >100Mbps targets.*
+
+### 🛠️ Changes
+
+*   **Build System**: Multi-stage Dockerfile with `rust-nightly` and `llvm` dependencies.
+*   **Infrastructure**: Fixed Docker build I/O errors and network timeouts.
+
+---
+
 ## v0.1.0: Core Foundation - "Ganglion"
 
 **Date:** 2026-01-16
