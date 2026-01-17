@@ -2,9 +2,17 @@
 # Simplified build - copy all sources at once
 
 # Stage 1: Build eBPF Kernel Program
-FROM rustlang/rust:nightly AS ebpf-builder
+FROM --platform=linux/amd64 rust:1.79 AS ebpf-builder
 
 WORKDIR /usr/src/omni
+
+# Install dependencies for bpf-linker and rustup
+RUN apt-get update && apt-get install -y llvm clang
+
+# Install nightly toolchain
+RUN rustup toolchain install nightly \
+    && rustup default nightly \
+    && rustup component add rust-src
 
 # Install bpf-linker
 RUN cargo install bpf-linker
@@ -31,7 +39,7 @@ COPY omni-ebpf ./omni-ebpf/
 # Copy compiled eBPF program from Stage 1
 # This replaces the placeholder creation
 RUN mkdir -p omni-daemon/ebpf
-COPY --from=ebpf-builder /usr/src/omni/omni-ebpf/omni-ebpf-core/target/bpfel-unknown-none/release/omni-ebpf-core omni-daemon/ebpf/omni-ebpf-core
+COPY --from=ebpf-builder /usr/src/omni/omni-ebpf/omni-ebpf-core/target/bpfel-unknown-none/release/omni-ebpf omni-daemon/ebpf/omni-ebpf-core
 
 # Build release binary
 RUN cargo build -p omni-daemon --release
