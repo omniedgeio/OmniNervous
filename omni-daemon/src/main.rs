@@ -41,9 +41,9 @@ use bpf_sync::BpfSync;
 use std::time::Duration;
 use tokio::time::interval;
 
-/// Embedded eBPF program binary (built by CI and placed in omni-daemon/ebpf/)
+/// Embedded eBPF program binary (built by CI and placed in omni-ebpf/ target directory)
 #[cfg(target_os = "linux")]
-static EBPF_PROGRAM: &[u8] = include_bytes!("../ebpf/omni-ebpf-core");
+static EBPF_PROGRAM: &[u8] = include_bytes!("../../omni-ebpf/omni-ebpf-core/target/bpfel-unknown-none/release/omni-ebpf");
 
 /// Detect the default network interface on Linux
 #[cfg(target_os = "linux")]
@@ -117,8 +117,13 @@ fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
     
     // Load embedded eBPF program
     info!("Loading embedded XDP program ({} bytes) on {}...", EBPF_PROGRAM.len(), target_iface);
-    let mut bpf = Bpf::load(EBPF_PROGRAM)
-        .context("Failed to load eBPF program")?;
+    let mut bpf = match Bpf::load(EBPF_PROGRAM) {
+        Ok(bpf) => bpf,
+        Err(e) => {
+            warn!("eBPF/XDP not available: Failed to load eBPF program: {}", e);
+            return Err(anyhow::anyhow!("eBPF loading failed: {}", e));
+        }
+    };
     
     // Get and load the XDP program
     let program: &mut Xdp = bpf.program_mut("xdp_synapse")
@@ -126,8 +131,13 @@ fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
         .try_into()
         .context("Failed to cast to XDP program")?;
     
-    program.load()
-        .context("Failed to load XDP program into kernel")?;
+    match program.load() {
+        Ok(_) => {},
+        Err(e) => {
+            warn!("eBPF/XDP not available: Failed to load XDP program into kernel: {}", e);
+            return Err(e.into());
+        }
+    }
     
     // Attach to interface
     program.attach(&target_iface, XdpFlags::default())
@@ -768,14 +778,15 @@ async fn main() -> Result<()> {
                                     }
 
                                     // Try to finalize
-                                    if let Ok(true) = session_manager.finalize_session(session_id) {
+                                    if let Ok((true, key)) = session_manager.finalize_session(session_id) {
                                         // Sync to BPF map
-                                        let key = [0u8; 32]; // TODO: Extract from transport state
-                                        if let Err(e) = bpf_sync.insert_session(session_id, key, src.ip(), src.port()) {
-                                            error!("BPF sync failed: {}", e);
-                                        } else {
-                                            metrics.inc_handshakes_completed();
-                                            info!("Session {} finalized and synced to BPF!", session_id);
+                                        if let Some(session_key) = key {
+                                            if let Err(e) = bpf_sync.insert_session(session_id, session_key, src.ip(), src.port()) {
+                                                error!("BPF sync failed: {}", e);
+                                            } else {
+                                                metrics.inc_handshakes_completed();
+                                                info!("Session {} finalized and synced to BPF!", session_id);
+                                            }
                                         }
                                         
                                         // Register peer with VIP from handshake (or fallback)
@@ -835,15 +846,16 @@ async fn main() -> Result<()> {
                                             }
                                             
                                             // Try to finalize
-                                            if let Ok(true) = session_manager.finalize_session(session_id) {
-                                                let key = [0u8; 32];
-                                                if let Err(e) = bpf_sync.insert_session(session_id, key, src.ip(), src.port()) {
-                                                    error!("BPF sync failed: {}", e);
-                                                } else {
-                                                    metrics.inc_handshakes_completed();
-                                                    info!("Session {} finalized!", session_id);
+                                            if let Ok((true, key)) = session_manager.finalize_session(session_id) {
+                                                if let Some(session_key) = key {
+                                                    if let Err(e) = bpf_sync.insert_session(session_id, session_key, src.ip(), src.port()) {
+                                                        error!("BPF sync failed: {}", e);
+                                                    } else {
+                                                        metrics.inc_handshakes_completed();
+                                                        info!("Session {} finalized!", session_id);
+                                                    }
                                                 }
-                                                
+
                                                 let peer_vip = peer_vip_from_handshake.unwrap_or_else(|| {
                                                     std::net::Ipv4Addr::new(10, 200, 0, ((session_id % 250) + 1) as u8)
                                                 });

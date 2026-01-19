@@ -1,0 +1,18 @@
+{
+  "timestamp": "20260119_043343",
+  "architecture": "3-node (Nucleus + 2 Edges)",
+  "nucleus": "98.81.237.218",
+  "edge_a": {"public_ip": "16.144.232.163", "vip": "10.200.0.10"},
+  "edge_b": {"public_ip": "107.21.154.244", "vip": "10.200.0.20"},
+  "cluster": "omni-test",
+  "authenticated": true,
+  "test_duration_sec": 10,
+  "baseline": {
+    "ping_ms": "54.454",
+    "throughput_mbps": "198.88"
+  },
+  "vpn_tunnel": {
+    "ping_ms": "55.484",
+    "throughput_mbps": "87.64"
+  }
+}

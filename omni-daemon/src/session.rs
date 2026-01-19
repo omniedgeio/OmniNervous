@@ -201,6 +201,4 @@ mod tests {
         let dec_len = r_transport.read_message(nonce, &encrypted[..enc_len], &mut decrypted).unwrap();
         assert_eq!(&decrypted[..dec_len], msg);
     }
- }
- 
-(End of file - total 264 lines)
+  }
