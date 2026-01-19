@@ -1,0 +1,9 @@
+target/
+omni-daemon/target/
+omni-ebpf/target/
+omni-daemon/ebpf/omni-ebpf-core
+*.log
+*.key
+.omni/
+.git/
+.gemini/

@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-aya-bpf = { git = "https://github.com/aya-rs/aya", tag = "aya-v0.12.0" }
-aya-log-ebpf = { git = "https://github.com/aya-rs/aya", tag = "aya-v0.12.0" }
+aya-ebpf = "=0.1.1"
+aya-log-ebpf = "=0.1.0"
 omni-common = { path = "../../omni-common" }
-
-[lib]
-path = "src/lib.rs"
 
 [[bin]]
 name = "omni-ebpf"
 path = "src/main.rs"
+
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1
+panic = "abort"
