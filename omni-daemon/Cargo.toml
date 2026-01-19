@@ -40,3 +40,5 @@ omni-common = { path = "../omni-common", features = ["aya"] }
 aya = "0.13.0"
 aya-log = "0.2.1"
 tokio = { version = "1", features = ["full", "parking_lot"] }
+nix = { version = "0.30.1", features = ["sched"] }
+num_cpus = "1.17.0"

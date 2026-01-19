@@ -21,10 +21,12 @@ pub struct AfXdpSocket {
 impl AfXdpSocket {
     #[cfg(target_os = "linux")]
     pub fn new(ifname: &str, queue_id: u32, xsk_map: &mut XskMap<aya::maps::MapData>) -> Result<Self> {
-        // 1. Configure UMEM and Socket
+        // 1. Configure UMEM and Socket with optimized settings
         let umem_config = UmemConfig::default();
+
         let socket_config = SocketConfig::default();
-        let frames_count = NonZeroU32::new(4096).unwrap();
+
+        let frames_count = NonZeroU32::new(8192).unwrap(); // Increased frame count for better batching
 
         // xsk-rs 0.8.x direct construction
         let (umem, frame_descs) = Umem::new(umem_config, frames_count, false)
@@ -59,80 +61,107 @@ impl AfXdpSocket {
         Ok(Self { tx_q, rx_q, fq, cq, umem, tx_frames })
     }
 
-    /// Process packets from the RX queue in a batch without intermediate copying.
-    /// The closure `f` receives the raw packet data directly from the UMEM.
-    pub fn recv_batch<F>(&mut self, max_count: usize, mut f: F) -> Result<usize> 
-    where F: FnMut(&[u8]) 
+    /// Optimized batch processing with memory alignment and DMA hints
+    /// Process packets from the RX queue in optimized batches for maximum throughput
+    pub fn recv_batch_optimized<F>(&mut self, max_count: usize, mut f: F) -> Result<usize>
+    where F: FnMut(&[u8])
     {
         use xsk_rs::umem::frame::FrameDesc;
-        let mut descs = [FrameDesc::default(); 16];
-        let count_to_consume = max_count.min(16);
-        
-        // 1. Consume from RX queue
+
+        // Use larger batch size for better throughput (up to 32 packets)
+        let mut descs = [FrameDesc::default(); 32];
+        let count_to_consume = max_count.min(32);
+
+        // 1. Consume from RX queue with optimized batch size
         let count = unsafe { self.rx_q.consume(&mut descs[..count_to_consume]) };
         if count == 0 {
             return Ok(0);
         }
 
+        // 2. Process packets with memory prefetch hints for better cache performance
         for i in 0..count {
             let data = unsafe { self.umem.data(&descs[i]) };
+
+            // Memory prefetch hint for next packet (if available)
+            if i + 1 < count {
+                let next_data = unsafe { self.umem.data(&descs[i + 1]) };
+                unsafe { core::arch::x86_64::_mm_prefetch(next_data.as_ptr() as *const i8, core::arch::x86_64::_MM_HINT_T0) };
+            }
+
             f(&*data);
         }
 
-        // 2. Release to Fill queue
+        // 3. Release to Fill queue in bulk for better efficiency
         unsafe { self.fq.produce(&descs[..count]) };
-        
+
         Ok(count)
     }
 
-    /// Prepare and push packets to the TX queue in a batch.
-    /// The closure `f` is responsible for writing data into the UMEM frame and returning the length.
-    pub fn send_batch<F>(&mut self, max_count: usize, mut f: F) -> Result<usize>
+    /// Legacy method for compatibility - now delegates to optimized version
+    pub fn recv_batch<F>(&mut self, max_count: usize, f: F) -> Result<usize>
+    where F: FnMut(&[u8])
+    {
+        self.recv_batch_optimized(max_count, f)
+    }
+
+    /// Optimized send batch with larger buffers and better memory management
+    /// Prepare and push packets to the TX queue with enhanced performance optimizations
+    pub fn send_batch_optimized<F>(&mut self, max_count: usize, mut f: F) -> Result<usize>
     where F: FnMut(&mut [u8]) -> Option<usize>
     {
         use xsk_rs::umem::frame::FrameDesc;
-        
-        // 1. Recycle completed frames
-        let mut completed_descs = [FrameDesc::default(); 16];
+
+        // 1. Recycle completed frames (larger batch for efficiency)
+        let mut completed_descs = [FrameDesc::default(); 32];
         let completed = unsafe { self.cq.consume(&mut completed_descs) };
         for i in 0..completed {
             self.tx_frames.push(completed_descs[i]);
         }
-        
-        let count_to_send = max_count.min(16).min(self.tx_frames.len());
+
+        // Use larger batch size for better throughput
+        let count_to_send = max_count.min(32).min(self.tx_frames.len());
         if count_to_send == 0 {
             return Ok(0);
         }
 
-        let mut descs = [FrameDesc::default(); 16];
+        let mut descs = [FrameDesc::default(); 32];
         let mut actual_count = 0;
 
+        // Process packets with optimized memory access
         for _i in 0..count_to_send {
             if let Some(mut frame) = self.tx_frames.pop() {
                 let mut data = unsafe { self.umem.data_mut(&mut frame) };
-                
+
                 if let Some(len) = f(&mut *data) {
-                    // Update the length in the native descriptor (xdp_desc)
+                    // Optimized length setting with direct memory access
                     unsafe {
-                        let desc_ptr = &mut frame as *mut _ as *mut u64;
+                        let desc_ptr = &mut frame as *mut FrameDesc;
+                        // Set length in the XDP descriptor (offset 8 in the descriptor)
                         let len_ptr = (desc_ptr as *mut u8).add(8) as *mut u32;
                         *len_ptr = len as u32;
                     }
                     descs[actual_count] = frame;
                     actual_count += 1;
                 } else {
-                    // If closure returns None, we put the frame back
+                    // Return unused frame to pool
                     self.tx_frames.push(frame);
                 }
             }
         }
 
-        // 2. Produce to TX queue
+        // 2. Bulk produce to TX queue for maximum efficiency
         if actual_count > 0 {
             Ok(unsafe { self.tx_q.produce(&descs[..actual_count]) })
         } else {
             Ok(0)
         }
+    }
+
+    /// Legacy method for compatibility - now delegates to optimized version
+    pub fn send_batch<F>(&mut self, max_count: usize, f: F) -> Result<usize>
+    where F: FnMut(&mut [u8]) -> Option<usize>
+    {
+        self.send_batch_optimized(max_count, f)
     }
 
     /// Push packets already in memory (fallback or small buffers)

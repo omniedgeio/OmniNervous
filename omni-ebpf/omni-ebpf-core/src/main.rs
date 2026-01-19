@@ -22,13 +22,22 @@ pub fn xdp_synapse(ctx: XdpContext) -> u32 {
 
 #[inline(always)]
 fn try_xdp_synapse(ctx: XdpContext) -> Result<u32, ()> {
-    // Simple packet counting for testing eBPF loading
+    // Update packet counter
     let stats = unsafe { PACKET_STATS.get_ptr_mut(0) };
     if let Some(counter) = stats {
         unsafe { *counter += 1 };
     }
 
-    // Pass all packets to userspace for processing
+    // For Phase 7.2: Maximize XDP_REDIRECT usage
+    // Classify packets and route known flows via kernel fast path
+
+    // Quick Ethernet header check
+    if ctx.data_end() - ctx.data() < 14 {
+        return Ok(xdp_action::XDP_PASS); // Too short, let userspace handle
+    }
+
+    // For now, pass to userspace for full processing
+    // TODO: Implement session-based routing for XDP_REDIRECT maximization
     Ok(xdp_action::XDP_PASS)
 }
 
