@@ -12,6 +12,9 @@ use log::{info, error, warn, debug};
 use tokio::net::UdpSocket;
 use tokio::signal;
 
+#[cfg(target_os = "linux")]
+use crate::af_xdp::AfXdpSocket;
+
 mod noise;
 mod session;
 mod p2p;
@@ -26,6 +29,7 @@ mod nonce;
 mod crypto_util;
 mod poly1305;
 mod tun;
+mod af_xdp;
 mod peers;
 mod signaling;
 
@@ -70,6 +74,29 @@ fn get_default_interface() -> Option<String> {
 /// Try to load eBPF/XDP program on Linux
 /// Returns Ok(Bpf) if successful, Err if not available or failed
 #[cfg(target_os = "linux")]
+fn create_af_xdp_socket(iface: &str, bpf: &mut Bpf) -> Result<AfXdpSocket> {
+    #[cfg(target_os = "linux")]
+    {
+        use aya::maps::XskMap;
+        use crate::af_xdp::AfXdpSocket;
+
+        // Get the XSK map from BPF for socket registration
+        let mut xsk_map: XskMap<aya::maps::MapData> = bpf
+            .take_map("XSK_MAP")
+            .context("XSK_MAP not found in BPF")?
+            .try_into()
+            .context("Failed to convert XSK_MAP")?;
+
+        // Create AF_XDP socket on queue 0
+        let socket = AfXdpSocket::new(iface, 0, &mut xsk_map)?;
+        Ok(socket)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        anyhow::bail!("AF_XDP not supported on this platform");
+    }
+}
+
 fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
     use std::process::Command;
     
@@ -279,20 +306,29 @@ async fn main() -> Result<()> {
     
     // Try to load eBPF/XDP on Linux if not disabled
     #[cfg(target_os = "linux")]
-    let _bpf = if !args.no_ebpf {
+    let (_bpf, _af_xdp_socket) = if !args.no_ebpf {
         match try_load_ebpf(&args.iface, &mut bpf_sync) {
-            Ok(bpf) => {
-                info!("✅ eBPF/XDP enabled on interface {}", args.iface);
-                Some(bpf)
+            Ok(mut bpf) => {
+                // Try to create AF_XDP socket for zero-copy performance
+                match create_af_xdp_socket(&args.iface, &mut bpf) {
+                    Ok(af_xdp) => {
+                        info!("✅ eBPF/XDP + AF_XDP Zero-Copy enabled on interface {}", args.iface);
+                        (Some(bpf), Some(af_xdp))
+                    }
+                    Err(e) => {
+                        warn!("eBPF/XDP enabled but AF_XDP failed: {}. Using kernel fast path only.", e);
+                        (Some(bpf), None)
+                    }
+                }
             }
             Err(e) => {
                 warn!("eBPF/XDP not available: {}. Using userspace processing.", e);
-                None
+                (None, None)
             }
         }
     } else {
         info!("eBPF/XDP disabled via --no-ebpf flag");
-        None
+        (None, None)
     };
     
     #[cfg(not(target_os = "linux"))]

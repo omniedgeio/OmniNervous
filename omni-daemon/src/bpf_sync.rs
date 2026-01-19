@@ -73,11 +73,7 @@ impl BpfSync {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
-    pub fn get_xsk_map(&mut self) -> Option<&mut XskMap<MapData>> {
-        // Lean patch: not bound yet, return None to skip AF_XDP path
-        None
-    }
+
     #[cfg(not(target_os = "linux"))]
     pub fn get_xsk_map(&mut self) -> Option<&mut XskMap<MapData>> {
         None
