@@ -4,25 +4,36 @@ use std::net::IpAddr;
 #[cfg(target_os = "linux")]
 use aya::Bpf;
 #[cfg(target_os = "linux")]
-use aya::maps::{XskMap, MapData};
+use aya::maps::{XskMap, MapData, PerCpuArray};
 
-use anyhow::{Result};
+use anyhow::{Context, Result};
 
 /// Lean BPF sync surface for Phase 6.5+ (no-op bindings; safe scaffolding)
-#[derive(Default)]
 pub struct BpfSync {
     // Linux: bound flag indicates if init_from_bpf ran; non-Linux: unused
     #[cfg(target_os = "linux")]
     bound: bool,
+    #[cfg(target_os = "linux")]
+    debug_stats: Option<PerCpuArray<MapData, u32>>,
 }
 
 impl BpfSync {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            bound: false,
+            #[cfg(target_os = "linux")]
+            debug_stats: None,
+        }
+    }
 
     #[cfg(target_os = "linux")]
-    pub fn init_from_bpf(&mut self, _bpf: &mut Bpf) -> Result<()> {
-        // In a fuller implementation, bind to BPF maps here.
+    pub fn init_from_bpf(&mut self, bpf: &mut Bpf) -> Result<()> {
+        // Bind to DEBUG_STATS map for performance instrumentation
+        let map_data = bpf.map("DEBUG_STATS").ok_or_else(|| anyhow::anyhow!("DEBUG_STATS map not found"))?;
+        self.debug_stats = Some(PerCpuArray::try_from(map_data).map_err(|e| anyhow::anyhow!("Failed to convert to PerCpuArray: {:?}", e))?);
         self.bound = true;
+        log::info!("BPF: bound to DEBUG_STATS map for performance instrumentation");
         Ok(())
     }
     #[cfg(not(target_os = "linux"))]
@@ -79,9 +90,38 @@ impl BpfSync {
         Ok(())
     }
 
-    /// Debug stats accessor (no-op in lean patch)
+    /// Debug stats accessor - aggregates per-CPU stats across all cores
     pub fn get_debug_stats(&self) -> Result<Vec<u32>> {
-        Ok(vec![])
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(ref debug_stats) = self.debug_stats {
+                let num_cpus = aya::util::nr_cpus().map_err(|e| anyhow::anyhow!("Failed to get CPU count: {:?}", e))?;
+                let mut aggregated = vec![0u32; 11]; // 11 stats as defined in eBPF
+
+                for cpu in 0..num_cpus {
+                    for stat_idx in 0..11u32 {
+                        match debug_stats.get(&(cpu as u32), stat_idx as u64) {
+                            Ok(per_cpu_values) => {
+                                // Sum values across all CPUs for this stat
+                                let sum: u32 = per_cpu_values.iter().sum();
+                                aggregated[stat_idx as usize] += sum;
+                            }
+                            Err(_) => {
+                                // Skip if we can't read this stat
+                            }
+                        }
+                    }
+                }
+
+                Ok(aggregated)
+            } else {
+                Ok(vec![])
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(vec![])
+        }
     }
 
     /// Whether BPF is enabled (true if init_from_bpf bound)
