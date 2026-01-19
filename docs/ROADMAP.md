@@ -27,7 +27,7 @@
 - [x] Packet forwarding: UDP→decrypt→TUN
 - [x] Peer registration after handshake
 
-## Phase 5: Cloud Testing ✅
+## Phase 5: Cloud Testing ✅ (v0.2.0)
 - [x] 3-node cloud_test.sh (Nucleus + 2 Edges)
 - [x] Real-world WAN testing (Latency overhead < 1ms)
 - [x] P2P tunnel throughput benchmarks (~53% efficiency vs WireGuard)
