@@ -1,25 +1,25 @@
 #![no_std]
 
+use bytemuck::{Pod, Zeroable};
+
 /// Wire protocol header with 64-bit session ID and sequence number
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct PacketHeader {
-    pub session_id: u64,  // Changed from u32 to u64 for security
-    pub sequence: u64,    // NEW: Replay protection
-    pub nonce: [u8; 8],   // ChaCha20 nonce
+    pub session_id: u64,
+    pub sequence: u64,
+    pub nonce: [u8; 8],
 }
 
 /// Session key for BPF HashMap compatibility (aya requires Pod trait)
-/// Wraps u64 as two u32 values for proper BPF map support
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
 pub struct SessionKey {
     pub id_high: u32,
     pub id_low: u32,
 }
 
 impl SessionKey {
-    /// Create from u64 session ID
     pub const fn from_u64(id: u64) -> Self {
         SessionKey {
             id_high: (id >> 32) as u32,
@@ -27,7 +27,6 @@ impl SessionKey {
         }
     }
 
-    /// Convert back to u64
     pub const fn to_u64(self) -> u64 {
         ((self.id_high as u64) << 32) | (self.id_low as u64)
     }
@@ -41,20 +40,22 @@ impl From<u64> for SessionKey {
 
 /// Session entry stored in BPF map with replay protection
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct SessionEntry {
     pub key: [u8; 32],
-    pub remote_addr: [u8; 16], // IPv6 compatible (IPv4 mapped as ::ffff:x.x.x.x)
+    pub remote_addr: [u8; 16],
     pub remote_port: u16,
-    pub last_seq: u64,         // NEW: Track last seen sequence number for replay protection
+    pub _pad: [u8; 6],         // Explicit padding for Pod alignment
+    pub last_seq: u64,
 }
 
 /// FDB entry for L2 MAC forwarding
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct FdbEntry {
     pub mac: [u8; 6],
-    pub session_id: u64,  // Changed from u32 to u64
+    pub _pad: [u8; 2],         // Padding
+    pub session_id: u64,
 }
 
 /// Handshake packet structure
@@ -62,7 +63,7 @@ pub struct FdbEntry {
 #[derive(Clone, Copy, Debug)]
 pub struct HandshakePacket {
     pub header: PacketHeader,
-    pub payload: [u8; 128], // Standard Noise IK payload size
+    pub payload: [u8; 128],
 }
 
 /// Transport packet structure
@@ -70,18 +71,12 @@ pub struct HandshakePacket {
 #[derive(Clone, Copy, Debug)]
 pub struct TransportPacket {
     pub header: PacketHeader,
-    pub payload: [u8; 1500], // Maximum L2 frame size
+    pub payload: [u8; 1500],
 }
 
-// Pod trait implementations for BPF map compatibility
-// SAFETY: All types are #[repr(C)] and contain only plain data
-#[cfg(feature = "aya")]
-mod pod_impl {
-    use super::*;
-    
-    // aya::Pod is a marker trait for types that can be safely used in BPF maps
-    unsafe impl aya::Pod for SessionKey {}
-    unsafe impl aya::Pod for SessionEntry {}
-    unsafe impl aya::Pod for FdbEntry {}
-}
+unsafe impl Zeroable for HandshakePacket {}
+unsafe impl Pod for HandshakePacket {}
+
+unsafe impl Zeroable for TransportPacket {}
+unsafe impl Pod for TransportPacket {}
 

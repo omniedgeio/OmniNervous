@@ -305,6 +305,33 @@ async fn main() -> Result<()> {
         match tun::VirtualInterface::create(tun_config).await {
             Ok(tun) => {
                 info!("✅ Virtual interface '{}' active with IP {}", tun.name(), tun.address());
+
+                #[cfg(target_os = \"linux\")]
+                {
+                    // Phase 6.5: TUN index binding and optional combined index update
+                    let tun_ifindex: Option<u32> = std::fs::read_to_string(&format!("/sys/class/net/{}/ifindex", tun.name())).ok()
+                        .and_then(|s| s.trim().parse::<u32>().ok());
+                    if let Some(index) = tun_ifindex {
+                        info!("TUN interface index found: {}", index);
+                        if let Err(e) = bpf_sync.set_tun_index(index) {
+                            warn!("Failed to update eBPF TUN index: {}", e);
+                        }
+
+                        // Try to update combined tun/phys indices if possible
+                        if let Some(def_iface) = get_default_interface() {
+                            let phys_path = format!("/sys/class/net/{}/ifindex", def_iface);
+                            if let Ok(pcontent) = std::fs::read_to_string(&phys_path) {
+                                if let Ok(phys_index) = pcontent.trim().parse::<u32>() {
+                                    if let Err(e) = bpf_sync.update_indices(index, phys_index) {
+                                        warn!("Failed to update combined BPF indices: {}", e);
+                                    } else {
+                                        info!("BPF combined indices updated: tun={} phys={}", index, phys_index);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 Some(tun)
             }
             Err(e) => {

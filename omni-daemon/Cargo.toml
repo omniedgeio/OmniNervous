@@ -19,6 +19,9 @@ shellexpand = "3.1"
 sha2 = "0.10"
 hmac = "0.12"
 poly1305 = "0.8"
+core_affinity = "0.8"
+xsk-rs = "0.8"
+# Note: SIMD is typically enabled via target-cpu=native and backend-specific flags.
 hyper = { version = "1.5", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
@@ -31,7 +34,9 @@ hex = "0.4"
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 omni-common = { path = "../omni-common" }
 
-# Linux: omni-common with aya feature for Pod trait
+# Linux: omni-common with aya
 [target.'cfg(target_os = "linux")'.dependencies]
 omni-common = { path = "../omni-common", features = ["aya"] }
-aya = { version = "0.12", features = ["async_tokio"] }
+aya = "0.13.0"
+aya-log = "0.2.1"
+tokio = { version = "1", features = ["full", "parking_lot"] }

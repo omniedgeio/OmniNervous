@@ -21,7 +21,7 @@ Push-Location "$ProjectRoot"
 
 try {
     # 1. Build the Docker image
-    docker build -t "$ImageName" .
+    docker build --no-cache -t "$ImageName" .
     if ($LASTEXITCODE -ne 0) { throw "Docker build failed" }
 
     # 2. Extract the binary
@@ -44,8 +44,7 @@ try {
     docker rm "$ContainerId" | Out-Null
 
     # 3. Cleanup (optional)
-    # Write-Host "Cleaning up Docker image..."
-    # docker rmi "$ImageName"
+    # docker system prune -f # safer
 
     Write-Host "Build complete: $OutputPath"
     Get-Item "$ProjectRoot/$OutputPath" | Select-Object Name, Length, LastWriteTime

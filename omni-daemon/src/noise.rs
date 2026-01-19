@@ -2,6 +2,72 @@ use snow::params::NoiseParams;
 use snow::Builder;
 use anyhow::{Context, Result};
 use sha2::{Sha256, Digest};
+use std::sync::{Arc, Mutex};
+use snow::resolvers::{CryptoResolver, DefaultResolver};
+use snow::types::Cipher;
+
+/// A shim that wraps a snow Cipher and "leaks" the key during set_key.
+struct LeakyCipher {
+    inner: Box<dyn Cipher>,
+    keys: Arc<Mutex<Vec<[u8; 32]>>>,
+}
+
+impl Cipher for LeakyCipher {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn set(&mut self, key: &[u8]) {
+        if key.len() == 32 {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(key);
+            if let Ok(mut keys) = self.keys.lock() {
+                keys.push(k);
+            }
+        }
+        self.inner.set(key);
+    }
+
+    fn encrypt(&self, nonce: u64, authtext: &[u8], plaintext: &[u8], out: &mut [u8]) -> usize {
+        self.inner.encrypt(nonce, authtext, plaintext, out)
+    }
+
+    fn decrypt(&self, nonce: u64, authtext: &[u8], ciphertext: &[u8], out: &mut [u8]) -> std::result::Result<usize, snow::Error> {
+        self.inner.decrypt(nonce, authtext, ciphertext, out)
+    }
+
+    fn rekey(&mut self) {
+        self.inner.rekey();
+    }
+}
+
+/// A resolver that use LeakyCipher for ChaChaPoly
+struct LeakyResolver {
+    inner: DefaultResolver,
+    keys: Arc<Mutex<Vec<[u8; 32]>>>,
+}
+
+impl CryptoResolver for LeakyResolver {
+    fn resolve_rng(&self) -> Option<Box<dyn snow::types::Random>> {
+        self.inner.resolve_rng()
+    }
+
+    fn resolve_dh(&self, choice: &snow::params::DHChoice) -> Option<Box<dyn snow::types::Dh>> {
+        self.inner.resolve_dh(choice)
+    }
+
+    fn resolve_hash(&self, choice: &snow::params::HashChoice) -> Option<Box<dyn snow::types::Hash>> {
+        self.inner.resolve_hash(choice)
+    }
+
+    fn resolve_cipher(&self, choice: &snow::params::CipherChoice) -> Option<Box<dyn Cipher>> {
+        let inner_cipher = self.inner.resolve_cipher(choice)?;
+        Some(Box::new(LeakyCipher {
+            inner: inner_cipher,
+            keys: self.keys.clone(),
+        }))
+    }
+}
 
 pub struct PeerIdentity {
     pub public_key: [u8; 32],
@@ -41,6 +107,7 @@ pub fn validate_secret(secret: &str) -> Result<()> {
 
 pub struct NoiseSession {
     pub handshake: snow::HandshakeState,
+    pub transport_keys: Arc<Mutex<Vec<[u8; 32]>>>,
 }
 
 impl NoiseSession {
@@ -59,7 +126,13 @@ impl NoiseSession {
         let params: NoiseParams = pattern.parse()
             .context("Failed to parse Noise pattern")?;
         
-        let mut builder = Builder::new(params)
+        let transport_keys = Arc::new(Mutex::new(Vec::new()));
+        let resolver = LeakyResolver {
+            inner: DefaultResolver::default(),
+            keys: transport_keys.clone(),
+        };
+
+        let mut builder = Builder::with_resolver(params, Box::new(resolver))
             .local_private_key(local_priv_key)
             .remote_public_key(remote_pub_key);
         
@@ -74,7 +147,7 @@ impl NoiseSession {
         let handshake = builder.build_initiator()
             .context("Failed to build Noise initiator")?;
         
-        Ok(Self { handshake })
+        Ok(Self { handshake, transport_keys })
     }
 
     /// Create responder with optional PSK authentication
@@ -88,7 +161,13 @@ impl NoiseSession {
         let params: NoiseParams = pattern.parse()
             .context("Failed to parse Noise pattern")?;
         
-        let mut builder = Builder::new(params)
+        let transport_keys = Arc::new(Mutex::new(Vec::new()));
+        let resolver = LeakyResolver {
+            inner: DefaultResolver::default(),
+            keys: transport_keys.clone(),
+        };
+
+        let mut builder = Builder::with_resolver(params, Box::new(resolver))
             .local_private_key(local_priv_key);
         
         if let Some(key) = psk {
@@ -102,7 +181,7 @@ impl NoiseSession {
         let handshake = builder.build_responder()
             .context("Failed to build Noise responder")?;
         
-        Ok(Self { handshake })
+        Ok(Self { handshake, transport_keys })
     }
 
     /// Process an incoming handshake message and return the response.
@@ -151,6 +230,13 @@ impl NoiseSession {
     /// Finalize the handshake and return the transport state for encryption.
     pub fn into_transport(self) -> Result<snow::StatelessTransportState> {
         Ok(self.handshake.into_stateless_transport_mode()?)
+    }
+
+    /// Get the extracted transport keys (k1, k2)
+    /// Only call this AFTER the handshake is finished and into_transport has likely been called internally
+    /// or derived. In snow, keys are set on transition.
+    pub fn get_transport_keys(&self) -> Vec<[u8; 32]> {
+        self.transport_keys.lock().unwrap().clone()
     }
 }
 
