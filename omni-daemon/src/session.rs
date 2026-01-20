@@ -168,8 +168,8 @@ mod tests {
         let psk = Some([0x42u8; 32]);
  
         // 1. Create sessions
-        let mut i_session = NoiseSession::new_initiator(&initiator_priv, &responder_pub, psk.as_ref()).unwrap();
-        let mut r_session = NoiseSession::new_responder(&responder_priv, psk.as_ref()).unwrap();
+        let mut i_session = NoiseSession::new_initiator(&initiator_priv, &responder_pub, psk.as_ref(), noise::CipherType::ChaChaPoly).unwrap();
+        let mut r_session = NoiseSession::new_responder(&responder_priv, psk.as_ref(), noise::CipherType::ChaChaPoly).unwrap();
  
         // 2. Handshake Step 1: Initiator -> Responder
         let mut buf1 = [0u8; 512];

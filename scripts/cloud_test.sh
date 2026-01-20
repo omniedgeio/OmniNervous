@@ -44,6 +44,7 @@ VIP_A="10.200.0.10"
 VIP_B="10.200.0.20"
 CLUSTER_NAME="${CLUSTER_NAME:-omni-test}"
 CLUSTER_SECRET="${CLUSTER_SECRET:-}"
+CIPHER="${CIPHER:-chacha}"
 
 show_help() {
     cat << EOF
@@ -67,9 +68,10 @@ Options:
   --ssh-key       Path to SSH private key
   --ssh-user      SSH username (default: ubuntu)
   --port          OmniNervous UDP port (default: 51820)
-  --duration      iperf3 test duration (default: 10s)
-  --cluster       Cluster name (default: omni-test)
-  --secret        Cluster secret (min 16 chars, recommended)
+   --duration      iperf3 test duration (default: 10s)
+   --cluster       Cluster name (default: omni-test)
+   --secret        Cluster secret (min 16 chars, recommended)
+   --cipher        Cipher: 'aes' (AES256-GCM) or 'chacha' (ChaCha20-Poly1305, default)
   --skip-build    Skip local cargo build
   --skip-deploy   Skip binary deployment
   --help          Show this help
@@ -79,9 +81,9 @@ Environment Variables:
   OMNI_PORT       UDP port
   CLUSTER_SECRET  Cluster authentication secret
 
-Example:
-  $0 --nucleus 104.x.x.x --node-a 54.x.x.x --node-b 35.x.x.x \\
-     --ssh-key ~/.ssh/cloud.pem --secret "my-secure-secret-16"
+ Example:
+   $0 --nucleus 104.x.x.x --node-a 54.x.x.x --node-b 35.x.x.x \\
+      --ssh-key ~/.ssh/cloud.pem --secret "my-secure-secret-16" --cipher aes
 
 Prerequisites:
   - iperf3 installed on edge nodes
@@ -262,12 +264,12 @@ run_test() {
     
     # Start Edge A with VIP
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
-    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=debug nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_A --port $OMNI_PORT > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_A --port $OMNI_PORT --cipher $CIPHER > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Start Edge B with VIP
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
-    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=debug nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_B --port $((OMNI_PORT + 1)) > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_B --port $((OMNI_PORT + 1)) --cipher $CIPHER > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Wait for P2P tunnel establishment (heartbeat cycle is 30s)
@@ -528,6 +530,10 @@ while [[ $# -gt 0 ]]; do
             CLUSTER_SECRET="$2"
             shift 2
             ;;
+        --cipher)
+            CIPHER="$2"
+            shift 2
+            ;;
         --skip-build)
             SKIP_BUILD=true
             shift
@@ -561,6 +567,7 @@ echo "Edge A:    $NODE_A → VIP $VIP_A"
 echo "Edge B:    $NODE_B → VIP $VIP_B"
 echo "Cluster:   $CLUSTER_NAME"
 echo "Auth:      $([ -n "$CLUSTER_SECRET" ] && echo "PSK enabled" || echo "OPEN (⚠️)")"
+echo "Cipher:    $CIPHER"
 
 # Run test sequence
 preflight_check

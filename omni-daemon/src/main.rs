@@ -12,8 +12,7 @@ use log::{info, error, warn, debug};
 use tokio::net::UdpSocket;
 use tokio::signal;
 
-#[cfg(target_os = "linux")]
-use crate::af_xdp::AfXdpSocket;
+
 
 #[cfg(target_os = "linux")]
 use std::os::unix::prelude::AsRawFd;
@@ -32,7 +31,7 @@ mod nonce;
 mod crypto_util;
 mod poly1305;
 mod tun;
-mod af_xdp;
+
 mod peers;
 mod signaling;
 
@@ -47,6 +46,31 @@ use bpf_sync::BpfSync;
 
 use std::time::Duration;
 use tokio::time::interval;
+use lazy_static::lazy_static;
+use std::sync::Mutex;
+
+lazy_static::lazy_static! {
+    static ref BUFFER_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+}
+
+fn get_buffer(size: usize) -> Vec<u8> {
+    let mut pool = BUFFER_POOL.lock().unwrap();
+    if let Some(mut buf) = pool.pop() {
+        if buf.capacity() >= size {
+            buf.resize(size, 0);
+            return buf;
+        }
+    }
+    vec![0u8; size]
+}
+
+fn return_buffer(mut buf: Vec<u8>) {
+    buf.clear();
+    let mut pool = BUFFER_POOL.lock().unwrap();
+    if pool.len() < 10 { // Limit pool size to prevent memory bloat
+        pool.push(buf);
+    }
+}
 
 /// Embedded eBPF program binary (built by CI and placed in omni-ebpf/ target directory)
 #[cfg(target_os = "linux")]
@@ -130,27 +154,36 @@ fn detect_crypto_acceleration() -> (bool, bool) {
     (has_aes_ni, has_avx)
 }
 
-fn create_af_xdp_socket(iface: &str, bpf: &mut Bpf) -> Result<AfXdpSocket> {
-    #[cfg(target_os = "linux")]
-    {
-        use aya::maps::XskMap;
-        use crate::af_xdp::AfXdpSocket;
 
-        // Get the XSK map from BPF for socket registration
-        let mut xsk_map: XskMap<aya::maps::MapData> = bpf
-            .take_map("XSK_MAP")
-            .context("XSK_MAP not found in BPF")?
-            .try_into()
-            .context("Failed to convert XSK_MAP")?;
 
-        // Create AF_XDP socket on queue 0
-        let socket = AfXdpSocket::new(iface, 0, &mut xsk_map)?;
-        Ok(socket)
+fn detect_xdp_support() -> bool {
+    use std::process::Command;
+
+    // Check kernel version (need 5.4+ for good XDP support)
+    let kernel_version = match Command::new("uname").arg("-r").output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        Err(_) => return false,
+    };
+
+    let version_parts: Vec<&str> = kernel_version.split('.').collect();
+    if version_parts.len() < 2 {
+        return false;
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        anyhow::bail!("AF_XDP not supported on this platform");
+
+    let major: u32 = version_parts[0].parse().unwrap_or(0);
+    let minor: u32 = version_parts[1].parse().unwrap_or(0);
+    if major < 5 || (major == 5 && minor < 4) {
+        info!("Kernel {}.{} too old for XDP (need 5.4+)", major, minor);
+        return false;
     }
+
+    // Check if XDP tools are available (optional, but good indicator)
+    if Command::new("which").arg("bpftool").output().is_err() {
+        debug!("bpftool not available, XDP may not be fully supported");
+    }
+
+    info!("Kernel {}.{} detected, XDP potentially supported", major, minor);
+    true
 }
 
 fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
@@ -305,12 +338,19 @@ struct Args {
     /// Virtual interface name
     #[arg(long, default_value = "omni0")]
     tun_name: String,
+
+    /// Encryption cipher: 'chachapoly' or 'aesgcm'
+    #[arg(long, default_value = "chachapoly")]
+    cipher: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     env_logger::init();
+
+    let cipher_type: noise::CipherType = args.cipher.parse()
+        .context("Invalid cipher specified")?;
 
     info!("Starting OmniNervous Ganglion Daemon on port {}...", args.port);
 
@@ -357,6 +397,9 @@ async fn main() -> Result<()> {
     let mut bpf_sync = BpfSync::new();
     let mut peer_table = peers::PeerTable::new();
 
+    // Use the selected cipher
+    info!("Using {} cipher", cipher_type);
+
     // Initialize CPU affinity and crypto acceleration (Phase 7.2)
     #[cfg(target_os = "linux")]
     {
@@ -379,35 +422,33 @@ async fn main() -> Result<()> {
     // Our virtual IP (used for self-identification in peer exchange)
     let _our_vip = args.vip;
     
-    // Try to load eBPF/XDP on Linux if not disabled
+    // Try to load eBPF/XDP on Linux if supported and not disabled
     #[cfg(target_os = "linux")]
-    let (_bpf, _af_xdp_socket) = if !args.no_ebpf {
+    let bpf = if detect_xdp_support() && !args.no_ebpf {
         match try_load_ebpf(&args.iface, &mut bpf_sync) {
-            Ok(mut bpf) => {
-                // Try to create AF_XDP socket for zero-copy performance
-                match create_af_xdp_socket(&args.iface, &mut bpf) {
-                    Ok(af_xdp) => {
-                        info!("✅ eBPF/XDP + AF_XDP Zero-Copy enabled on interface {}", args.iface);
-                        (Some(bpf), Some(af_xdp))
-                    }
-                    Err(e) => {
-                        warn!("eBPF/XDP enabled but AF_XDP failed: {}. Using kernel fast path only.", e);
-                        (Some(bpf), None)
-                    }
-                }
+            Ok(bpf) => {
+                info!("✅ eBPF/XDP enabled on interface {}", args.iface);
+                Some(bpf)
             }
             Err(e) => {
-                warn!("eBPF/XDP not available: {}. Using userspace processing.", e);
-                (None, None)
+                warn!("eBPF/XDP failed to load: {}. Using userspace processing.", e);
+                None
             }
         }
     } else {
-        info!("eBPF/XDP disabled via --no-ebpf flag");
-        (None, None)
+        if !detect_xdp_support() {
+            info!("XDP not supported on this system, using userspace processing");
+        } else {
+            info!("eBPF/XDP disabled via --no-ebpf flag");
+        }
+        None
     };
-    
+
     #[cfg(not(target_os = "linux"))]
-    info!("Running on non-Linux platform, using userspace processing");
+    let bpf = {
+        info!("Running on non-Linux platform, using userspace processing");
+        None
+    };
     
     // Create virtual interface if VIP is specified
     let mut _tun = if let Some(vip) = args.vip {
@@ -590,7 +631,8 @@ async fn main() -> Result<()> {
                             info!("Initiated handshake to {} (Remote: {})", 
                                 peer.virtual_ip, 
                                 hex::encode(&pubkey[..4]));
-                            match NoiseSession::new_initiator(&identity.private_key, &pubkey, psk.as_ref()) {
+                            info!("Creating initiator session");
+                            match NoiseSession::new_initiator(&identity.private_key, &pubkey, psk.as_ref(), cipher_type) {
                                 Ok(mut session) => {
                                     // Build handshake message 1 with our VIP
                                     let mut payload = vec![];
@@ -660,7 +702,7 @@ async fn main() -> Result<()> {
                                                 error!("Failed to send encrypted packet: {}", e);
                                             } else {
                                                 metrics.inc_packets_tx();
-                                                info!("TUN->UDP: {} bytes to {} (session {}, nonce {})", len, dst_ip, peer.session_id, nonce);
+                                                debug!("TUN->UDP: {} bytes to {} (session {}, nonce {})", len, dst_ip, peer.session_id, nonce);
                                             }
                                         }
                                         Err(e) => {
@@ -832,7 +874,7 @@ async fn main() -> Result<()> {
                                         ]);
                                         
                                         if let Some(SessionState::Active(transport)) = session_manager.get_session_mut(session_id) {
-                                            let mut decrypted = vec![0u8; len - 16]; // Subtract session_id + nonce
+                                            let mut decrypted = get_buffer(len - 16); // Use pooled buffer
                                             match transport.read_message(nonce, &buf[16..len], &mut decrypted) {
                                                 Ok(dec_len) => {
                                                     // Write decrypted IP packet to TUN
@@ -840,18 +882,23 @@ async fn main() -> Result<()> {
                                                         if let Err(e) = tun.write(&decrypted[..dec_len]).await {
                                                             error!("TUN write error: {}", e);
                                                         } else {
-                                                            info!("UDP->TUN: {} bytes from session {} (nonce {})", dec_len, session_id, nonce);
+                                                            debug!("UDP->TUN: {} bytes from session {} (nonce {})", dec_len, session_id, nonce);
                                                         }
                                                     }
-                                                    
+
                                                     // Update peer last_seen
                                                     if let Some(peer) = peer_table.lookup_by_session(session_id) {
                                                         let vip = peer.virtual_ip;
                                                         peer_table.touch(&vip);
                                                     }
+
+                                                    // Return buffer to pool
+                                                    return_buffer(decrypted);
                                                 }
                                                 Err(e) => {
                                                     error!("Decryption failed: {}", e);
+                                                    // Still return buffer on error
+                                                    return_buffer(decrypted);
                                                 }
                                             }
                                         }
@@ -923,7 +970,8 @@ async fn main() -> Result<()> {
                                         continue;
                                     }
                                     
-                                    match NoiseSession::new_responder(&identity.private_key, psk.as_ref()) {
+                                    info!("Creating responder session");
+                                    match NoiseSession::new_responder(&identity.private_key, psk.as_ref(), cipher_type) {
                                         Ok(new_session) => {
                                             session_manager.create_session(session_id, SessionState::Handshaking(new_session));
                                             rate_limiter.record_session_start(session_id);

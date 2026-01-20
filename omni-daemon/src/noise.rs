@@ -6,10 +6,39 @@ use std::sync::{Arc, Mutex};
 use snow::resolvers::{CryptoResolver, DefaultResolver};
 use snow::types::Cipher;
 
+
+
 /// A shim that wraps a snow Cipher and "leaks" the key during set_key.
 struct LeakyCipher {
     inner: Box<dyn Cipher>,
     keys: Arc<Mutex<Vec<[u8; 32]>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CipherType {
+    ChaChaPoly,
+    AesGcm,
+}
+
+impl std::str::FromStr for CipherType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "chachapoly" | "chacha20poly1305" | "chacha" => Ok(CipherType::ChaChaPoly),
+            "aesgcm" | "aes-gcm" | "aes" => Ok(CipherType::AesGcm),
+            _ => anyhow::bail!("Unsupported cipher: {}", s),
+        }
+    }
+}
+
+impl std::fmt::Display for CipherType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CipherType::ChaChaPoly => write!(f, "ChaCha20-Poly1305"),
+            CipherType::AesGcm => write!(f, "AES-256-GCM"),
+        }
+    }
 }
 
 impl Cipher for LeakyCipher {
@@ -43,9 +72,11 @@ impl Cipher for LeakyCipher {
 
 /// A resolver that use LeakyCipher for ChaChaPoly
 struct LeakyResolver {
-    inner: DefaultResolver,
+    inner: Box<dyn CryptoResolver>,
     keys: Arc<Mutex<Vec<[u8; 32]>>>,
 }
+
+unsafe impl Send for LeakyResolver {}
 
 impl CryptoResolver for LeakyResolver {
     fn resolve_rng(&self) -> Option<Box<dyn snow::types::Random>> {
@@ -113,22 +144,37 @@ pub struct NoiseSession {
 impl NoiseSession {
     /// Create initiator with optional PSK authentication
     pub fn new_initiator(
-        local_priv_key: &[u8], 
+        local_priv_key: &[u8],
         remote_pub_key: &[u8],
-        psk: Option<&[u8; 32]>
+        psk: Option<&[u8; 32]>,
+        cipher: CipherType,
     ) -> Result<Self> {
-        let pattern = if psk.is_some() {
-            "Noise_IKpsk1_25519_ChaChaPoly_BLAKE2s"
-        } else {
-            "Noise_IK_25519_ChaChaPoly_BLAKE2s"
+        let pattern = match cipher {
+            CipherType::ChaChaPoly => {
+                if psk.is_some() {
+                    "Noise_IKpsk1_25519_ChaChaPoly_BLAKE2s"
+                } else {
+                    "Noise_IK_25519_ChaChaPoly_BLAKE2s"
+                }
+            }
+            CipherType::AesGcm => {
+                if psk.is_some() {
+                    "Noise_IKpsk1_25519_AESGCM_BLAKE2s"
+                } else {
+                    "Noise_IK_25519_AESGCM_BLAKE2s"
+                }
+            }
         };
-        
+
+        log::info!("Using Noise pattern: {} with PSK={}", pattern, psk.is_some());
+
         let params: NoiseParams = pattern.parse()
             .context("Failed to parse Noise pattern")?;
-        
+
         let transport_keys = Arc::new(Mutex::new(Vec::new()));
+        let inner_resolver: Box<dyn CryptoResolver> = Box::new(DefaultResolver::default());
         let resolver = LeakyResolver {
-            inner: DefaultResolver::default(),
+            inner: inner_resolver,
             keys: transport_keys.clone(),
         };
 
@@ -151,19 +197,33 @@ impl NoiseSession {
     }
 
     /// Create responder with optional PSK authentication
-    pub fn new_responder(local_priv_key: &[u8], psk: Option<&[u8; 32]>) -> Result<Self> {
-        let pattern = if psk.is_some() {
-            "Noise_IKpsk1_25519_ChaChaPoly_BLAKE2s"
-        } else {
-            "Noise_IK_25519_ChaChaPoly_BLAKE2s"
+    pub fn new_responder(local_priv_key: &[u8], psk: Option<&[u8; 32]>, cipher: CipherType) -> Result<Self> {
+        let pattern = match cipher {
+            CipherType::ChaChaPoly => {
+                if psk.is_some() {
+                    "Noise_IKpsk1_25519_ChaChaPoly_BLAKE2s"
+                } else {
+                    "Noise_IK_25519_ChaChaPoly_BLAKE2s"
+                }
+            }
+            CipherType::AesGcm => {
+                if psk.is_some() {
+                    "Noise_IKpsk1_25519_AESGCM_BLAKE2s"
+                } else {
+                    "Noise_IK_25519_AESGCM_BLAKE2s"
+                }
+            }
         };
-        
+
+        log::info!("Using Noise pattern: {} with PSK={}", pattern, psk.is_some());
+
         let params: NoiseParams = pattern.parse()
             .context("Failed to parse Noise pattern")?;
-        
+
         let transport_keys = Arc::new(Mutex::new(Vec::new()));
+        let inner_resolver: Box<dyn CryptoResolver> = Box::new(DefaultResolver::default());
         let resolver = LeakyResolver {
-            inner: DefaultResolver::default(),
+            inner: inner_resolver,
             keys: transport_keys.clone(),
         };
 
@@ -259,5 +319,21 @@ mod tests {
         assert!(validate_secret("short").is_err());
         assert!(validate_secret("exactly16chars!!").is_ok());
         assert!(validate_secret("this-is-a-long-secure-password").is_ok());
+    }
+
+    #[test]
+    fn test_handshake_all_ciphers() {
+        let local_priv = [0u8; 32];
+        let remote_priv = [0u8; 32];
+        let mut remote_pub = [0u8; 32];
+        // In a real test we'd derive this, but here we just want to see if builder fails
+        
+        for cipher in [CipherType::ChaChaPoly, CipherType::AesGcm] {
+            let res = NoiseSession::new_initiator(&local_priv, &remote_pub, None, cipher);
+            assert!(res.is_ok(), "Failed to create initiator with {}", cipher);
+            
+            let res = NoiseSession::new_responder(&remote_priv, None, cipher);
+            assert!(res.is_ok(), "Failed to create responder with {}", cipher);
+        }
     }
 }

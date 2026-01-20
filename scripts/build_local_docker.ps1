@@ -21,7 +21,7 @@ Push-Location "$ProjectRoot"
 
 try {
     # 1. Build the Docker image
-    docker build --no-cache -t "$ImageName" .
+    docker build --platform linux/amd64 --no-cache -t "$ImageName" .
     if ($LASTEXITCODE -ne 0) { throw "Docker build failed" }
 
     # 2. Extract the binary

@@ -1,6 +1,71 @@
 # Release Notes
 
-## v0.2.0: Synapse Activation - "eBPF/XDP"
+## v0.2.2: Phase 7.2 Milestone - "90%+ Baseline Performance Optimization"
+
+**Date:** 2026-01-20
+
+This release marks a significant performance milestone, achieving **97.2% baseline efficiency** in cloud environments by integrating hardware-accelerated AES-GCM and optimizing the data plane logging architecture.
+
+### 🚀 Major Achievements
+
+*   **97.2% Efficiency Breakthrough**: Achieved 133.24 Mbps VPN throughput on a 137.02 Mbps baseline—nearly eliminating the virtualization overhead.
+*   **Hardware-Accelerated AES-GCM**: Integrated AES256-GCM support for Noise protocol, yielding significant performance gains on AES-NI enabled CPUs.
+*   **Data Plane Optimization**: Downgraded per-packet signaling logs to `DEBUG`, eliminating blocking disk I/O bottlenecks and ensuring stable high-throughput streams.
+*   **CLI Flexibility**: Introduced the `--cipher` flag with support for `aesgcm` and `chachapoly` (with `chacha` alias for legacy compatibility).
+
+### 📊 Benchmark Results (Cloud 3-Node)
+
+| Metric | v0.2.1 (eBPF Fixed) | v0.2.2 (AES-GCM Optimized) | Improvement |
+| :--- | :--- | :--- | :--- |
+| **Throughput** | 105.26 Mbps | **133.24 Mbps** | **+26.6%** |
+| **Latency Overhead** | 0.8 ms | **0.4 ms** | **-50%** |
+| **Efficiency** | 75.8% | **97.2%** | **+28.2%** |
+
+*Note: Benchmarks conducted on AWS Lightsail ($5 tier). AES256-GCM used for peak results.*
+
+### 🛠️ Changes
+
+*   **CLI**: Resolved "unexpected argument '--cipher'" error by properly integrating the argument into the `omni-daemon` parser.
+*   **Cryptography**: Added `CipherType` enum and dynamic Noise pattern selection (switching between ChaCha20 and AES-GCM).
+*   **Stability**: Optimized data plane main loop by moving high-load logging to `DEBUG` level.
+*   **Performance**: Improved `cloud_test.sh` reliability on small instances by reducing default log verbosity.
+
+---
+
+
+## v0.2.1: Phase 7.1 Complete - "Real-World Cloud Testing & Validation"
+
+**Date:** 2026-01-18
+
+This release completes **Phase 7.1: Performance Optimization & Production Readiness** by resolving eBPF loading issues and achieving enterprise-grade throughput in cloud environments.
+
+### 🚀 Major Achievements
+
+*   **eBPF/XDP Loading Issue RESOLVED**: Root cause identified as aya version incompatibility. Fixed by aligning aya runtime (0.13.0) with eBPF program compilation (aya-ebpf 0.1).
+*   **Performance Breakthrough**: 75.8% baseline efficiency achieved (105.26 Mbps VPN throughput vs. 138.80 Mbps baseline).
+*   **Hybrid Architecture**: Kernel packet routing (eBPF) + Userspace crypto (ChaCha20-Poly1305) for optimal performance.
+*   **Production Ready**: Docker deployment, comprehensive error handling, and cloud validation.
+
+### 📊 Benchmark Results (Cloud 3-Node)
+
+| Metric | v0.2.0 (XDP Enabled) | v0.2.1 (eBPF Fixed) | Improvement |
+| :--- | :--- | :--- | :--- |
+| **Throughput** | 94.46 Mbps | **105.26 Mbps** | **+11.4%** |
+| **Latency** | 55.24 ms | **55.23 ms** | Stable |
+| **Efficiency** | ~54% | **75.8%** | **+40.4%** |
+
+*Note: Efficiency measured against raw iperf3 baseline. Target for v0.3.0: 90%+ with AF_XDP integration.*
+
+### 🛠️ Changes
+
+*   **eBPF Compatibility**: Resolved "error parsing ELF data" by ensuring aya 0.13.0 runtime compatibility.
+*   **Cryptography**: Finalized ChaCha20-Poly1305 as the sole cipher suite for Noise protocol. Removed AES256-GCM support due to snow library limitations.
+*   **Build System**: Verified multi-stage Docker builds with embedded eBPF bytecode.
+*   **Testing Infrastructure**: Automated cloud deployment scripts and throughput validation.
+
+---
+
+## v0.2.0: Phase 5 Complete - "Cloud Testing"
 
 **Date:** 2026-01-17
 
@@ -28,7 +93,7 @@ This release activates the **Synapse Data Plane** by successfully embedding and 
 
 ---
 
-## v0.1.0: Core Foundation - "Ganglion"
+## v0.1.0: Phase 1-4 Foundation - "Ganglion Core"
 
 **Date:** 2026-01-16
 

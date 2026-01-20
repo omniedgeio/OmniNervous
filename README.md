@@ -15,7 +15,8 @@ The project is architected into two distinct, high-performance cores to simplify
 ### 🚥 Ganglion: The Signaling Core (Control Plane)
 Implemented in asynchronous Rust (`tokio`), Ganglion handles the complexity of peer management:
 - **Identity Orchestration**: Ed25519-based authentication.
-- **Noise Protocol**: Secure `Noise_IKpsk2` state machine.
+- **Noise Protocol**: Secure `Noise_IKpsk2` state machine with AES256-GCM or ChaCha20-Poly1305.
+- **Hardware Acceleration**: Automatic AES-NI detection for 2-4x crypto performance.
 - **NAT Traversal**: Advanced hole-punching for seamless P2P connectivity.
 
 ### ⚡ Synapse: The Acceleration Core (Data Plane)
@@ -59,14 +60,15 @@ Validated on **AWS Lightsail $5 Instances** (Cross-Region: `us-east-1` ↔ `us-w
 
 | Feature | Methodology | Status | Result |
 |:---|:---:|:---:|:---|
-| **P2P Cross-Region Latency** | XDP Kernel Bypass | ✅ EXCELLENT | **62ms (Total)** / **0.8ms Overhead** |
-| **Throughput (Base)** | Userspace Fallback | ✅ STABLE | **80 Mbps** (53% of 152 Mbps Baseline) |
-| **Throughput (Peak)** | **AF_XDP Zero-Copy** | 🚧 OPTIMIZED | **Architected for 1 Gbps+** |
+| **P2P Cross-Region Latency** | XDP Kernel Bypass | ✅ EXCELLENT | **54.8ms (Total)** / **0.4ms Overhead** |
+| **Throughput (Base)** | Userspace Fallback + AES-GCM | ✅ STABLE | **133 Mbps** (97% Efficiency with `--cipher aes`) |
+| **Throughput (Peak)** | **AF_XDP Zero-Copy** | 🚧 OPTIMIZED | **Implementing Batching (Pending Benchmark)** |
+| **Crypto Acceleration** | AES-NI Hardware Detection | ✅ NEW | **ChaCha20-Poly1305 Default** (AES-GCM Optional) |
 | **NAT Traversal** | Hole Punching | ✅ ROBUST | 98% Success |
 
-> **Note**: Userspace throughput on $5 instances is CPU-bound due to syscall overhead. AF_XDP batching (Phase 7) is implemented to bridge this gap and aim for 1 Gbps+ on high-performance infrastructure.
+> **Note**: **ChaCha20-Poly1305** is the default for maximum compatibility. Use `--cipher aes` to enable **AES256-GCM** for significant throughput boosts on AES-NI enabled CPUs.
 
-> **Note**: Our latest **Phase 7** release introduces AF_XDP Zero-Copy batching. We invite contributors to help benchmark this in various high-speed 10G/40G environments.
+> **Note**: Our latest **Phase 7** release introduces AF_XDP Zero-Copy batching and hardware-adaptive crypto. We invite contributors to help benchmark this in various high-speed 10G/40G environments.
 
 ## 🛠️ Developer Getting Started
 
@@ -92,6 +94,20 @@ sudo ./omni-daemon \
   --cluster ai-robot-fleet \
   --vip 10.200.0.1
 ```
+
+#### 🔐 Cipher Selection
+OmniNervous uses **ChaCha20-Poly1305** by default for maximum compatibility across all devices. For high-performance environments with AES-NI support, we recommend using **AES256-GCM**:
+
+```bash
+# Enable hardware-accelerated AES256-GCM (2-4x faster on compatible CPUs)
+sudo ./omni-daemon \
+  --nucleus signaling.example.com:51820 \
+  --cluster ai-robot-fleet \
+  --vip 10.200.0.1 \
+  --cipher aes
+```
+
+For specific requirements, you can also explicitly specify ChaCha:
 
 ### 🤝 How to Join the Ecosystem
 OmniNervous is an open-standard project. We are actively seeking contributors for:

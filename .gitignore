@@ -19,3 +19,9 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Build Artifacts
+omni-ebpf.elf
+
+# Test Results
+test_results/

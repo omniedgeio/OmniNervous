@@ -2,18 +2,19 @@
 # Simplified build - copy all sources at once
 
 # Stage 1: Build eBPF Kernel Program
-FROM --platform=linux/amd64 rustlang/rust:nightly AS ebpf-builder
+FROM rustlang/rust:nightly AS ebpf-builder
 
 WORKDIR /usr/src/omni
 
 # Install dependencies for bpf-linker
-RUN apt-get update && apt-get install -y llvm clang
+RUN apt-get update && apt-get install -y llvm clang && rm -rf /var/lib/apt/lists/* && \
+    ln -sf /usr/lib/x86_64-linux-gnu/libLLVM-19.so.1 /usr/lib/x86_64-linux-gnu/libLLVM.so.21.1
 
 # Ensure rust-src is available for build-std (may already be in image)
 RUN rustup component add rust-src
 
-# Install bpf-linker (pinned to match Aya 0.13.x stable)
-RUN cargo install bpf-linker --version 0.9.15
+# Install bpf-linker
+RUN cargo install --git https://github.com/aya-rs/bpf-linker.git bpf-linker
 
 # Copy eBPF source
 COPY omni-ebpf ./omni-ebpf/
