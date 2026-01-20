@@ -326,7 +326,7 @@ run_test() {
     
     print_step "Baseline iperf3 throughput test ($TEST_DURATION seconds) over public IP..."
     local baseline_iperf_json
-    baseline_iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $NODE_B -p 5201 -t $TEST_DURATION --json 2>/dev/null" || echo "{}")
+    baseline_iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $NODE_B -p 5201 -t $TEST_DURATION -M 1300 -P 2 --json 2>/dev/null" || echo "{}")
     
     local baseline_throughput_bps
     baseline_throughput_bps=$(echo "$baseline_iperf_json" | jq '.end.sum_sent.bits_per_second // 0' 2>/dev/null || echo "0")
@@ -410,7 +410,7 @@ run_test() {
     
         print_step "Running iperf3 throughput test ($TEST_DURATION seconds) over tunnel..."
         local iperf_json
-        iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $VIP_B -p 5201 -t $TEST_DURATION --json 2>/dev/null" || echo "{}")
+        iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $VIP_B -p 5201 -t $TEST_DURATION -M 1300 -P 2 --json 2>/dev/null" || echo "{}")
         
         local throughput_bps
         throughput_bps=$(echo "$iperf_json" | jq '.end.sum_sent.bits_per_second // 0' 2>/dev/null || echo "0")
