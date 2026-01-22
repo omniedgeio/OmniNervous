@@ -48,9 +48,11 @@ use std::time::Duration;
 use tokio::time::interval;
 use lazy_static::lazy_static;
 use std::sync::Mutex;
+use base64;
+use defguard_wireguard_rs::{WGApi, InterfaceConfiguration, host::Peer};
 
 lazy_static::lazy_static! {
-    static ref BUFFER_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+    static ref SESSION_ID_COUNTER: Mutex<u64> = Mutex::new(1);
 }
 
 fn get_buffer(size: usize) -> Vec<u8> {
@@ -450,19 +452,39 @@ async fn main() -> Result<()> {
         None
     };
     
-    // Create virtual interface if VIP is specified
-    let mut _tun = if let Some(vip) = args.vip {
-        // Check permissions first
-        if let Err(e) = tun::check_tun_permissions() {
-            warn!("TUN permission check: {}", e);
+    // Create WireGuard interface if VIP is specified
+    let wg_api = if let Some(vip) = args.vip {
+        let ifname = "wg0".to_string(); // TODO: cross-platform
+        match WGApi::new(ifname.clone()) {
+            Ok(mut wg_api) => {
+                if let Err(e) = wg_api.create_interface() {
+                    error!("❌ Failed to create WireGuard interface: {}", e);
+                    anyhow::bail!("WireGuard interface creation failed: {}", e);
+                }
+                let interface_config = InterfaceConfiguration {
+                    name: ifname.clone(),
+                    prvkey: base64::encode(identity.private_key_bytes()),
+                    addresses: vec![vip],
+                    port: args.port,
+                    peers: vec![],
+                    mtu: Some(1420),
+                };
+                if let Err(e) = wg_api.configure_interface(&interface_config) {
+                    error!("❌ Failed to configure WireGuard interface: {}", e);
+                    anyhow::bail!("WireGuard interface configuration failed: {}", e);
+                }
+                info!("✅ WireGuard interface '{}' active with IP {}", ifname, vip);
+                Some(wg_api)
+            }
+            Err(e) => {
+                error!("❌ Failed to initialize WireGuard API: {}", e);
+                anyhow::bail!("WireGuard API init failed: {}", e);
+            }
         }
-        
-        let tun_config = tun::TunConfig {
-            name: args.tun_name.clone(),
-            address: vip,
-            netmask: args.netmask,
-            mtu: 1420,
-        };
+    } else {
+        info!("No --vip specified, running in signaling-only mode (Nucleus)");
+        None
+    };
         
         match tun::VirtualInterface::create(tun_config).await {
             Ok(tun) => {

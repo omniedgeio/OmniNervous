@@ -135,10 +135,13 @@ impl PeerTable {
     }
     
     /// Remove a peer by VIP (for delta updates from nucleus)
-    pub fn remove_by_vip(&mut self, vip: &Ipv4Addr) {
+    pub fn remove_by_vip(&mut self, vip: &Ipv4Addr) -> Option<[u8; 32]> {
         if let Some(peer) = self.by_vip.remove(vip) {
             self.by_session.remove(&peer.session_id);
             info!("Removed peer {} from routing table", vip);
+            peer.public_key
+        } else {
+            None
         }
     }
     

@@ -31,6 +31,8 @@ tun2 = { version = "4", features = ["async"] }
 libc = "0.2"
 serde_cbor = "0.11"
 hex = "0.4"
+base64 = "0.21"
+defguard_wireguard_rs = "0.4"
 
 # Non-Linux: omni-common without aya
 [target.'cfg(not(target_os = "linux"))'.dependencies]
