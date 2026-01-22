@@ -2,7 +2,7 @@
 # =============================================================================
 # OmniNervous Cloud-to-Cloud Test Orchestrator (3-Node Architecture)
 # Run from LOCAL machine, orchestrates tests between cloud instances
-# Architecture: Nucleus (signaling) + Edge A + Edge B (P2P tunnel)
+# Architecture: Nucleus (signaling) + Edge A + Edge B (WireGuard VPN)
 # =============================================================================
 
 set -e
@@ -44,17 +44,16 @@ VIP_A="10.200.0.10"
 VIP_B="10.200.0.20"
 CLUSTER_NAME="${CLUSTER_NAME:-omni-test}"
 CLUSTER_SECRET="${CLUSTER_SECRET:-}"
-CIPHER="${CIPHER:-chacha}"
 
 show_help() {
     cat << EOF
-OmniNervous 3-Node Cloud Test Orchestrato
+OmniNervous 3-Node Cloud Test Orchestrator
 
 Architecture:
-  ┌──────────┐      ┌──────────┐      ┌──────────┐
-  │ Nucleus  │◄────►│  Edge A  │◄────►│  Edge B  │
-  │ Signaling│      │ $VIP_A │      │ $VIP_B │
-  └──────────┘      └──────────┘      └──────────┘
+   ┌──────────┐      ┌──────────┐      ┌──────────┐
+   │ Nucleus  │◄────►│  Edge A  │◄────►│  Edge B  │
+   │ Signaling│      │ $VIP_A │      │ $VIP_B │
+   └──────────┘      └──────────┘      └──────────┘
 
 Usage:
   $0 --nucleus <IP> --node-a <IP> --node-b <IP> [OPTIONS]
@@ -70,9 +69,8 @@ Options:
   --port          OmniNervous UDP port (default: 51820)
    --duration      iperf3 test duration (default: 10s)
    --cluster       Cluster name (default: omni-test)
-   --secret        Cluster secret (min 16 chars, recommended)
-   --cipher        Cipher: 'aes' (AES256-GCM) or 'chacha' (ChaCha20-Poly1305, default)
-  --skip-build    Skip local cargo build
+    --secret        Cluster secret (min 16 chars, recommended)
+   --skip-build    Skip local cargo build
   --skip-deploy   Skip binary deployment
   --help          Show this help
 
@@ -81,15 +79,16 @@ Environment Variables:
   OMNI_PORT       UDP port
   CLUSTER_SECRET  Cluster authentication secret
 
- Example:
-   $0 --nucleus 104.x.x.x --node-a 54.x.x.x --node-b 35.x.x.x \\
-      --ssh-key ~/.ssh/cloud.pem --secret "my-secure-secret-16" --cipher aes
+  Example:
+    $0 --nucleus 104.x.x.x --node-a 54.x.x.x --node-b 35.x.x.x \\
+       --ssh-key ~/.ssh/cloud.pem --secret "my-secure-secret-16"
 
 Prerequisites:
-  - iperf3 installed on edge nodes
-  - UDP port $OMNI_PORT open in firewalls
-  - SSH access with key authentication
-  - Root access for TUN device creation
+   - iperf3 installed on edge nodes
+   - UDP port $OMNI_PORT open in firewalls
+   - SSH access with key authentication
+   - Root access for WireGuard interface creation
+   - WireGuard kernel module installed on edge nodes
 EOF
 }
 
@@ -229,7 +228,7 @@ deploy_binaries() {
 # =============================================================================
 
 run_test() {
-    print_header "Running 3-Node P2P Test"
+    print_header "Running 3-Node WireGuard Test"
     
     # Create local results directory
     mkdir -p "$RESULTS_DIR"
@@ -264,17 +263,17 @@ run_test() {
     
     # Start Edge A with VIP
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
-    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_A --port $OMNI_PORT --cipher $CIPHER > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_A --port $OMNI_PORT > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
     sleep 2
-    
+
     # Start Edge B with VIP
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
-    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_B --port $((OMNI_PORT + 1)) --cipher $CIPHER > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_B --port $((OMNI_PORT + 1)) > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
     sleep 2
     
-    # Wait for P2P tunnel establishment (heartbeat cycle is 30s)
-    print_step "Waiting for P2P tunnel establishment (60s for heartbeat cycle)..."
-    echo "   This includes registration, heartbeat + delta update, and handshake."
+    # Wait for WireGuard tunnel establishment (heartbeat cycle is 30s)
+    print_step "Waiting for WireGuard tunnel establishment (60s for peer discovery)..."
+    echo "   This includes registration, heartbeat + delta update, and WireGuard peer configuration."
     sleep 60
     
     # Check if daemons are running
@@ -346,17 +345,17 @@ run_test() {
     # ==========================================================================
     # VPN TUNNEL TESTS
     # ==========================================================================
-    
+
     # Check interfaces on edges
-    print_step "Verifying TUN interfaces..."
+    print_step "Verifying WireGuard interfaces..."
     echo "Edge A interfaces:"
-    ssh_cmd "$NODE_A" "ip addr show omni0 2>/dev/null || echo 'omni0 not found'"
+    ssh_cmd "$NODE_A" "ip addr show wg0 2>/dev/null || echo 'wg0 not found'"
     echo ""
     echo "Edge B interfaces:"
-    ssh_cmd "$NODE_B" "ip addr show omni0 2>/dev/null || echo 'omni0 not found'"
+    ssh_cmd "$NODE_B" "ip addr show wg0 2>/dev/null || echo 'wg0 not found'"
     
-    # Network tests over P2P tunnel
-    print_header "VPN Tunnel Metrics (Encrypted P2P: A → B)"
+    # Network tests over WireGuard tunnel
+    print_header "VPN Tunnel Metrics (WireGuard: A → B)"
     echo "   These tests use VPN IPs ($VIP_A → $VIP_B) over encrypted tunnel."
     echo ""
     # Ping test over tunnel with retry
@@ -377,35 +376,35 @@ run_test() {
     done
     if [[ "$avg_latency" == "N/A" ]]; then
         echo "     Diagnostics (IP):"
-        ssh_cmd "$NODE_A" "ip addr show omni0" || true
-        ssh_cmd "$NODE_B" "ip addr show omni0" || true
+        ssh_cmd "$NODE_A" "ip addr show wg0" || true
+        ssh_cmd "$NODE_B" "ip addr show wg0" || true
         echo "     Diagnostics (Route):"
         ssh_cmd "$NODE_A" "ip route" || true
         ssh_cmd "$NODE_B" "ip route" || true
-        echo "     Check logs for handshake/session errors"
+        echo "     Check logs for peer discovery errors"
     fi
     
-    # Check TUN interfaces are up before iperf3
-    print_step "Verifying TUN interfaces before iperf3..."
-    local tun_a_up=false
-    local tun_b_up=false
-    if ssh_cmd "$NODE_A" "ip addr show omni0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
-        tun_a_up=true
-        echo "  ✅ Edge A omni0: UP"
+    # Check WireGuard interfaces are up before iperf3
+    print_step "Verifying WireGuard interfaces before iperf3..."
+    local wg_a_up=false
+    local wg_b_up=false
+    if ssh_cmd "$NODE_A" "ip addr show wg0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
+        wg_a_up=true
+        echo "  ✅ Edge A wg0: UP"
     else
-        echo "  ⚠️ Edge A omni0: DOWN or not found"
+        echo "  ⚠️ Edge A wg0: DOWN or not found"
     fi
-    if ssh_cmd "$NODE_B" "ip addr show omni0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
-        tun_b_up=true
-        echo "  ✅ Edge B omni0: UP"
+    if ssh_cmd "$NODE_B" "ip addr show wg0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
+        wg_b_up=true
+        echo "  ✅ Edge B wg0: UP"
     else
-        echo "  ⚠️ Edge B omni0: DOWN or not found"
+        echo "  ⚠️ Edge B wg0: DOWN or not found"
     fi
-    
-    # iperf3 over tunnel (only if TUN is up)
-    if [[ "$tun_a_up" == "true" && "$tun_b_up" == "true" ]]; then
+
+    # iperf3 over tunnel (only if WG is up)
+    if [[ "$wg_a_up" == "true" && "$wg_b_up" == "true" ]]; then
         print_step "Starting iperf3 server on Edge B..."
-        ssh_cmd "$NODE_B" "nohup iperf3 -s -p 5201 --bind $VIP_B > iperf_server.log 2>&1 &"
+        ssh_cmd "$NODE_B" "nohup iperf3 -s -p 5201 > iperf_server.log 2>&1 &"
         sleep 3
     
         print_step "Running iperf3 throughput test ($TEST_DURATION seconds) over tunnel..."
@@ -424,7 +423,7 @@ run_test() {
             throughput_mbps="0"
         fi
     else
-        echo -e "  ⚠️ Skipping iperf3 test - TUN interfaces not ready"
+        echo -e "  ⚠️ Skipping iperf3 test - WireGuard interfaces not ready"
         local throughput_mbps="0"
     fi
     
@@ -438,7 +437,7 @@ run_test() {
     cat > "$result_file" << EOF
 {
   "timestamp": "$timestamp",
-  "architecture": "3-node (Nucleus + 2 Edges)",
+  "architecture": "3-node (Nucleus + WireGuard Edges)",
   "nucleus": "$NUCLEUS",
   "edge_a": {"public_ip": "$NODE_A", "vip": "$VIP_A"},
   "edge_b": {"public_ip": "$NODE_B", "vip": "$VIP_B"},
@@ -449,10 +448,10 @@ run_test() {
     "ping_ms": "$baseline_latency",
     "throughput_mbps": "$baseline_throughput_mbps"
   },
-  "vpn_tunnel": {
-    "ping_ms": "$avg_latency",
-    "throughput_mbps": "$throughput_mbps"
-  }
+   "wireguard_tunnel": {
+     "ping_ms": "$avg_latency",
+     "throughput_mbps": "$throughput_mbps"
+   }
 }
 EOF
     
@@ -476,7 +475,7 @@ EOF
     echo -e "│    Latency:    ${YELLOW}${baseline_latency} ms${NC}"
     echo -e "│    Throughput: ${YELLOW}${baseline_throughput_mbps} Mbps${NC}"
     echo -e "├─────────────────────────────────────────────────────────┤"
-    echo -e "│  ${CYAN}VPN TUNNEL (Encrypted P2P)${NC}                              │"
+    echo -e "│  ${CYAN}VPN TUNNEL (WireGuard)${NC}                                  │"
     echo -e "│    Latency:    ${YELLOW}${avg_latency} ms${NC}"
     echo -e "│    Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
     echo -e "└─────────────────────────────────────────────────────────┘"
@@ -530,10 +529,6 @@ while [[ $# -gt 0 ]]; do
             CLUSTER_SECRET="$2"
             shift 2
             ;;
-        --cipher)
-            CIPHER="$2"
-            shift 2
-            ;;
         --skip-build)
             SKIP_BUILD=true
             shift
@@ -567,7 +562,6 @@ echo "Edge A:    $NODE_A → VIP $VIP_A"
 echo "Edge B:    $NODE_B → VIP $VIP_B"
 echo "Cluster:   $CLUSTER_NAME"
 echo "Auth:      $([ -n "$CLUSTER_SECRET" ] && echo "PSK enabled" || echo "OPEN (⚠️)")"
-echo "Cipher:    $CIPHER"
 
 # Run test sequence
 preflight_check
@@ -578,5 +572,5 @@ fi
 
 run_test
 
-echo -e "\n${GREEN}✅ 3-Node cloud test completed!${NC}"
+echo -e "\n${GREEN}✅ 3-Node WireGuard cloud test completed!${NC}"
 
