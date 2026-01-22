@@ -51,9 +51,7 @@ use std::sync::Mutex;
 use base64;
 use defguard_wireguard_rs::{WGApi, InterfaceConfiguration, host::Peer};
 
-lazy_static::lazy_static! {
-    static ref SESSION_ID_COUNTER: Mutex<u64> = Mutex::new(1);
-}
+
 
 fn get_buffer(size: usize) -> Vec<u8> {
     let mut pool = BUFFER_POOL.lock().unwrap();
@@ -782,21 +780,29 @@ async fn main() -> Result<()> {
                                         match signaling::parse_register_ack(&buf[..len]) {
                                             Ok(ack) => {
                                                 info!("Registration confirmed, {} recent peers", ack.recent_peers.len());
-                                            for peer_info in ack.recent_peers {
+                                                for peer_info in ack.recent_peers {
                                                     if let Ok(endpoint) = peer_info.endpoint.parse::<std::net::SocketAddr>() {
-                                                        // Reuse existing session ID if peer exists to avoid resetting handshake
-                                                        let session_id = peer_table.lookup_by_vip(&peer_info.vip)
-                                                            .map(|p| p.session_id)
-                                                            .unwrap_or_else(|| session_manager.generate_session_id(endpoint.ip()));
-
                                                         peer_table.register(
                                                             peer_info.public_key,
                                                             endpoint,
                                                             peer_info.vip,
-                                                            session_id,
                                                         );
                                                         info!("Discovered peer {} at {}", peer_info.vip, endpoint);
+
+                                                        // Configure WireGuard peer
+                                                        if let Some(ref wg_api) = wg_api {
+                                                            let peer = Peer::new(peer_info.public_key)
+                                                                .endpoint(Some(endpoint))
+                                                                .allowed_ips(vec![peer_info.vip.into()])
+                                                                .persistent_keepalive(25);
+                                                            if let Err(e) = wg_api.configure_peer(&peer) {
+                                                                warn!("Failed to configure WG peer {}: {}", peer_info.vip, e);
+                                                            } else {
+                                                                info!("Configured WG peer {} at {}", peer_info.vip, peer_info.endpoint);
+                                                            }
+                                                        }
                                                     }
+                                                }
                                                 }
                                             }
                                             Err(e) => warn!("Failed to parse REGISTER_ACK: {}", e),
@@ -809,19 +815,27 @@ async fn main() -> Result<()> {
                                                 // Add new peers
                                                 for peer_info in ack.new_peers {
                                                     if let Ok(endpoint) = peer_info.endpoint.parse::<std::net::SocketAddr>() {
-                                                        // Reuse existing session ID if peer exists
-                                                        let session_id = peer_table.lookup_by_vip(&peer_info.vip)
-                                                            .map(|p| p.session_id)
-                                                            .unwrap_or_else(|| session_manager.generate_session_id(endpoint.ip()));
-
                                                         peer_table.register(
                                                             peer_info.public_key,
                                                             endpoint,
                                                             peer_info.vip,
-                                                            session_id,
                                                         );
                                                         info!("New peer joined: {} at {}", peer_info.vip, endpoint);
+
+                                                        // Configure WireGuard peer
+                                                        if let Some(ref wg_api) = wg_api {
+                                                            let peer = Peer::new(peer_info.public_key)
+                                                                .endpoint(Some(endpoint))
+                                                                .allowed_ips(vec![peer_info.vip.into()])
+                                                                .persistent_keepalive(25);
+                                                            if let Err(e) = wg_api.configure_peer(&peer) {
+                                                                warn!("Failed to configure WG peer {}: {}", peer_info.vip, e);
+                                                            } else {
+                                                                info!("Configured WG peer {} at {}", peer_info.vip, peer_info.endpoint);
+                                                            }
+                                                        }
                                                     }
+                                                }
                                                 }
                                                 // Handle removed peers
                                                 for vip in ack.removed_vips {
@@ -839,19 +853,28 @@ async fn main() -> Result<()> {
                                                 if info.found {
                                                     if let Some(peer_info) = info.peer {
                                                         if let Ok(endpoint) = peer_info.endpoint.parse::<std::net::SocketAddr>() {
-                                                            // Reuse existing session ID if peer exists
-                                                            let session_id = peer_table.lookup_by_vip(&peer_info.vip)
-                                                                .map(|p| p.session_id)
-                                                                .unwrap_or_else(|| session_manager.generate_session_id(endpoint.ip()));
-
                                                             peer_table.register(
                                                                 peer_info.public_key,
                                                                 endpoint,
                                                                 peer_info.vip,
-                                                                session_id,
                                                             );
                                                             info!("Query result: {} at {}", peer_info.vip, endpoint);
+
+                                                            // Configure WireGuard peer
+                                                            if let Some(ref wg_api) = wg_api {
+                                                                let peer = Peer::new(peer_info.public_key)
+                                                                    .endpoint(Some(endpoint))
+                                                                    .allowed_ips(vec![peer_info.vip.into()])
+                                                                    .persistent_keepalive(25);
+                                                                if let Err(e) = wg_api.configure_peer(&peer) {
+                                                                    warn!("Failed to configure WG peer {}: {}", peer_info.vip, e);
+                                                                } else {
+                                                                    info!("Configured WG peer {} at {}", peer_info.vip, peer_info.endpoint);
+                                                                }
+                                                            }
                                                         }
+                                                    }
+                                                }
                                                     }
                                                 } else {
                                                     debug!("Peer not found in nucleus");
