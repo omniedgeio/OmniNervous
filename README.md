@@ -218,7 +218,7 @@ Message Flow:
 
 **1. Build the image:**
 ```bash
-docker build -t omni-daemon:latest .
+docker build -t omninervous:latest .
 ```
 
 **2. Run with docker-compose (3-node test cluster):**

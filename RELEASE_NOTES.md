@@ -57,7 +57,7 @@ This release marks a significant performance milestone, achieving **97.2% baseli
 
 ### 🛠️ Changes
 
-*   **CLI**: Resolved "unexpected argument '--cipher'" error by properly integrating the argument into the `omni-daemon` parser.
+*   **CLI**: Resolved "unexpected argument '--cipher'" error by properly integrating the argument into the `omninervous` parser.
 *   **Cryptography**: Added `CipherType` enum and dynamic Noise pattern selection (switching between ChaCha20 and AES-GCM).
 *   **Stability**: Optimized data plane main loop by moving high-load logging to `DEBUG` level.
 *   **Performance**: Improved `cloud_test.sh` reliability on small instances by reducing default log verbosity.
@@ -106,7 +106,7 @@ This release activates the **Synapse Data Plane** by successfully embedding and 
 ### 🚀 Performance Optimizations
 
 *   **eBPF Compilation**: Integrated `bpf-linker` and Rust nightly toolchain into the Docker build process to compile the `omni-ebpf` kernel component.
-*   **Embedded Bytecode**: `omni-daemon` now ships with the actual XDP bytecode matching the daemon version, replacing the previous placeholder.
+*   **Embedded Bytecode**: `omninervous` now ships with the actual XDP bytecode matching the daemon version, replacing the previous placeholder.
 
 ### 📊 Benchmark Results (Cloud 3-Node)
 

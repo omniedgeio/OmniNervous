@@ -1,5 +1,5 @@
 # scripts/build_local_docker.ps1
-# Builds omni-daemon using Docker and extracts the binary.
+# Builds omninervous using Docker and extracts the binary.
 # Best for native amd64 builds.
 
 # Run with:

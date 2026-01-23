@@ -1,6 +1,6 @@
 #!/bin/bash
 # scripts/build_local_docker.sh
-# Builds omni-daemon using Docker and extracts the binary.
+# Builds omninervous using Docker and extracts the binary.
 # Compatible with macOS and Linux.
 
 set -e

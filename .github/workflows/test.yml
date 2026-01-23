@@ -25,7 +25,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run unit tests
-        run: cargo test -p omni-daemon --verbose
+        run: cargo test -p omninervous --verbose
 
   vpn-integration:
     runs-on: ubuntu-latest
@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Docker image
-        run: docker build -t omni-daemon:test .
+        run: docker build -t omninervous:test .
 
       - name: Create Docker network
         run: |
@@ -46,7 +46,7 @@ jobs:
           docker run -d --name nucleus \
             --network omni-test-net \
             --ip 10.88.0.2 \
-            omni-daemon:test \
+            omninervous:test \
             --mode nucleus --port $NUCLEUS_PORT
           sleep 3
           echo "Nucleus status:"
@@ -61,7 +61,7 @@ jobs:
             --privileged \
             --cap-add=NET_ADMIN \
             --device /dev/net/tun:/dev/net/tun \
-            omni-daemon:test \
+            omninervous:test \
             --nucleus 10.88.0.2:$NUCLEUS_PORT \
             --cluster ci-test \
             --secret "$CLUSTER_SECRET" \
@@ -87,7 +87,7 @@ jobs:
             --privileged \
             --cap-add=NET_ADMIN \
             --device /dev/net/tun:/dev/net/tun \
-            omni-daemon:test \
+            omninervous:test \
             --nucleus 10.88.0.2:$NUCLEUS_PORT \
             --cluster ci-test \
             --secret "$CLUSTER_SECRET" \
@@ -232,7 +232,7 @@ jobs:
           echo "| 📈 VPN TCP | ${{ steps.tests.outputs.TCP_RESULT || 'N/A' }} | ${{ steps.tests.outputs.TCP_THROUGHPUT || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Security Features" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Noise_IKpsk2 (X25519 + ChaCha20-Poly1305)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ HMAC-SHA256 Signaling Authentication" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Cluster PSK Authentication" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ 64-bit HMAC Session IDs" >> $GITHUB_STEP_SUMMARY
 

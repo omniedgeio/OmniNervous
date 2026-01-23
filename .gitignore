@@ -28,3 +28,6 @@ test_results/
 
 # Documentation
 docs/
+
+# Agent
+.agent/
