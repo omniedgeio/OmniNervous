@@ -306,41 +306,37 @@ This deploys binaries, runs baseline iperf3 tests, establishes WireGuard tunnel,
 
 ```
 OmniNervous/
-├── Dockerfile                    # Multi-stage Docker build
+├── Cargo.toml                   # Workspace configuration
+├── Dockerfile                   # Multi-stage Docker build
 ├── docker-compose.yml           # 3-node test cluster
 ├── config.example.toml          # Configuration template
+├── LICENSING.md                 # License information
+├── README.md                    # Project documentation
+├── RELEASE_NOTES.md             # Version changelog
 ├── crates/
 │   └── daemon/
+│       ├── Cargo.toml           # Package dependencies
 │       └── src/
-│           ├── main.rs              # Entry point
-│           ├── signaling.rs         # Nucleus protocol
-│           ├── peers.rs             # Peer routing table
-│           ├── identity.rs          # X25519 identity
-│           ├── config.rs            # TOML config
-│           ├── stun.rs              # Public STUN fallback list
-│           ├── metrics.rs           # Prometheus metrics
-│           └── http.rs              # /metrics, /health
+│           ├── config.rs        # TOML configuration
+│           ├── handler.rs       # Message processing
+│           ├── http.rs          # HTTP endpoints (/metrics, /health)
+│           ├── identity.rs      # X25519 identity management
+│           ├── main.rs          # Application entry point
+│           ├── metrics.rs       # Prometheus metrics
+│           ├── peers.rs         # Peer routing table
+│           ├── signaling.rs     # Nucleus protocol implementation
+│           ├── stun.rs          # STUN server fallback list
+│           └── wg.rs            # WireGuard CLI integration
 ├── scripts/
 │   ├── build_local_docker.sh    # Docker-based build tool
-│   ├── cloud_test.sh            # 3-node cloud test orchestrator
-│   ├── deploy_to_cloud.sh       # rsync deployment
-│   └── auto_test_docker.sh      # Docker network test
-└── docs/
-    ├── WHITEPAPER.md            # Technical specification
-    └── ROADMAP.md               # Development roadmap
+│   ├── build_local_docker.ps1   # PowerShell Docker build script
+│   └── cloud_test.sh            # Cloud testing orchestrator
+└── .github/
+    └── workflows/               # CI/CD pipelines
+        ├── build.yml            # Linux build and release
+        └── test.yml             # Integration tests
 ```
 
----
-
-## Contributing
-
-OmniNervous is seeking contributors for:
-- **Phase 7.4**: QUIC signaling plane implementation
-- **Plugins**: ROS2 transport, EtherCAT bridge, GPU-over-IP
-- **Performance**: AF_XDP zero-copy integration verification
-- **Testing**: Multi-region scalability testing
-
----
 
 ## License
 
