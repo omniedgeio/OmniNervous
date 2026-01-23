@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use crate::peers::PeerTable;
 use crate::signaling::{self, NucleusState, NucleusClient};
-use crate::wg::WgControl;
+use crate::wg::WgInterface;
 use crate::metrics::Metrics;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -12,7 +12,7 @@ use base64::Engine;
 pub struct MessageHandler<'a> {
     pub socket: &'a UdpSocket,
     pub peer_table: &'a mut PeerTable,
-    pub wg_api: Option<&'a WgControl>,
+    pub wg_api: Option<&'a dyn WgInterface>,
     pub metrics: &'a Metrics,
     pub nucleus_state: &'a mut NucleusState,
     pub nucleus_client: Option<&'a NucleusClient>,

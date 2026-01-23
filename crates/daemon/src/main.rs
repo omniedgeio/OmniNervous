@@ -16,7 +16,7 @@ use handler::MessageHandler;
 
 use identity::Identity;
 use metrics::Metrics;
-use wg::WgControl;
+use wg::{WgInterface, CliWgControl, UserspaceWgControl};
 use clap::Parser;
 use log::{info, warn, error};
 use tokio::time::{interval, Duration};
@@ -267,7 +267,7 @@ async fn main() -> Result<()> {
     // Create WireGuard interface if VIP is specified
     let wg_api_opt = if let Some(vip) = args.vip {
         let ifname = args.tun_name.clone();
-        let wg_control = WgControl::new(&ifname);
+        let wg_control: Box<dyn WgInterface> = Box::new(CliWgControl::new(&ifname));
         
         info!("🔧 Initializing WireGuard interface '{}' with IP {}", ifname, vip);
         if let Err(e) = wg_control.setup_interface(
