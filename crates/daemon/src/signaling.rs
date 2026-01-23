@@ -1,15 +1,21 @@
 //! Nucleus Signaling Protocol - Scalable for 1000+ Edges
 //!
-//! On-demand peer discovery with delta updates.
-//! Nucleus acts as a VIP → endpoint registry (like DNS for VPN).
+//! ### Protocol Flow
+//! ```mermaid
+//! sequence_flow
+//!   Edge->>Nucleus: REGISTER (Cluster, VIP, Port, PubKey)
+//!   Nucleus-->>Edge: REGISTER_ACK (Success, RecentPeers)
+//!   loop Every 30s
+//!     Edge->>Nucleus: HEARTBEAT (Cluster, VIP, KnownCount)
+//!     Nucleus-->>Edge: HEARTBEAT_ACK (NewPeers, RemovedVIPs)
+//!   end
+//!   Edge->>Nucleus: QUERY_PEER (TargetVIP)
+//!   Nucleus-->>Edge: PEER_INFO (Endpoint, PubKey)
+//! ```
 //!
-//! Message Types:
-//! - REGISTER: Edge → Nucleus (join cluster)
-//! - REGISTER_ACK: Nucleus → Edge (confirm + recent peers)
-//! - HEARTBEAT: Edge → Nucleus (keep alive)
-//! - HEARTBEAT_ACK: Nucleus → Edge (delta: new joins/leaves)
-//! - QUERY_PEER: Edge → Nucleus (lookup specific VIP)
-//! - PEER_INFO: Nucleus → Edge (VIP → endpoint mapping)
+//! ### Key Concept
+//! Nucleus acts as a VIP → endpoint registry (like DNS for VPN).
+//! Edges use delta updates (heartbeats) to stay in sync without full table refreshes.
 
 use anyhow::{Context, Result};
 use log::{info, warn, debug};

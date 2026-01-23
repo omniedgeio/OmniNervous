@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
 
 # Copy entire project
 COPY Cargo.toml ./
-COPY omni-daemon ./omni-daemon/
+COPY crates/daemon ./crates/daemon/
 
 # Build release binary
 RUN cargo build -p omni-daemon --release

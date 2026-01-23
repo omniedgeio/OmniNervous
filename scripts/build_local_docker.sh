@@ -1,7 +1,7 @@
 #!/bin/bash
 # scripts/build_local_docker.sh
 # Builds omni-daemon using Docker and extracts the binary.
-# Best for native amd64 builds.
+# Compatible with macOS and Linux.
 
 set -e
 
@@ -10,25 +10,32 @@ IMAGE_NAME="omni-daemon-build-local"
 BINARY_NAME="omni-daemon"
 OUTPUT_PATH="scripts/omni-daemon-linux-amd64"
 
+# Colors
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
 # Get project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-echo "🔨 Building $BINARY_NAME using Docker..."
+echo -e "${CYAN}🔨 Building $BINARY_NAME using Docker...${NC}"
 cd "$PROJECT_ROOT"
 
 # 1. Build the Docker image
-docker build -t "$IMAGE_NAME" .
+# Using --platform linux/amd64 to ensure the binary is correct for cloud deployment
+# even when building on Apple Silicon (arm64) macOS.
+docker build --platform linux/amd64 --no-cache -t "$IMAGE_NAME" .
 
 # 2. Extract the binary
-echo "📦 Extracting binary to $OUTPUT_PATH..."
-CONTAINER_ID=$(docker create "$IMAGE_NAME")
+echo -e "${CYAN}📦 Extracting binary to $OUTPUT_PATH...${NC}"
+CONTAINER_ID=$(docker create --platform linux/amd64 "$IMAGE_NAME")
+
+# Ensure the parent directory of the output path exists
+mkdir -p "$(dirname "$PROJECT_ROOT/$OUTPUT_PATH")"
+
 docker cp "$CONTAINER_ID":/usr/local/bin/"$BINARY_NAME" "$PROJECT_ROOT/$OUTPUT_PATH"
 docker rm "$CONTAINER_ID"
 
-# 3. Cleanup (optional - uncomment if you want to keep host clean)
-# echo "🧹 Cleaning up Docker image..."
-# docker rmi "$IMAGE_NAME"
-
-echo "✅ Build complete: $OUTPUT_PATH"
+echo -e "${GREEN}✅ Build complete: $OUTPUT_PATH${NC}"
 ls -lh "$PROJECT_ROOT/$OUTPUT_PATH"

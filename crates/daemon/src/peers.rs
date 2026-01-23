@@ -104,7 +104,7 @@ impl PeerTable {
             .collect();
 
         for vip in &expired {
-            if let Some(peer) = self.by_vip.remove(vip) {
+            if let Some(_peer) = self.by_vip.remove(vip) {
                 info!("Peer expired: {}", vip);
             }
         }

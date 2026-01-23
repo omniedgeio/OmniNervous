@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "omni-daemon",
+    "crates/daemon",
 ]
 resolver = "2"
 
