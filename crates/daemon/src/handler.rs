@@ -167,7 +167,7 @@ impl<'a> MessageHandler<'a> {
             info!("Discovered peer {} at {}", peer_info.vip, endpoint);
 
             // Configure WireGuard peer
-            if let Some(wg_api) = self.wg_api {
+            if let Some(wg_api) = self.wg_api.as_mut() {
                 let pubkey_b64 = BASE64.encode(&peer_info.public_key);
                 if let Err(e) = wg_api.set_peer(
                     &pubkey_b64,

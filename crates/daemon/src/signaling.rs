@@ -26,7 +26,7 @@ use std::time::{Instant, Duration};
 use tokio::net::UdpSocket;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use governor::{RateLimiter, Quota, Jitter};
+use governor::{RateLimiter, Quota};
 use std::num::NonZeroU32;
 
 /// Message types for signaling protocol

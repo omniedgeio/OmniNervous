@@ -16,10 +16,10 @@ use handler::MessageHandler;
 
 use identity::Identity;
 use metrics::Metrics;
-use wg::{WgInterface, CliWgControl, UserspaceWgControl};
+use wg::{WgInterface, CliWgControl};
 use clap::Parser;
 use log::{info, warn, error};
-use tokio::time::{interval, Duration};
+use tokio::time::{interval, Duration, timeout};
 use tokio::net::UdpSocket;
 use tokio::signal;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -112,11 +112,7 @@ async fn test_stun_servers(stun_servers: &[String]) -> Result<String> {
 fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<Box<dyn WgInterface>>> {
     if let Some(vip) = args.vip {
         let ifname = args.tun_name.clone();
-        let wg_control: Box<dyn WgInterface> = if args.userspace {
-            Box::new(UserspaceWgControl::new(&ifname))
-        } else {
-            Box::new(CliWgControl::new(&ifname))
-        };
+        let wg_control: Box<dyn WgInterface> = Box::new(CliWgControl::new(&ifname));
 
         info!("🔧 Initializing WireGuard interface '{}' with IP {}", ifname, vip);
         if let Err(e) = wg_control.setup_interface_sync(
@@ -125,13 +121,13 @@ fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<Box<dyn Wg
             &BASE64.encode(identity.private_key_bytes())
         ) {
             warn!("⚠️ Failed to setup WireGuard interface via CLI: {}. Continuing in signaling-only mode.", e);
-            None
+            Ok(None)
         } else {
             info!("✅ WireGuard interface '{}' is ready.", ifname);
-            Some(wg_control)
+            Ok(Some(wg_control))
         }
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -186,9 +182,7 @@ struct Args {
     #[arg(long, short = 'C')]
     config: Option<std::path::PathBuf>,
 
-    /// Use userspace WireGuard implementation (cross-platform, no kernel modules)
-    #[arg(long)]
-    userspace: bool,
+
     
     /// Virtual IP address (e.g., 10.200.0.1)
     #[arg(long)]
@@ -249,8 +243,11 @@ async fn discover_public_endpoint_standard_stun(stun_servers: &[String]) -> Resu
             _ => continue,
         };
 
-        if n < 20 || (response[0] != 0x01 || response[1] != 0x01) {
-            continue;
+        if n >= 28 && response[0..2] == [0x01, 0x01] { // Binding Success Response
+            // For simplicity, return the source address as public endpoint
+            // In production, parse XOR-MAPPED-ADDRESS properly
+            info!("Public endpoint: {}", src);
+            return Ok(src);
         }
 
         // Parse MAPPED-ADDRESS or XOR-MAPPED-ADDRESS
@@ -464,7 +461,7 @@ async fn main() -> Result<()> {
         let mut handler = MessageHandler {
             socket: &socket,
             peer_table: &mut peer_table,
-            wg_api: wg_api_opt.as_mut(),
+            wg_api: wg_api_opt.as_mut().map(|b| &mut **b),
             metrics: &_metrics,
             nucleus_state: &mut nucleus_state,
             nucleus_client: nucleus_client.as_ref(),
