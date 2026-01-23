@@ -66,85 +66,101 @@ Validated on **AWS Lightsail $5 Instances** (3-node cluster, cross-region):
 
 ### Prerequisites
 - **Rust**: Stable 1.70+
-- **Linux Kernel**: 5.6+ (for WireGuard support)
-- **WireGuard Tools**: `wg` and `wg-quick` installed
+- **Linux Kernel**: 5.6+ (WireGuard support)
+- **WireGuard Tools**: `wg` and `wg-quick`
 
 ### Build
 ```bash
+# Native build
 cargo build --release
+
+# Cross-platform build (Linux AMD64)
+./scripts/build_local_docker.sh
 ```
 
-### Running OmniNervous
+### Usage
 
-**1. Start Nucleus (signaling server):**
+**Initialize Identity:**
+```bash
+./target/release/omninervous --init
+```
+
+**Run Nucleus (Signaling Server):**
 ```bash
 sudo ./target/release/omninervous --mode nucleus --port 51820
 ```
 
-**2. Connect edge nodes:**
+**Run Edge Node:**
 ```bash
 sudo ./target/release/omninervous \
-  --nucleus nucleus.example.com:51820 \
-  --cluster my-network \
+  --nucleus <nucleus-host>:51820 \
+  --cluster <cluster-name> \
   --vip 10.200.0.1
 ```
 
-**3. Advanced STUN discovery:**
-```bash
-# Prioritize public STUNs, fallback to Nucleus
-# Supports single server, space-separated, or JSON array
-sudo ./target/release/omninervous \
-  --nucleus nucleus.example.com:51820 \
-  --stun stun.l.google.com:19302 \
-  --stun "stun1.l.google.com:19302 stun2.l.google.com:19302" \
-  --stun '["stun3.l.google.com:19302", "stun4.l.google.com:19302"]' \
-  --vip 10.200.0.1
-```
-
-**4. Signaling-only (stand-alone) Mode:**
-```bash
-sudo ./target/release/omninervous --mode nucleus --port 51820
-```
+**Advanced Options:**
+- STUN servers: `--stun stun.l.google.com:19302`
+- Multiple STUN: `--stun "server1 server2"` or `--stun '["server1", "server2"]'`
+- Cluster secret: `--secret <16-char-min>`
+- Config file: `--config config.toml`
 
 | Flag | Description | Default |
 |:---|:---|:---|
 | `--mode nucleus` | Run as signaling server | Edge mode |
-| `--nucleus` | Nucleus server address | Required for edge |
-| `--cluster` | Cluster name to join | Required |
-| `--vip` | Virtual IP address (e.g., 10.200.0.1) | Required for edge |
+| `--nucleus` | Nucleus address (host:port) | Required |
+| `--cluster` | Cluster name | Required |
+| `--vip` | Virtual IP (e.g., 10.200.0.1) | Required |
 | `--port` | UDP port | 51820 |
-| `--stun` | STUN server(s): single, list, or JSON | - |
-| `--disable-builtin-stun` | Disable Nucleus STUN fallback | enabled |
-| `--init` | Generate new identity and exit | - |
+| `--stun` | STUN server(s) | Built-in fallback |
+| `--secret` | Cluster PSK | Optional |
+| `--init` | Generate identity | - |
 
 ---
 
-## Core Components
+## Architecture Overview
 
-### `crates/daemon/src/main.rs`
-Entry point handling CLI parsing, mode selection (nucleus/edge), WireGuard interface creation, and the main event loop.
+### Dual-Plane Design
+- **Control Plane**: Async Rust daemon (`tokio`) handling signaling and peer management
+- **Data Plane**: Native WireGuard integration via `defguard_wireguard_rs`
 
-### `crates/daemon/src/signaling.rs`
-Nucleus protocol implementation:
-- `REGISTER` / `HEARTBEAT`: Peer registration and delta updates
-- `QUERY_PEER` / `PEER_INFO`: On-demand peer lookup (O(1))
-- `MSG_STUN_QUERY` / `MSG_STUN_RESPONSE`: Built-in STUN service
-- `MSG_NAT_PUNCH`: Active UDP hole punching signaling
+### Core Components
 
-### `crates/daemon/src/peers.rs`
-Peer routing table (VIP → endpoint mapping) with timeout-based cleanup.
+#### Signaling Protocol (`signaling.rs`)
+- **REGISTER**: Peer registration with cluster, VIP, public key
+- **HEARTBEAT**: 30s interval with delta updates (O(1) lookups)
+- **QUERY_PEER**: On-demand peer discovery
+- **STUN**: Built-in NAT traversal service
+- **Security**: HMAC-SHA256 authentication with cluster PSK
 
-### `crates/daemon/src/identity.rs`
-X25519 key generation, storage, and validation with 0o600 permissions.
+#### Peer Management (`peers.rs`)
+- **Routing Table**: VIP → endpoint mapping with 2-minute TTL
+- **Identity Pinning**: TOFU-based MITM protection
+- **Cleanup**: Automatic stale peer removal
 
-### `crates/daemon/src/config.rs`
-TOML-based configuration with fallback paths (`/etc/omni/config.toml`, `~/.omni/config.toml`).
+#### Identity System (`identity.rs`)
+- **Algorithm**: X25519 keypairs from OS-level entropy
+- **Storage**: Encrypted files with 0o600 permissions
+- **Validation**: Keypair integrity checks on load
 
-### `crates/daemon/src/metrics.rs` / `crates/daemon/src/http.rs`
-Prometheus-compatible metrics server on port 9090 (`/metrics`, `/health` endpoints).
+#### WireGuard Integration (`wg.rs`)
+- **CLI Control**: Direct `wg` command execution
+- **Peer Config**: Dynamic endpoint/allowed-IPs setup
+- **Persistent Keepalive**: 25s for NAT maintenance
 
-### `crates/daemon/src/stun.rs`
-Hardcoded list of 10+ reliable public STUN fallbacks (Google, Cloudflare, etc.).
+#### Message Handler (`handler.rs`)
+- **Packet Processing**: Signaling message routing
+- **Peer Discovery**: Automatic WG peer configuration
+- **NAT Punching**: Proactive UDP hole punching
+
+#### Monitoring (`metrics.rs`, `http.rs`)
+- **Prometheus**: `/metrics` endpoint (port 9090)
+- **Counters**: Sessions, packets, handshakes, failures
+- **Health**: `/health` endpoint
+
+#### Configuration (`config.rs`)
+- **TOML Format**: Hierarchical daemon/network/security sections
+- **Fallback Paths**: `/etc/omni/config.toml`, `~/.omni/config.toml`
+- **Validation**: Cluster name restrictions, rate limits
 
 ---
 
@@ -223,16 +239,24 @@ docker-compose logs -f
 
 ### Linux Binary Deployment
 
-**Build for linux-amd64:**
+**Build linux-amd64 binary:**
 ```bash
 ./scripts/build_local_docker.sh
 ```
+Output: `scripts/omninervous-linux-amd64`
 
-This produces `scripts/omninervous-linux-amd64` for cloud deployment.
-
-**Deploy to cloud:**
+**Deploy to cloud instance:**
 ```bash
 ./scripts/deploy_to_cloud.sh user@host
+```
+
+**Manual deployment:**
+```bash
+# Copy binary to server
+scp scripts/omninervous-linux-amd64 user@server:/usr/local/bin/
+
+# Run on server
+sudo /usr/local/bin/omninervous --mode nucleus --port 51820
 ```
 
 ### Configuration File
