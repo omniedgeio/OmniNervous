@@ -113,12 +113,19 @@ impl CliWgControl {
 
 // Inner state shared via Arc
 struct UserspaceInner {
-    // We store the private key here and only initialize Tunn when we have a peer.
-    // BoringTun Tunn is 1-to-1 (Peer Session).
     private_key: Mutex<Option<StaticSecret>>,
-    tunnel: Mutex<Option<Tunn>>,
     device: Mutex<Option<tun::AsyncDevice>>,
-    destinations: RwLock<HashMap<IpAddr, SocketAddr>>,
+    // Peer PublicKey -> Session State
+    peers: RwLock<HashMap<[u8; 32], PeerSession>>,
+    // VIP -> Peer PublicKey (for routing)
+    routing_table: RwLock<HashMap<IpAddr, [u8; 32]>>,
+    // Local Index -> Peer PublicKey (for decryption lookup)
+    index_map: RwLock<HashMap<u32, [u8; 32]>>,
+}
+
+struct PeerSession {
+    tunnel: Arc<Mutex<Tunn>>,
+    endpoint: Option<SocketAddr>,
 }
 
 #[derive(Clone)]
@@ -133,9 +140,10 @@ impl UserspaceWgControl {
             interface: interface.to_string(),
             inner: Arc::new(UserspaceInner {
                 private_key: Mutex::new(None),
-                tunnel: Mutex::new(None),
                 device: Mutex::new(None),
-                destinations: RwLock::new(HashMap::new()),
+                peers: RwLock::new(HashMap::new()),
+                routing_table: RwLock::new(HashMap::new()),
+                index_map: RwLock::new(HashMap::new()),
             }),
         }
     }
@@ -179,56 +187,58 @@ impl UserspaceWgControl {
     pub async fn set_peer(&self, public_key: &str, endpoint: Option<SocketAddr>, allowed_ips: &[String], persistent_keepalive: Option<u32>) -> Result<(), String> {
         let pk_bytes = hex::decode(public_key).map_err(|e| e.to_string())?;
         let mut pk = [0u8; 32];
-        if pk_bytes.len() != 32 { return Err("Invalid info public key".to_string()); }
+        if pk_bytes.len() != 32 { return Err("Invalid peer public key".to_string()); }
         pk.copy_from_slice(&pk_bytes);
         let peer_public = PublicKey::from(pk);
 
-        // Update destinations map
-        if let Some(ep) = endpoint {
-            let mut dests = self.inner.destinations.write().await;
+        // Update routing table
+        {
+            let mut routing = self.inner.routing_table.write().await;
             for cidr in allowed_ips {
-                if let Some((ip_str, _)) = cidr.split_once('/') {
-                    if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                        dests.insert(ip, ep);
-                    }
-                } else {
-                     if let Ok(ip) = cidr.parse::<IpAddr>() {
-                        dests.insert(ip, ep);
-                     }
+                let ip_str = cidr.split('/').next().unwrap_or(cidr);
+                if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                    routing.insert(ip, pk);
                 }
             }
         }
 
-        // Initialize BoringTun Tunn (1-to-1)
-        let mut t_lock = self.inner.tunnel.lock().await;
-        
-        let pk_lock = self.inner.private_key.lock().await;
-        let my_private = pk_lock.as_ref().ok_or("Private key not set")?.clone();
-        
-        // Tunn::new(static_private, peer_static_public, preshared_key, persistent_keepalive, index, rate_limiter)
-        // Note: For boringtun 0.6.0, StaticSecret is not Clone without features, but we can recreate it if needed,
-        // or ensure we use the reference correctly. x25519_dalek StaticSecret usually clones by bytes.
-        
-        // Convert keepalive to u16
-        let keepalive_u16 = persistent_keepalive.map(|k| k as u16);
+        // Initialize or update peer session
+        let mut peers = self.inner.peers.write().await;
+        if let Some(session) = peers.get_mut(&pk) {
+            session.endpoint = endpoint;
+            // Note: In a production system, we might want to update keepalive too
+        } else {
+            let pk_lock = self.inner.private_key.lock().await;
+            let my_private = pk_lock.as_ref().ok_or("Private key not set")?.clone();
+            
+            // Assign a unique index for this peer (starts at 1, simplified)
+            let index = (peers.len() as u32) + 1;
+            
+            let keepalive_u16 = persistent_keepalive.map(|k| k as u16);
+            let tunnel = Tunn::new(my_private, peer_public, None, keepalive_u16, index, None)
+                .map_err(|e| format!("{:?}", e))?;
 
-        let tunnel = Tunn::new(my_private, peer_public, None, keepalive_u16, 0, None)
-            .map_err(|e| format!("{:?}", e))?;
+            peers.insert(pk, PeerSession {
+                tunnel: Arc::new(Mutex::new(tunnel)),
+                endpoint,
+            });
 
-        *t_lock = Some(tunnel);
+            let mut indices = self.inner.index_map.write().await;
+            indices.insert(index, pk);
+            
+            info!("Added userspace peer {} with index {}", public_key, index);
+        }
 
         Ok(())
     }
 
     pub async fn run_packet_loop(&self, udp_socket: Arc<UdpSocket>) -> Result<(), String> {
-        // Take device out of Option to split it
         let device = {
             let mut d_lock = self.inner.device.lock().await;
             d_lock.take().ok_or("TUN device not initialized")?
         };
         
         let (mut reader, mut writer) = tokio::io::split(device);
-        
         let inner = self.inner.clone();
         let socket_tx = udp_socket.clone();
 
@@ -240,34 +250,36 @@ impl UserspaceWgControl {
                 match reader.read(&mut buf).await {
                     Ok(n) if n > 0 => {
                         let dest_ip = parse_dst_ip(&buf[..n]);
+                        if let Some(ip) = dest_ip {
+                            let pk_opt = {
+                                let routing = inner_tx.routing_table.read().await;
+                                routing.get(&ip).copied()
+                            };
 
-                        let endpoint = if let Some(ip) = dest_ip {
-                            let dests = inner_tx.destinations.read().await;
-                            dests.get(&ip).copied()
-                        } else { None };
-
-                         if let Some(ep) = endpoint {
-                            let mut t_lock = inner_tx.tunnel.lock().await;
-                            if let Some(t) = t_lock.as_mut() {
-                                let mut dst = [0u8; 2048];
-                                match t.encapsulate(&buf[..n], &mut dst) {
-                                    TunnResult::WriteToNetwork(packet) => {
-                                        if let Err(e) = socket_tx.send_to(packet, ep).await {
-                                            error!("Failed to send to {}: {}", ep, e);
+                            if let Some(pk) = pk_opt {
+                                let peers = inner_tx.peers.read().await;
+                                if let Some(session) = peers.get(&pk) {
+                                    if let Some(ep) = session.endpoint {
+                                        let mut t_lock = session.tunnel.lock().await;
+                                        let mut dst = [0u8; 2048];
+                                        match t_lock.encapsulate(&buf[..n], &mut dst) {
+                                            TunnResult::WriteToNetwork(packet) => {
+                                                if let Err(e) = socket_tx.send_to(packet, ep).await {
+                                                    error!("Failed to send to {}: {}", ep, e);
+                                                }
+                                            }
+                                            TunnResult::Err(e) => error!("Encapsulate error: {:?}", e),
+                                            _ => {}
                                         }
                                     }
-                                    TunnResult::Err(e) => {
-                                        error!("Encapsulate error: {:?}", e);
-                                    }
-                                    _ => {}
                                 }
                             }
-                         }
+                        }
                     } 
                     Ok(_) => continue,
                     Err(e) => {
                         error!("TUN read error: {}", e);
-                        break; // Fatal error for TUN
+                        break;
                     }
                 }
             }
@@ -280,10 +292,28 @@ impl UserspaceWgControl {
             loop {
                 match udp_socket.recv_from(&mut buf).await {
                     Ok((n, src)) => {
-                        let mut t_lock = inner_rx.tunnel.lock().await;
-                         if let Some(t) = t_lock.as_mut() {
+                        if n < 4 { continue; }
+                        let msg_type = buf[0];
+                        
+                        let session_opt = if msg_type == 4 {
+                            // Data packet: use receiver index at offset 4
+                            let index = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                            let pk_lock = inner_rx.index_map.read().await;
+                            if let Some(pk) = pk_lock.get(&index) {
+                                let peers = inner_rx.peers.read().await;
+                                peers.get(pk).map(|s| s.tunnel.clone())
+                            } else { None }
+                        } else {
+                            // Handshake or other: try all sessions (simplified for mesh)
+                            // In a large deployment, you'd use a more efficient lookup
+                            let peers = inner_rx.peers.read().await;
+                            peers.values().next().map(|s| s.tunnel.clone()) // FIXME: Support multiple handshakes correctly
+                        };
+
+                        if let Some(t_arc) = session_opt {
+                            let mut t_lock = t_arc.lock().await;
                             let mut dst = [0u8; 2048];
-                            match t.decapsulate(Some(src.ip()), &buf[..n], &mut dst) {
+                            match t_lock.decapsulate(Some(src.ip()), &buf[..n], &mut dst) {
                                 TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
                                     if let Err(e) = writer.write_all(packet).await {
                                         error!("Failed to write to TUN: {}", e);
@@ -291,17 +321,16 @@ impl UserspaceWgControl {
                                 }
                                 TunnResult::WriteToNetwork(packet) => {
                                     if let Err(e) = udp_socket.send_to(packet, src).await {
-                                        error!("Failed to send handshake response to {}: {}", src, e);
+                                        error!("Failed to send handshake response: {}", e);
                                     }
                                 }
                                 _ => {}
                             }
-                         }
+                        }
                     }
                     Err(e) => {
                         error!("UDP recv error: {}", e);
-                        // UDP errors might be transient, don't break immediately unless persistent
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     }
                 }
             }
@@ -314,9 +343,7 @@ impl UserspaceWgControl {
 /// Helper to parse destination IP from raw IP packet
 fn parse_dst_ip(packet: &[u8]) -> Option<IpAddr> {
     if packet.is_empty() { return None; }
-    
     let version = packet[0] >> 4;
-    
     if version == 4 {
         if packet.len() >= 20 {
             Some(IpAddr::V4(Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19])))
@@ -327,9 +354,7 @@ fn parse_dst_ip(packet: &[u8]) -> Option<IpAddr> {
              octets.copy_from_slice(&packet[24..40]);
              Some(IpAddr::V6(Ipv6Addr::from(octets)))
         } else { None }
-    } else {
-        None
-    }
+    } else { None }
 }
 
 #[cfg(test)]
@@ -338,31 +363,17 @@ mod tests {
 
     #[test]
     fn test_parse_ipv4_dst() {
-        // Minimal IPv4 header (20 bytes)
-        // Dest at offset 16
         let mut pkt = vec![0u8; 20];
-        pkt[0] = 0x45; // Version 4, IHL 5
-        pkt[16] = 192;
-        pkt[17] = 168;
-        pkt[18] = 0;
-        pkt[19] = 1;
-
-        let ip = parse_dst_ip(&pkt);
-        assert_eq!(ip, Some(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
+        pkt[0] = 0x45;
+        pkt[16] = 192; pkt[17] = 168; pkt[18] = 0; pkt[19] = 1;
+        assert_eq!(parse_dst_ip(&pkt), Some(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
     }
 
     #[test]
     fn test_parse_ipv6_dst() {
-        // Minimal IPv6 header (40 bytes)
-        // Dest at offset 24
         let mut pkt = vec![0u8; 40];
-        pkt[0] = 0x60; // Version 6
-        // Set dest: 2001:db8::1
-        // 20 01 0d b8 00 00 ... 00 01
-        pkt[24] = 0x20; pkt[25] = 0x01;
-        pkt[26] = 0x0d; pkt[27] = 0xb8;
-        pkt[39] = 0x01;
-
+        pkt[0] = 0x60;
+        pkt[24] = 0x20; pkt[25] = 0x01; pkt[26] = 0x0d; pkt[27] = 0xb8; pkt[39] = 0x01;
         let ip = parse_dst_ip(&pkt).unwrap();
         match ip {
             IpAddr::V6(v6) => assert_eq!(v6.segments()[0], 0x2001),

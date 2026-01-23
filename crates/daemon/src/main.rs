@@ -57,57 +57,9 @@ fn collect_stun_servers(args: &Args, config: &config::Config) -> Vec<String> {
     } else if !config.network.stun_servers.is_empty() {
         config.network.stun_servers.clone()
     } else {
-        // Built-in fallback
-        vec![
-            "stun.l.google.com:19302".to_string(),
-            "stun1.l.google.com:19302".to_string(),
-            "stun2.l.google.com:19302".to_string(),
-            "stun3.l.google.com:19302".to_string(),
-            "stun4.l.google.com:19302".to_string(),
-        ]
+        // Built-in fallback from stun module
+        stun::STUN_SERVERS.iter().map(|s| s.to_string()).collect()
     }
-}
-
-async fn test_stun_servers(stun_servers: &[String]) -> Result<String> {
-    for stun_server in stun_servers {
-        info!("Trying STUN server: {}", stun_server);
-        let socket = match UdpSocket::bind("0.0.0.0:0").await {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if socket.connect(stun_server).await.is_err() {
-            continue;
-        }
-
-        // Create a minimal STUN binding request
-        let mut request = [0u8; 20];
-        request[0..2].copy_from_slice(&[0x00, 0x01]); // Binding Request
-        request[4..8].copy_from_slice(&[0x21, 0x12, 0xA4, 0x42]); // Magic Cookie
-        // Transaction ID (random-ish)
-        for i in 8..20 {
-            request[i] = rand::random();
-        }
-
-        if socket.send(&request).await.is_err() {
-            continue;
-        }
-
-        let mut response = [0u8; 1024];
-        let n = match timeout(Duration::from_secs(3), socket.recv(&mut response)).await {
-            Ok(Ok(n)) => n,
-            _ => continue,
-        };
-
-        if n >= 28 && response[0..2] == [0x01, 0x01] { // Binding Success Response
-            // Parse XOR-MAPPED-ADDRESS (Type 0x0020)
-            if let Some(addr) = stun::parse_xor_mapped_address(&response[..n]) {
-                let addr_str = addr.to_string();
-                info!("Public endpoint: {}", addr_str);
-                return Ok(addr_str);
-            }
-        }
-    }
-    anyhow::bail!("All STUN servers failed");
 }
 
 async fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<WgInterface>> {
