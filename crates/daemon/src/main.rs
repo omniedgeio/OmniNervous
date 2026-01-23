@@ -342,23 +342,6 @@ async fn main() -> Result<()> {
 
     // Create WireGuard interface if VIP is specified
     let wg_api_opt = setup_wireguard(&args, &identity)?;
-        
-        info!("🔧 Initializing WireGuard interface '{}' with IP {}", ifname, vip);
-        if let Err(e) = wg_control.setup_interface_sync(
-            &vip.to_string(), 
-            args.port, 
-            &BASE64.encode(identity.private_key_bytes())
-        ) {
-            warn!("⚠️ Failed to setup WireGuard interface via CLI: {}. Continuing in signaling-only mode.", e);
-            None
-        } else {
-            info!("✅ WireGuard interface '{}' is ready.", ifname);
-            Some(wg_control)
-        }
-    } else {
-        info!("ℹ️ No --vip specified, running in signaling-only mode (Nucleus)");
-        None
-    };
 
     
     // Cleanup interval - runs every 60 seconds
