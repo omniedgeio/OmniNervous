@@ -28,6 +28,113 @@ use std::sync::Arc;
 use serde_json;
 use log::debug;
 
+fn load_config(args: &Args) -> config::Config {
+    if let Some(path) = &args.config {
+        config::Config::load(path).unwrap_or_else(|e| {
+            warn!("Failed to load config from {:?}: {}. Using defaults.", path, e);
+            config::Config::default()
+        })
+    } else {
+        config::Config::load_or_default()
+    }
+}
+
+fn collect_stun_servers(args: &Args, config: &config::Config) -> Vec<String> {
+    if !args.stun.is_empty() {
+        let mut list = Vec::new();
+        for s in &args.stun {
+            // Try JSON first, then space-separated
+            match serde_json::from_str::<Vec<String>>(s) {
+                Ok(json_list) => list.extend(json_list),
+                Err(_) => {
+                    for entry in s.split_whitespace() {
+                        list.push(entry.to_string());
+                    }
+                }
+            }
+        }
+        list
+    } else if !config.network.stun_servers.is_empty() {
+        config.network.stun_servers.clone()
+    } else {
+        // Built-in fallback
+        vec![
+            "stun.l.google.com:19302".to_string(),
+            "stun1.l.google.com:19302".to_string(),
+            "stun2.l.google.com:19302".to_string(),
+            "stun3.l.google.com:19302".to_string(),
+            "stun4.l.google.com:19302".to_string(),
+        ]
+    }
+}
+
+async fn test_stun_servers(stun_servers: &[String]) -> Result<String> {
+    for stun_server in stun_servers {
+        info!("Trying STUN server: {}", stun_server);
+        let socket = match UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if socket.connect(stun_server).await.is_err() {
+            continue;
+        }
+
+        // Create a minimal STUN binding request
+        let mut request = [0u8; 20];
+        request[0..2].copy_from_slice(&[0x00, 0x01]); // Binding Request
+        request[4..8].copy_from_slice(&[0x21, 0x12, 0xA4, 0x42]); // Magic Cookie
+        // Transaction ID (random-ish)
+        for i in 8..20 {
+            request[i] = rand::random();
+        }
+
+        if socket.send(&request).await.is_err() {
+            continue;
+        }
+
+        let mut response = [0u8; 1024];
+        let n = match timeout(Duration::from_secs(3), socket.recv(&mut response)).await {
+            Ok(Ok(n)) => n,
+            _ => continue,
+        };
+
+        if n >= 28 && response[0..2] == [0x01, 0x01] { // Binding Success Response
+            // Parse XOR-MAPPED-ADDRESS (Type 0x0020)
+            if let Some(addr) = stun::parse_xor_mapped_address(&response[..n]) {
+                info!("Public endpoint: {}", addr);
+                return Ok(addr);
+            }
+        }
+    }
+    anyhow::bail!("All STUN servers failed");
+}
+
+fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<Box<dyn WgInterface>>> {
+    if let Some(vip) = args.vip {
+        let ifname = args.tun_name.clone();
+        let wg_control: Box<dyn WgInterface> = if args.userspace {
+            Box::new(UserspaceWgControl::new(&ifname))
+        } else {
+            Box::new(CliWgControl::new(&ifname))
+        };
+
+        info!("🔧 Initializing WireGuard interface '{}' with IP {}", ifname, vip);
+        if let Err(e) = wg_control.setup_interface_sync(
+            &vip.to_string(),
+            args.port,
+            &BASE64.encode(identity.private_key_bytes())
+        ) {
+            warn!("⚠️ Failed to setup WireGuard interface via CLI: {}. Continuing in signaling-only mode.", e);
+            None
+        } else {
+            info!("✅ WireGuard interface '{}' is ready.", ifname);
+            Some(wg_control)
+        }
+    } else {
+        None
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "omninervous",
@@ -209,44 +316,10 @@ async fn main() -> Result<()> {
     info!("Using identity: {}", identity.public_key_hex());
 
     // Load config
-    let config = if let Some(path) = &args.config {
-        config::Config::load(path).unwrap_or_else(|e| {
-            warn!("Failed to load config from {:?}: {}. Using defaults.", path, e);
-            config::Config::default()
-        })
-    } else {
-        config::Config::load_or_default()
-    };
+    let config = load_config(&args);
 
-    // Merge STUN servers: CLI takes priority if provided, otherwise config.
-    // The --stun flag is intelligent and handles:
-    // 1. Single values: -s stun.l.google.com:19302
-    // 2. Space-separated: -s "stun1 stun2"
-    // 3. JSON arrays: -s '["stun1", "stun2"]'
-    // 4. Repeatable: -s server1 -s server2
-    let mut stun_servers = if !args.stun.is_empty() {
-        let mut list = Vec::new();
-        for s in &args.stun {
-            // Try JSON first, then space-separated
-            match serde_json::from_str::<Vec<String>>(s) {
-                Ok(json_list) => list.extend(json_list),
-                Err(_) => {
-                    for entry in s.split_whitespace() {
-                        list.push(entry.to_string());
-                    }
-                }
-            }
-        }
-        list
-    } else if !config.network.stun_servers.is_empty() {
-        config.network.stun_servers.clone()
-    } else {
-        stun::STUN_SERVERS.iter().map(|&s| s.to_string()).collect()
-    };
-
-    // Remove duplicates
-    stun_servers.sort();
-    stun_servers.dedup();
+    // Collect STUN servers
+    let stun_servers = collect_stun_servers(&args, &config);
 
     let use_builtin_stun = if args.disable_builtin_stun {
         false
@@ -268,13 +341,7 @@ async fn main() -> Result<()> {
     let mut peer_table = peers::PeerTable::new();
 
     // Create WireGuard interface if VIP is specified
-    let wg_api_opt = if let Some(vip) = args.vip {
-        let ifname = args.tun_name.clone();
-        let wg_control: Box<dyn WgInterface> = if args.userspace {
-            Box::new(UserspaceWgControl::new(&ifname))
-        } else {
-            Box::new(CliWgControl::new(&ifname))
-        };
+    let wg_api_opt = setup_wireguard(&args, &identity)?;
         
         info!("🔧 Initializing WireGuard interface '{}' with IP {}", ifname, vip);
         if let Err(e) = wg_control.setup_interface_sync(
