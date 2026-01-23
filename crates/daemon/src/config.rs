@@ -42,8 +42,10 @@ impl Default for DaemonConfig {
 pub struct NetworkConfig {
     pub nucleus: Option<String>,
     pub cluster: Option<String>,
-    #[serde(default = "default_stun")]
-    pub stun_server: String,
+    #[serde(default = "default_stuns")]
+    pub stun_servers: Vec<String>,
+    #[serde(default = "default_true")]
+    pub use_builtin_stun: bool,
 }
 
 impl Default for NetworkConfig {
@@ -51,7 +53,8 @@ impl Default for NetworkConfig {
         Self {
             nucleus: None,
             cluster: None,
-            stun_server: default_stun(),
+            stun_servers: default_stuns(),
+            use_builtin_stun: true,
         }
     }
 }
@@ -86,7 +89,8 @@ pub struct PeerConfig {
 
 fn default_port() -> u16 { 51820 }
 fn default_iface() -> String { "eth0".to_string() }
-fn default_stun() -> String { "stun.l.google.com:19302".to_string() }
+fn default_stuns() -> Vec<String> { vec![] }
+fn default_true() -> bool { true }
 fn default_rate_limit() -> u32 { 10 }
 fn default_handshake_timeout() -> u64 { 5 }
 

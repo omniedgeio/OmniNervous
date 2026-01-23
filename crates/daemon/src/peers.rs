@@ -53,8 +53,18 @@ impl PeerTable {
         info!("Peer registered: {} → {}", virtual_ip, endpoint);
     }
     
-    /// Register a peer from signaling (includes public key)
-    pub fn register(&mut self, public_key: [u8; 32], endpoint: SocketAddr, vip: Ipv4Addr) {
+    /// Register a peer from signaling (includes public key and pinning check)
+    pub fn register(&mut self, public_key: [u8; 32], endpoint: SocketAddr, vip: Ipv4Addr) -> Result<(), String> {
+        if let Some(existing) = self.by_vip.get(&vip) {
+            if let Some(pinned_key) = existing.public_key {
+                if pinned_key != public_key {
+                    let err = format!("ALERT: Public key mismatch for peer {}! Potential MITM attempt detected.", vip);
+                    log::warn!("{}", err);
+                    return Err(err);
+                }
+            }
+        }
+
         let peer = PeerInfo {
             endpoint,
             virtual_ip: vip,
@@ -63,8 +73,8 @@ impl PeerTable {
         };
 
         self.by_vip.insert(vip, peer);
-
-        info!("Peer registered from signaling: {} → {}", vip, endpoint);
+        info!("Peer registered and pinned: {} → {}", vip, endpoint);
+        Ok(())
     }
     
 

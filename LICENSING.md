@@ -10,9 +10,9 @@ The following components are licensed under **Apache License 2.0** and are free 
 
 | Component | Path | Description |
 |:---|:---|:---|
-| **omni-common** | `/omni-common` | Shared types and protocol definitions |
-| **omni-daemon** | `/omni-daemon` | Userspace control plane daemon |
-| **omni-ebpf-core** | `/omni-ebpf` | XDP/eBPF data plane engine |
+| **omni-common** | `/crates/common` | Shared types and protocol definitions (Planned) |
+| **omninervous** | `/crates/daemon` | Userspace control plane daemon |
+| **omni-ebpf-core** | `/crates/ebpf` | XDP/eBPF data plane engine (Planned) |
 | **Scripts** | `/scripts` | Build, test, and deployment tools |
 | **Documentation** | `/docs` | Technical documentation |
 
@@ -48,5 +48,7 @@ For Enterprise licensing inquiries, contact: [enterprise@omniedge.io](mailto:ent
 **Yes.** You're free to create plugins for the Apache 2.0 core. Only the plugins listed above require a commercial license.
 
 ---
+
+*WireGuard is a registered trademark of Jason A. Donenfeld.*
 
 *© 2026 OmniEdge Inc. All rights reserved.*

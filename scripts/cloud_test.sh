@@ -44,6 +44,7 @@ VIP_A="10.200.0.10"
 VIP_B="10.200.0.20"
 CLUSTER_NAME="${CLUSTER_NAME:-omni-test}"
 CLUSTER_SECRET="${CLUSTER_SECRET:-}"
+STUN_SERVERS=""
 
 show_help() {
     cat << EOF
@@ -67,10 +68,11 @@ Options:
   --ssh-key       Path to SSH private key
   --ssh-user      SSH username (default: ubuntu)
   --port          OmniNervous UDP port (default: 51820)
-   --duration      iperf3 test duration (default: 10s)
-   --cluster       Cluster name (default: omni-test)
-    --secret        Cluster secret (min 16 chars, recommended)
-   --skip-build    Skip local cargo build
+  --duration      iperf3 test duration (default: 10s)
+  --cluster       Cluster name (default: omni-test)
+  --secret        Cluster secret (min 16 chars, recommended)
+  --stun          Custom STUN server(s) for edge nodes
+  --skip-build    Skip local cargo build
   --skip-deploy   Skip binary deployment
   --help          Show this help
 
@@ -122,12 +124,23 @@ preflight_check() {
     
     local errors=0
     
+    # Check for local dependencies
+    print_step "Checking local dependencies..."
+    for cmd in ssh scp jq bc file; do
+        if which "$cmd" &>/dev/null; then
+            echo -e "  ✅ Local $cmd found"
+        else
+            echo -e "  ❌ Local $cmd NOT found. Please install it."
+            errors=$((errors + 1))
+        fi
+    done
+
     # Get scripts directory
     local SCRIPT_DIR
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     
     # Check for pre-built binary
-    local LINUX_BINARY="$SCRIPT_DIR/omni-daemon-linux-amd64"
+    local LINUX_BINARY="$SCRIPT_DIR/omninervous-linux-amd64"
     if [[ -f "$LINUX_BINARY" ]]; then
         # Verify it's actually an x86_64 ELF binary
         if file "$LINUX_BINARY" | grep -q "ELF 64-bit.*x86-64"; then
@@ -163,17 +176,35 @@ preflight_check() {
     done
     
     # Check iperf3 on edge nodes
-    print_step "Checking iperf3 on edge nodes..."
+    print_step "Checking iperf3 and sudo on edge nodes..."
     for node in "$NODE_A" "$NODE_B"; do
         if ssh_cmd "$node" "which iperf3" &>/dev/null; then
-            echo -e "✅ iperf3 installed on $node"
+            echo -e "  ✅ iperf3 installed on $node"
         else
-            echo -e "❌ iperf3 not installed on $node"
-            echo "   Run: ssh $SSH_USER@$node 'sudo apt-get install -y iperf3'"
+            echo -e "  ❌ iperf3 not installed on $node"
             errors=$((errors + 1))
+        fi
+        
+        if ssh_cmd "$node" "sudo -n true" &>/dev/null; then
+            echo -e "  ✅ Passwordless sudo available on $node"
+        else
+            echo -e "  ⚠️  Sudo might require password on $node (script may hang)"
         fi
     done
     
+    # Check networking tools on edge nodes
+    print_step "Checking networking tools (iproute2, wireguard-tools) on edge nodes..."
+    for node in "$NODE_A" "$NODE_B"; do
+        for cmd in ip wg; do
+            if ssh_cmd "$node" "which $cmd" &>/dev/null; then
+                echo -e "  ✅ $cmd command found on $node"
+            else
+                echo -e "  ❌ $cmd command NOT found on $node"
+                errors=$((errors + 1))
+            fi
+        done
+    done
+
     if [[ $errors -gt 0 ]]; then
         print_error "Pre-flight checks failed with $errors errors"
         exit 1
@@ -193,13 +224,13 @@ deploy_binaries() {
     local SCRIPT_DIR
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     
-    # Check for pre-built binary in same folde
-    local LINUX_BINARY="$SCRIPT_DIR/omni-daemon-linux-amd64"
+    # Check for pre-built binary in same folder
+    local LINUX_BINARY="$SCRIPT_DIR/omninervous-linux-amd64"
     
     if [ ! -f "$LINUX_BINARY" ]; then
         print_error "Pre-built binary not found: $LINUX_BINARY"
         echo "   Download from GitHub releases or build with:"
-        echo "   docker build -t omni-daemon:latest . && docker cp \$(docker create omni-daemon:latest):/usr/local/bin/omni-daemon $LINUX_BINARY"
+        echo "   docker build -t omninervous:latest . && docker cp \$(docker create omninervous:latest):/usr/local/bin/omninervous $LINUX_BINARY"
         exit 1
     fi
     
@@ -214,10 +245,10 @@ deploy_binaries() {
         ssh_cmd "$node" "rm -rf ~/omni-test && mkdir -p ~/omni-test"
         
         # Copy binary
-        scp_to "$LINUX_BINARY" "$node" "~/omni-test/omni-daemon"
+        scp_to "$LINUX_BINARY" "$node" "~/omni-test/omninervous"
         
         # Make executable
-        ssh_cmd "$node" "chmod +x ~/omni-test/omni-daemon"
+        ssh_cmd "$node" "chmod +x ~/omni-test/omninervous"
         
         echo -e "✅ Deployed to $node"
     done
@@ -248,27 +279,34 @@ run_test() {
     else
         echo -e "⚠️  No secret specified, running in OPEN mode"
     fi
+
+    # Build STUN args
+    local stun_args=""
+    if [[ -n "$STUN_SERVERS" ]]; then
+        stun_args="--stun '$STUN_SERVERS'"
+        echo -e "🌐 Custom STUN discovery enabled"
+    fi
     
     # Kill any existing processes
     print_step "Cleaning up old processes and logs..."
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
-        ssh_cmd "$node" "sudo pkill -9 -f omni-daemon 2>/dev/null; sudo pkill -9 -f iperf3 2>/dev/null; sudo rm -f /tmp/omni-*.log" || true
+        ssh_cmd "$node" "sudo pkill -9 -f omninervous 2>/dev/null; sudo pkill -9 -f iperf3 2>/dev/null; sudo rm -f /tmp/omni-*.log" || true
     done
     sleep 2
     
     # Start Nucleus (signaling server)
     print_step "Starting Nucleus on $NUCLEUS..."
-    ssh_cmd "$NUCLEUS" "sudo sh -c \"RUST_LOG=debug nohup ./omni-test/omni-daemon --mode nucleus --port $OMNI_PORT > /tmp/omni-nucleus.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NUCLEUS" "sudo sh -c \"RUST_LOG=debug nohup ./omni-test/omninervous --mode nucleus --port $OMNI_PORT $secret_args > /tmp/omni-nucleus.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Start Edge A with VIP
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
-    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_A --port $OMNI_PORT > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_A --port $OMNI_PORT > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
     sleep 2
 
     # Start Edge B with VIP
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
-    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omni-daemon --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args --vip $VIP_B --port $((OMNI_PORT + 1)) > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_B --port $((OMNI_PORT + 1)) > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Wait for WireGuard tunnel establishment (heartbeat cycle is 30s)
@@ -279,11 +317,11 @@ run_test() {
     # Check if daemons are running
     print_step "Checking daemon processes..."
     echo "Nucleus process:"
-    ssh_cmd "$NUCLEUS" "pgrep -a omni-daemon || echo 'NOT RUNNING'"
+    ssh_cmd "$NUCLEUS" "pgrep -a omninervous || echo 'NOT RUNNING'"
     echo "Edge A process:"
-    ssh_cmd "$NODE_A" "pgrep -a omni-daemon || echo 'NOT RUNNING'"
+    ssh_cmd "$NODE_A" "pgrep -a omninervous || echo 'NOT RUNNING'"
     echo "Edge B process:"
-    ssh_cmd "$NODE_B" "pgrep -a omni-daemon || echo 'NOT RUNNING'"
+    ssh_cmd "$NODE_B" "pgrep -a omninervous || echo 'NOT RUNNING'"
     echo ""
     
     # Show logs for debugging
@@ -458,7 +496,7 @@ EOF
     # Cleanup
     print_step "Cleaning up remote processes..."
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
-        ssh_cmd "$node" "sudo pkill -f omni-daemon || true; pkill -f iperf3 || true" 2>/dev/null || true
+        ssh_cmd "$node" "sudo pkill -f omninervous || true; pkill -f iperf3 || true" 2>/dev/null || true
     done
     
     # Summary
@@ -475,7 +513,7 @@ EOF
     echo -e "│    Latency:    ${YELLOW}${baseline_latency} ms${NC}"
     echo -e "│    Throughput: ${YELLOW}${baseline_throughput_mbps} Mbps${NC}"
     echo -e "├─────────────────────────────────────────────────────────┤"
-    echo -e "│  ${CYAN}VPN TUNNEL (WireGuard)${NC}                                  │"
+    echo -e "│  ${CYAN} OmniNervous TUNNEL ${NC}                                  │"
     echo -e "│    Latency:    ${YELLOW}${avg_latency} ms${NC}"
     echo -e "│    Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
     echo -e "└─────────────────────────────────────────────────────────┘"
@@ -527,6 +565,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --secret)
             CLUSTER_SECRET="$2"
+            shift 2
+            ;;
+        --stun)
+            STUN_SERVERS="$2"
             shift 2
             ;;
         --skip-build)

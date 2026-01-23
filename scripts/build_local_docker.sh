@@ -6,9 +6,9 @@
 set -e
 
 # Configuration
-IMAGE_NAME="omni-daemon-build-local"
-BINARY_NAME="omni-daemon"
-OUTPUT_PATH="scripts/omni-daemon-linux-amd64"
+IMAGE_NAME="omninervous-build-local"
+BINARY_NAME="omninervous"
+OUTPUT_PATH="scripts/omninervous-linux-amd64"
 
 # Colors
 GREEN='\033[0;32m'

@@ -17,7 +17,7 @@ COPY Cargo.toml ./
 COPY crates/daemon ./crates/daemon/
 
 # Build release binary
-RUN cargo build -p omni-daemon --release
+RUN cargo build -p omninervous --release
 
 # Runtime stage - minimal image
 FROM debian:bookworm-slim
@@ -30,8 +30,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binary from builder
-COPY --from=builder /usr/src/omni/target/release/omni-daemon /usr/local/bin/
+COPY --from=builder /usr/src/omni/target/release/omninervous /usr/local/bin/
 
 # Default command
-ENTRYPOINT ["/usr/local/bin/omni-daemon"]
+ENTRYPOINT ["/usr/local/bin/omninervous"]
 CMD ["--mode", "nucleus", "--port", "51820"]

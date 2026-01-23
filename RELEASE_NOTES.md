@@ -1,5 +1,31 @@
 # Release Notes
 
+## v0.2.3: Architecture Refinement - "Omninervous Rebranding & STUN Resilience"
+
+**Date:** 2026-01-23
+
+This release introduces a significant rebranding from `omni-daemon` to **omninervous** and implements a highly resilient NAT traversal mechanism with built-in STUN fallback. Performance has also been further optimized, cross-region testing now showing over 370 Mbps.
+
+### 🚀 Major Achievements
+
+*   **Omninervous Rebranding**: The project has been fully rebranded to `omninervous` across all packages, binaries, and documentation.
+*   **STUN Fallback Mechanism**: Implemented a multi-stage NAT discovery system that attempts public STUN (Google) and falls back to a built-in STUN service on the Nucleus.
+*   **371.35 Mbps Breakthrough**: Achieved a new throughput milestone in Jan 23 cloud tests, demonstrating 107.5% baseline efficiency.
+
+### 📊 Benchmark Results (Jan 23 Cloud Test)
+
+| Metric | v0.2.2 | v0.2.3 (Refined) | Improvement |
+| :--- | :--- | :--- | :--- |
+| **Throughput** | 133.24 Mbps | **371.35 Mbps** | **+178%** |
+| **Efficiency** | 97.2% | **107.5%** | **+10.3%** |
+
+### 🛠️ Changes
+
+*   **Rebranding**: Renamed package and binary to `omninervous` in `Cargo.toml`, `Dockerfile`, and all scripts.
+*   **Signaling**: Added `MSG_STUN_QUERY` and `MSG_STUN_RESPONSE` to the signaling protocol.
+*   **STUN**: Implemented a standard STUN binding request client with XOR-MAPPED-ADDRESS support.
+*   **Documentation**: Fully synchronized `WHITEPAPER.md` and `README.md` with the new architecture.
+
 ## v0.2.2: Phase 7.2 Milestone - "90%+ Baseline Performance Optimization"
 
 **Date:** 2026-01-20

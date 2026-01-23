@@ -8,9 +8,9 @@
 $ErrorActionPreference = "Stop"
 
 # Configuration
-$ImageName = "omni-daemon-build-local"
-$BinaryName = "omni-daemon"
-$OutputPath = "scripts/omni-daemon-linux-amd64"
+$ImageName = "omninervous-build-local"
+$BinaryName = "omninervous"
+$OutputPath = "scripts/omninervous-linux-amd64"
 
 # Get project root
 $ScriptDir = $PSScriptRoot

@@ -24,6 +24,8 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, Ipv4Addr};
 use std::time::{Instant, Duration};
 use tokio::net::UdpSocket;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 /// Message types for signaling protocol
 const MSG_REGISTER: u8 = 0x01;
@@ -34,9 +36,19 @@ const MSG_QUERY_PEER: u8 = 0x05;
 const MSG_PEER_INFO: u8 = 0x06;
 #[allow(dead_code)]
 const MSG_DEREGISTER: u8 = 0x07;
+const MSG_STUN_QUERY: u8 = 0x08;
+const MSG_STUN_RESPONSE: u8 = 0x09;
+pub const MSG_NAT_PUNCH: u8 = 0x0A;
 
 /// How long peers stay in "recent" list for delta updates
 const RECENT_PEER_WINDOW_SECS: u64 = 90; // 3x heartbeat interval
+
+/// Maximum length for cluster names to prevent resource exhaustion
+const MAX_CLUSTER_NAME_LEN: usize = 64;
+
+fn is_valid_cluster(name: &str) -> bool {
+    !name.is_empty() && name.len() <= MAX_CLUSTER_NAME_LEN && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
 
 /// Registration message from Edge to Nucleus
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -45,6 +57,7 @@ pub struct RegisterMessage {
     pub vip: Ipv4Addr,
     pub listen_port: u16,
     pub public_key: [u8; 32],
+    pub hmac_tag: Option<[u8; 32]>,
 }
 
 /// Registration acknowledgment (includes recent peers for initial discovery)
@@ -52,6 +65,7 @@ pub struct RegisterMessage {
 pub struct RegisterAckMessage {
     pub success: bool,
     pub recent_peers: Vec<PeerInfo>,  // Peers that joined in last 90s
+    pub hmac_tag: Option<[u8; 32]>,
 }
 
 /// Heartbeat from Edge to Nucleus
@@ -60,6 +74,7 @@ pub struct HeartbeatMessage {
     pub cluster: String,
     pub vip: Ipv4Addr,
     pub last_seen_count: u32,  // Number of peers edge knows about
+    pub hmac_tag: Option<[u8; 32]>,
 }
 
 /// Heartbeat acknowledgment with delta updates
@@ -67,6 +82,7 @@ pub struct HeartbeatMessage {
 pub struct HeartbeatAckMessage {
     pub new_peers: Vec<PeerInfo>,      // Joined since last heartbeat
     pub removed_vips: Vec<Ipv4Addr>,   // Left since last heartbeat
+    pub hmac_tag: Option<[u8; 32]>,
 }
 
 /// Query for a specific peer by VIP
@@ -75,6 +91,7 @@ pub struct QueryPeerMessage {
     pub cluster: String,
     pub target_vip: Ipv4Addr,
     pub requester_vip: Ipv4Addr,
+    pub hmac_tag: Option<[u8; 32]>,
 }
 
 /// Peer info response (single peer)
@@ -90,6 +107,13 @@ pub struct PeerInfo {
 pub struct PeerInfoMessage {
     pub found: bool,
     pub peer: Option<PeerInfo>,
+    pub hmac_tag: Option<[u8; 32]>,
+}
+
+/// STUN-like response with public endpoint
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StunResponse {
+    pub public_addr: String, // "ip:port"
 }
 
 /// Registered peer on Nucleus with join time tracking
@@ -254,11 +278,21 @@ pub fn encode_message(msg_type: u8, payload: &impl Serialize) -> Result<Vec<u8>>
     Ok(data)
 }
 
+/// Helper to sign a slice of bytes with a secret
+fn calculate_hmac(secret: &str, data: &[u8]) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(data);
+    let result = mac.finalize();
+    result.into_bytes().into()
+}
+
 /// Handle incoming signaling message (Nucleus side)
 pub fn handle_nucleus_message(
     state: &mut NucleusState,
     data: &[u8],
     src: SocketAddr,
+    secret: Option<&str>,
 ) -> Option<Vec<u8>> {
     if data.is_empty() {
         return None;
@@ -271,6 +305,21 @@ pub fn handle_nucleus_message(
         MSG_REGISTER => {
             match serde_cbor::from_slice::<RegisterMessage>(payload) {
                 Ok(reg) => {
+                    if !is_valid_cluster(&reg.cluster) {
+                        warn!("Invalid cluster name in REGISTER from {}: {}", src, reg.cluster);
+                        return None;
+                    }
+                    if let Some(s) = secret {
+                        let mut check_reg = reg.clone();
+                        check_reg.hmac_tag = None;
+                        let check_bytes = serde_cbor::to_vec(&check_reg).ok()?;
+                        let expected = calculate_hmac(s, &check_bytes);
+                        if reg.hmac_tag != Some(expected) {
+                            warn!("HMAC verification failed for REGISTER from {}", src);
+                            return None;
+                        }
+                    }
+
                     let peer = RegisteredPeer {
                         vip: reg.vip,
                         endpoint: src,
@@ -281,10 +330,17 @@ pub fn handle_nucleus_message(
                     };
                     let recent_peers = state.register(&reg.cluster, peer);
                     
-                    let ack = RegisterAckMessage {
+                    let mut ack = RegisterAckMessage {
                         success: true,
                         recent_peers,
+                        hmac_tag: None,
                     };
+
+                    if let Some(s) = secret {
+                        let bytes = serde_cbor::to_vec(&ack).ok()?;
+                        ack.hmac_tag = Some(calculate_hmac(s, &bytes));
+                    }
+
                     encode_message(MSG_REGISTER_ACK, &ack).ok()
                 }
                 Err(e) => {
@@ -296,8 +352,35 @@ pub fn handle_nucleus_message(
         MSG_HEARTBEAT => {
             match serde_cbor::from_slice::<HeartbeatMessage>(payload) {
                 Ok(hb) => {
+                    if !is_valid_cluster(&hb.cluster) {
+                        warn!("Invalid cluster name in HEARTBEAT from {}: {}", src, hb.cluster);
+                        return None;
+                    }
+
+                    if let Some(s) = secret {
+                        let mut check_hb = hb.clone();
+                        check_hb.hmac_tag = None;
+                        let check_bytes = serde_cbor::to_vec(&check_hb).ok()?;
+                        let expected = calculate_hmac(s, &check_bytes);
+                        if hb.hmac_tag != Some(expected) {
+                            warn!("HMAC verification failed for HEARTBEAT from {}", src);
+                            return None;
+                        }
+                    }
+
                     let (new_peers, removed_vips) = state.heartbeat(&hb.cluster, hb.vip, None);
-                    let ack = HeartbeatAckMessage { new_peers, removed_vips };
+                    
+                    let mut ack = HeartbeatAckMessage { 
+                        new_peers, 
+                        removed_vips,
+                        hmac_tag: None,
+                    };
+
+                    if let Some(s) = secret {
+                        let bytes = serde_cbor::to_vec(&ack).ok()?;
+                        ack.hmac_tag = Some(calculate_hmac(s, &bytes));
+                    }
+
                     encode_message(MSG_HEARTBEAT_ACK, &ack).ok()
                 }
                 Err(e) => {
@@ -309,11 +392,34 @@ pub fn handle_nucleus_message(
         MSG_QUERY_PEER => {
             match serde_cbor::from_slice::<QueryPeerMessage>(payload) {
                 Ok(query) => {
+                    if !is_valid_cluster(&query.cluster) {
+                        warn!("Invalid cluster name in QUERY_PEER from {}: {}", src, query.cluster);
+                        return None;
+                    }
+
+                    if let Some(s) = secret {
+                        let mut check_query = query.clone();
+                        check_query.hmac_tag = None;
+                        let check_bytes = serde_cbor::to_vec(&check_query).ok()?;
+                        let expected = calculate_hmac(s, &check_bytes);
+                        if query.hmac_tag != Some(expected) {
+                            warn!("HMAC verification failed for QUERY_PEER from {}", src);
+                            return None;
+                        }
+                    }
+
                     let peer = state.query_peer(&query.cluster, query.target_vip);
-                    let response = PeerInfoMessage {
+                    let mut response = PeerInfoMessage {
                         found: peer.is_some(),
                         peer,
+                        hmac_tag: None,
                     };
+
+                    if let Some(s) = secret {
+                        let bytes = serde_cbor::to_vec(&response).ok()?;
+                        response.hmac_tag = Some(calculate_hmac(s, &bytes));
+                    }
+
                     encode_message(MSG_PEER_INFO, &response).ok()
                 }
                 Err(e) => {
@@ -321,6 +427,13 @@ pub fn handle_nucleus_message(
                     None
                 }
             }
+        }
+        MSG_STUN_QUERY => {
+            // Echo back the source address
+            let response = StunResponse {
+                public_addr: src.to_string(),
+            };
+            encode_message(MSG_STUN_RESPONSE, &response).ok()
         }
         _ => {
             debug!("Unknown message type {} from {}", msg_type, src);
@@ -330,12 +443,14 @@ pub fn handle_nucleus_message(
 }
 
 /// Edge client for connecting to Nucleus
+#[derive(Clone)]
 pub struct NucleusClient {
     nucleus_addr: SocketAddr,
     cluster: String,
     vip: Ipv4Addr,
     listen_port: u16,
     public_key: [u8; 32],
+    secret: Option<String>,
 }
 
 impl NucleusClient {
@@ -345,6 +460,7 @@ impl NucleusClient {
         public_key: [u8; 32],
         vip: Ipv4Addr,
         listen_port: u16,
+        secret: Option<String>,
     ) -> Result<Self> {
         use tokio::net::lookup_host;
         let nucleus_addr = lookup_host(nucleus)
@@ -359,17 +475,25 @@ impl NucleusClient {
             vip,
             listen_port,
             public_key,
+            secret,
         })
     }
 
     /// Send registration to nucleus
     pub async fn register(&self, socket: &UdpSocket) -> Result<()> {
-        let msg = RegisterMessage {
+        let mut msg = RegisterMessage {
             cluster: self.cluster.clone(),
             vip: self.vip,
             listen_port: self.listen_port,
             public_key: self.public_key,
+            hmac_tag: None,
         };
+
+        if let Some(s) = &self.secret {
+            let bytes = serde_cbor::to_vec(&msg)?;
+            msg.hmac_tag = Some(calculate_hmac(s, &bytes));
+        }
+
         let data = encode_message(MSG_REGISTER, &msg)?;
         socket.send_to(&data, self.nucleus_addr).await?;
         info!("Registered with nucleus {} (cluster: {}, vip: {})", 
@@ -379,24 +503,46 @@ impl NucleusClient {
 
     /// Send heartbeat to nucleus
     pub async fn heartbeat(&self, socket: &UdpSocket, known_peer_count: u32) -> Result<()> {
-        let msg = HeartbeatMessage {
+        let mut msg = HeartbeatMessage {
             cluster: self.cluster.clone(),
             vip: self.vip,
             last_seen_count: known_peer_count,
+            hmac_tag: None,
         };
+
+        if let Some(s) = &self.secret {
+            let bytes = serde_cbor::to_vec(&msg)?;
+            msg.hmac_tag = Some(calculate_hmac(s, &bytes));
+        }
+
         let data = encode_message(MSG_HEARTBEAT, &msg)?;
         socket.send_to(&data, self.nucleus_addr).await?;
         debug!("Sent heartbeat to nucleus");
         Ok(())
     }
 
+    /// Query public endpoint from built-in STUN on Nucleus
+    pub async fn query_stun(&self, socket: &UdpSocket) -> Result<()> {
+        let data = vec![MSG_STUN_QUERY];
+        socket.send_to(&data, self.nucleus_addr).await?;
+        debug!("Sent STUN query to nucleus");
+        Ok(())
+    }
+
     /// Query specific peer by VIP
     pub async fn query_peer(&self, socket: &UdpSocket, target_vip: Ipv4Addr) -> Result<()> {
-        let msg = QueryPeerMessage {
+        let mut msg = QueryPeerMessage {
             cluster: self.cluster.clone(),
             target_vip,
             requester_vip: self.vip,
+            hmac_tag: None,
         };
+
+        if let Some(s) = &self.secret {
+            let bytes = serde_cbor::to_vec(&msg)?;
+            msg.hmac_tag = Some(calculate_hmac(s, &bytes));
+        }
+
         let data = encode_message(MSG_QUERY_PEER, &msg)?;
         socket.send_to(&data, self.nucleus_addr).await?;
         debug!("Queried peer {}", target_vip);
@@ -418,27 +564,63 @@ impl NucleusClient {
 }
 
 /// Parse REGISTER_ACK response
-pub fn parse_register_ack(data: &[u8]) -> Result<RegisterAckMessage> {
+pub fn parse_register_ack(data: &[u8], secret: Option<&str>) -> Result<RegisterAckMessage> {
     if data.is_empty() || data[0] != MSG_REGISTER_ACK {
         anyhow::bail!("Not a REGISTER_ACK message");
     }
-    serde_cbor::from_slice(&data[1..]).context("Failed to decode REGISTER_ACK")
+    let ack: RegisterAckMessage = serde_cbor::from_slice(&data[1..])
+        .context("Failed to decode REGISTER_ACK")?;
+    
+    if let Some(s) = secret {
+        let mut check_ack = ack.clone();
+        check_ack.hmac_tag = None;
+        let bytes = serde_cbor::to_vec(&check_ack)?;
+        let expected = calculate_hmac(s, &bytes);
+        if ack.hmac_tag != Some(expected) {
+            anyhow::bail!("HMAC verification failed for REGISTER_ACK");
+        }
+    }
+    Ok(ack)
 }
 
 /// Parse HEARTBEAT_ACK response
-pub fn parse_heartbeat_ack(data: &[u8]) -> Result<HeartbeatAckMessage> {
+pub fn parse_heartbeat_ack(data: &[u8], secret: Option<&str>) -> Result<HeartbeatAckMessage> {
     if data.is_empty() || data[0] != MSG_HEARTBEAT_ACK {
         anyhow::bail!("Not a HEARTBEAT_ACK message");
     }
-    serde_cbor::from_slice(&data[1..]).context("Failed to decode HEARTBEAT_ACK")
+    let ack: HeartbeatAckMessage = serde_cbor::from_slice(&data[1..])
+        .context("Failed to decode HEARTBEAT_ACK")?;
+
+    if let Some(s) = secret {
+        let mut check_ack = ack.clone();
+        check_ack.hmac_tag = None;
+        let bytes = serde_cbor::to_vec(&check_ack)?;
+        let expected = calculate_hmac(s, &bytes);
+        if ack.hmac_tag != Some(expected) {
+            anyhow::bail!("HMAC verification failed for HEARTBEAT_ACK");
+        }
+    }
+    Ok(ack)
 }
 
 /// Parse PEER_INFO response
-pub fn parse_peer_info(data: &[u8]) -> Result<PeerInfoMessage> {
+pub fn parse_peer_info(data: &[u8], secret: Option<&str>) -> Result<PeerInfoMessage> {
     if data.is_empty() || data[0] != MSG_PEER_INFO {
         anyhow::bail!("Not a PEER_INFO message");
     }
-    serde_cbor::from_slice(&data[1..]).context("Failed to decode PEER_INFO")
+    let info: PeerInfoMessage = serde_cbor::from_slice(&data[1..])
+        .context("Failed to decode PEER_INFO")?;
+
+    if let Some(s) = secret {
+        let mut check_info = info.clone();
+        check_info.hmac_tag = None;
+        let bytes = serde_cbor::to_vec(&check_info)?;
+        let expected = calculate_hmac(s, &bytes);
+        if info.hmac_tag != Some(expected) {
+            anyhow::bail!("HMAC verification failed for PEER_INFO");
+        }
+    }
+    Ok(info)
 }
 
 /// Check if message is a signaling message (from nucleus)
@@ -452,7 +634,17 @@ pub fn get_signaling_type(data: &[u8]) -> Option<u8> {
     data.first().copied()
 }
 
+/// Parse STUN_RESPONSE
+pub fn parse_stun_response(data: &[u8]) -> Result<StunResponse> {
+    if data.is_empty() || data[0] != MSG_STUN_RESPONSE {
+        anyhow::bail!("Not a STUN_RESPONSE message");
+    }
+    serde_cbor::from_slice(&data[1..]).context("Failed to decode STUN_RESPONSE")
+}
+
 // Re-export constants for matching
 pub const SIGNALING_REGISTER_ACK: u8 = MSG_REGISTER_ACK;
 pub const SIGNALING_HEARTBEAT_ACK: u8 = MSG_HEARTBEAT_ACK;
 pub const SIGNALING_PEER_INFO: u8 = MSG_PEER_INFO;
+pub const SIGNALING_STUN_RESPONSE: u8 = MSG_STUN_RESPONSE;
+pub const SIGNALING_NAT_PUNCH: u8 = MSG_NAT_PUNCH;

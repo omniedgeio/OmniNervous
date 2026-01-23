@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use log::info;
 use std::fs;
 use std::path::PathBuf;
+use rand::rngs::OsRng;
+use rand::RngCore;
 
 /// Default path for identity key storage
 const DEFAULT_IDENTITY_DIR: &str = ".omni";
@@ -18,9 +20,7 @@ impl Identity {
     /// Generate a new random identity.
     pub fn generate() -> Self {
         let mut private_key = [0u8; 32];
-        for i in 0..32 {
-            private_key[i] = rand::random();
-        }
+        OsRng.fill_bytes(&mut private_key);
         
         // For Ed25519, the public key is derived from the private key
         // In a real implementation, use `ed25519-dalek` crate

@@ -33,7 +33,7 @@ services:
         if [ ! -d /dev/net ]; then mkdir -p /dev/net; fi
         if [ ! -e /dev/net/tun ]; then mknod /dev/net/tun c 10 200; fi
         chmod 666 /dev/net/tun
-        exec omni-daemon --nucleus 10.0.0.2:51820 --cluster local-test --secret test-secret-minimum16 --vip 10.200.0.10 --port 51820
+        exec omninervous --nucleus 10.0.0.2:51820 --cluster local-test --secret test-secret-minimum16 --vip 10.200.0.10 --port 51820
     depends_on:
       - nucleus
     networks:
@@ -61,7 +61,7 @@ services:
         if [ ! -d /dev/net ]; then mkdir -p /dev/net; fi
         if [ ! -e /dev/net/tun ]; then mknod /dev/net/tun c 10 200; fi
         chmod 666 /dev/net/tun
-        exec omni-daemon --nucleus 10.0.0.2:51820 --cluster local-test --secret test-secret-minimum16 --vip 10.200.0.20 --port 51821
+        exec omninervous --nucleus 10.0.0.2:51820 --cluster local-test --secret test-secret-minimum16 --vip 10.200.0.20 --port 51821
     depends_on:
       - nucleus
     networks:
