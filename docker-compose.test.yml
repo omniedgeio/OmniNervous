@@ -1,0 +1,95 @@
+services:
+  # The Nucleus (Rendezvous & Signaling Node)
+  nucleus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omni-nucleus
+    environment:
+      - RUST_LOG=debug
+    command: ["--mode", "nucleus", "--port", "51820"]
+    networks:
+      omni-fabric:
+        ipv4_address: 10.0.0.2
+
+  # Edge Node A
+  edge-a:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omni-edge-a
+    privileged: true  # Required for TUN device
+    environment:
+      - RUST_LOG=debug
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Create TUN device if missing
+        if [ ! -d /dev/net ]; then mkdir -p /dev/net; fi
+        if [ ! -e /dev/net/tun ]; then mknod /dev/net/tun c 10 200; fi
+        chmod 666 /dev/net/tun
+        exec omninervous --nucleus 10.0.0.2:51820 --cluster local-test --secret test-secret-minimum16 --vip 10.200.0.10 --port 51820
+    depends_on:
+      - nucleus
+    networks:
+      omni-fabric:
+        ipv4_address: 10.0.0.10
+
+  # Edge Node B
+  edge-b:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omni-edge-b
+    privileged: true  # Required for TUN device
+    environment:
+      - RUST_LOG=debug
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Create TUN device if missing
+        if [ ! -d /dev/net ]; then mkdir -p /dev/net; fi
+        if [ ! -e /dev/net/tun ]; then mknod /dev/net/tun c 10 200; fi
+        chmod 666 /dev/net/tun
+        exec omninervous --nucleus 10.0.0.2:51820 --cluster local-test --secret test-secret-minimum16 --vip 10.200.0.20 --port 51821
+    depends_on:
+      - nucleus
+    networks:
+      omni-fabric:
+        ipv4_address: 10.0.0.20
+
+  # Test runner
+  tester:
+    image: ubuntu:22.04
+    container_name: omni-tester
+    privileged: true
+    depends_on:
+      - nucleus
+      - edge-a
+      - edge-b
+    volumes:
+      - ./scripts:/scripts:ro
+    command: >
+      bash -c "apt-get update -qq && apt-get install -y -qq iputils-ping iperf3 > /dev/null && 
+               echo 'Waiting 40s for heartbeat cycle + handshake...' &&
+               sleep 40 && /scripts/auto_test_docker.sh"
+    networks:
+      omni-fabric:
+        ipv4_address: 10.0.0.100
+
+networks:
+  omni-fabric:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.0/24

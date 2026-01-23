@@ -3,47 +3,9 @@
 > [!IMPORTANT]
 > **OmniNervous** is an open-source, high-performance P2P VPN daemon built in **Rust**. It provides secure mesh networking with sub-millisecond latency using a signaling protocol and WireGuard data plane.
 
-## Architecture Overview
+## Architecture
 
-OmniNervous implements a dual-plane design with separate control and data paths:
-
-### Ganglion (Control Plane)
-Asynchronous Rust daemon (`tokio`) handling signaling and peer management:
-- **Built-in STUN**: Nucleus acts as a zero-config STUN server for instant NAT traversal
-- **Authenticated Signaling**: HMAC-SHA256 verification via shared cluster secret (`--secret`)
-- **Secure Identity**: Cryptographically secure identity generation using OS-level entropy (`OsRng`)
-- **Identity Pinning**: Trust On First Use (TOFU) mechanism to prevent MITM attacks via signaling
-
-### WireGuard (Data Plane)
-WireGuard CLI integration:
-- **Kernel-Optimized**: Uses Linux kernel WireGuard module when available
-- **Native Efficiency**: Powered by WireGuard's high-speed ChaCha20-Poly1305 transport
-- **Session Management**: Automatic peer configuration and keepalive
-
-```mermaid
-graph LR
-    subgraph "Edge Node A"
-        G_A[Ganglion<br/>Signaling]
-        WG_A[WireGuard<br/>Data Plane]
-    end
-
-    subgraph "Nucleus Server"
-        N[The Nucleus]
-    end
-
-    subgraph "Edge Node B"
-        G_B[Ganglion<br/>Signaling]
-        WG_B[WireGuard<br/>Data Plane]
-    end
-
-    G_A <-->|UDP/CBOR<br/>Signaling| N
-    G_B <-->|UDP/CBOR<br/>Signaling| N
-    WG_A <==>|Encrypted Tunnel<br/>WireGuard| WG_B
-
-    style WG_A fill:#2d5a3d,color:#fff
-    style WG_B fill:#2d5a3d,color:#fff
-    style N fill:#2d3a5a,color:#fff
-```
+OmniNervous uses a dual-plane design: control plane for signaling and peer management, data plane using WireGuard for encrypted tunnels.
 
 ---
 
@@ -117,81 +79,6 @@ sudo ./target/release/omninervous \
 
 ---
 
-## Architecture Overview
-
-### Dual-Plane Design
-- **Control Plane**: Async Rust daemon (`tokio`) handling signaling and peer management
-- **Data Plane**: WireGuard CLI integration
-
-### Core Components
-
-#### Signaling Protocol (`signaling.rs`)
-- **REGISTER**: Peer registration with cluster, VIP, public key
-- **HEARTBEAT**: 30s interval with delta updates (O(1) lookups)
-- **QUERY_PEER**: On-demand peer discovery
-- **STUN**: Built-in NAT traversal service
-- **Security**: HMAC-SHA256 authentication with cluster PSK
-
-#### Peer Management (`peers.rs`)
-- **Routing Table**: VIP → endpoint mapping with 2-minute TTL
-- **Identity Pinning**: TOFU-based MITM protection
-- **Cleanup**: Automatic stale peer removal
-
-#### Identity System (`identity.rs`)
-- **Algorithm**: X25519 keypairs from OS-level entropy
-- **Storage**: Encrypted files with 0o600 permissions
-- **Validation**: Keypair integrity checks on load
-
-#### WireGuard Integration (`wg.rs`)
-- **CLI Control**: Direct `wg` command execution
-- **Peer Config**: Dynamic endpoint/allowed-IPs setup
-- **Persistent Keepalive**: 25s for NAT maintenance
-
-#### Message Handler (`handler.rs`)
-- **Packet Processing**: Signaling message routing
-- **Peer Discovery**: Automatic WG peer configuration
-- **NAT Punching**: Proactive UDP hole punching
-
-#### Monitoring (`metrics.rs`, `http.rs`)
-- **Prometheus**: `/metrics` endpoint (port 9090)
-- **Counters**: Sessions, packets, handshakes, failures
-- **Health**: `/health` endpoint
-
-#### Configuration (`config.rs`)
-- **TOML Format**: Hierarchical daemon/network/security sections
-- **Fallback Paths**: `/etc/omni/config.toml`, `~/.omni/config.toml`
-- **Validation**: Cluster name restrictions, rate limits
-
----
-
-## Nucleus Signaling Protocol
-
-Scalable for 1000+ edges per cluster with O(1) lookups:
-
-```
-Nucleus State:
-  Cluster "robotics" → HashMap<VIP, Peer>  O(1)
-  Cluster "factory"  → HashMap<VIP, Peer>  O(1)
-
-Message Flow:
-  REGISTER          →  REGISTER_ACK (recent peers)
-  HEARTBEAT         →  HEARTBEAT_ACK (delta: new + removed)
-  QUERY_PEER        →  PEER_INFO (single peer)
-  NAT_PUNCH         →  Hole punching trigger
-```
-
-**NAT Traversal Priority**:
-1. **Built-in Nucleus STUN** (Primary, zero-config)
-2. **User-configured STUNs** (CLI `--stun` / `--stuns`)
-3. **Internal Public Fallback List** (stun.rs: 10+ reliable servers)
-
-**Bandwidth Optimization**:
-- No full peer lists (prevents O(n²) broadcasts)
-- Delta-only updates: ~100 KB/30s for 1000 edges
-- Recent peer window: 90 seconds (3x heartbeat)
-
----
-
 ## Security Features
 
 | Feature | Implementation |
@@ -221,18 +108,20 @@ Message Flow:
 docker build -t omninervous:latest .
 ```
 
-**2. Run with docker-compose (3-node test cluster):**
+**2. Deploy the nucleus (signaling server):**
 ```bash
 docker-compose up -d
 ```
 
-This starts:
-- `omni-nucleus`: Signaling server at 10.0.0.2
-- `omni-edge-a`: Edge node with VIP 10.200.0.10
-- `omni-edge-b`: Edge node with VIP 10.200.0.20
-- `omni-tester`: Validation container
+This starts the signaling server on port 51820.
 
-**3. View logs:**
+**Testing with docker-compose:**
+For a full test cluster (nucleus + 2 edges + tester), use `docker-compose.test.yml`:
+```bash
+docker-compose -f docker-compose.test.yml up -d
+```
+
+**View logs:**
 ```bash
 docker-compose logs -f
 ```
@@ -308,7 +197,8 @@ This deploys binaries, runs baseline iperf3 tests, establishes WireGuard tunnel,
 OmniNervous/
 ├── Cargo.toml                   # Workspace configuration
 ├── Dockerfile                   # Multi-stage Docker build
-├── docker-compose.yml           # 3-node test cluster
+├── docker-compose.yml           # Nucleus deployment
+├── docker-compose.test.yml     # 3-node test cluster
 ├── config.example.toml          # Configuration template
 ├── LICENSING.md                 # License information
 ├── README.md                    # Project documentation
@@ -337,6 +227,13 @@ OmniNervous/
         └── test.yml             # Integration tests
 ```
 
+---
+
+## Documentation
+
+- **[RELEASE_NOTES.md](RELEASE_NOTES.md)**: Version history and changelog
+
+---
 
 ## License
 
