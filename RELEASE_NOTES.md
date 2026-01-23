@@ -1,10 +1,17 @@
 # Release Notes
 
-## v0.2.3: Architecture Refinement - "Omninervous Rebranding & STUN Resilience"
+## v0.2.3: Security Hardening & Zero-Config Roadmap
 
 **Date:** 2026-01-23
 
-This release introduces a significant rebranding from `omni-daemon` to **omninervous** and implements a highly resilient NAT traversal mechanism with built-in STUN fallback. Performance has also been further optimized, cross-region testing now showing over 370 Mbps.
+This release focuses on hardening the security posture with HMAC signaling authentication and Identity Pinning (TOFU), alongside a rebranding to **omninervous** and preparation for a unified userspace data plane.
+
+### 🛡️ Security Hardening
+
+*   **HMAC-SHA256 Signaling**: All signaling messages (REGISTER, HEARTBEAT, etc.) are now authenticated using a Cluster Secret, preventing unauthorized node registration.
+*   **Identity Pinning (TOFU)**: Implemented "Trust On First Use" for peer identities. Once a Virtual IP is claimed by a public key, it is pinned to that key, preventing Man-in-the-Middle attacks.
+*   **Cryptographic Strength**: Switched to `rand::rngs::OsRng` for secure private key generation.
+*   **File Permissions**: Enforced `0600` permissions on identity files for secure userspace storage.
 
 ### 🚀 Major Achievements
 
@@ -24,7 +31,6 @@ This release introduces a significant rebranding from `omni-daemon` to **omniner
 *   **Rebranding**: Renamed package and binary to `omninervous` in `Cargo.toml`, `Dockerfile`, and all scripts.
 *   **Signaling**: Added `MSG_STUN_QUERY` and `MSG_STUN_RESPONSE` to the signaling protocol.
 *   **STUN**: Implemented a standard STUN binding request client with XOR-MAPPED-ADDRESS support.
-*   **Documentation**: Fully synchronized `WHITEPAPER.md` and `README.md` with the new architecture.
 
 ## v0.2.2: Phase 7.2 Milestone - "90%+ Baseline Performance Optimization"
 
