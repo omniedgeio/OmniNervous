@@ -25,3 +25,6 @@ omni-ebpf.elf
 
 # Test Results
 test_results/
+
+# Documentation
+docs/
