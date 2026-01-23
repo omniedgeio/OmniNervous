@@ -1,7 +1,7 @@
 # OmniNervous: High-Performance P2P VPN for AI & Robotics
 
 > [!IMPORTANT]
-> **OmniNervous** is an open-source, high-performance P2P VPN daemon built in **Rust**. It combines the Noise IK protocol with native WireGuard integration for secure mesh networking with sub-millisecond latency.
+> **OmniNervous** is an open-source, high-performance P2P VPN daemon built in **Rust**. It provides secure mesh networking with sub-millisecond latency using a signaling protocol and WireGuard data plane.
 
 ## Architecture Overview
 
@@ -15,7 +15,7 @@ Asynchronous Rust daemon (`tokio`) handling signaling and peer management:
 - **Identity Pinning**: Trust On First Use (TOFU) mechanism to prevent MITM attacks via signaling
 
 ### WireGuard (Data Plane)
-Native WireGuard integration via `defguard_wireguard_rs`:
+WireGuard CLI integration:
 - **Kernel-Optimized**: Uses Linux kernel WireGuard module when available
 - **Native Efficiency**: Powered by WireGuard's high-speed ChaCha20-Poly1305 transport
 - **Session Management**: Automatic peer configuration and keepalive
@@ -121,7 +121,7 @@ sudo ./target/release/omninervous \
 
 ### Dual-Plane Design
 - **Control Plane**: Async Rust daemon (`tokio`) handling signaling and peer management
-- **Data Plane**: Native WireGuard integration via `defguard_wireguard_rs`
+- **Data Plane**: WireGuard CLI integration
 
 ### Core Components
 
@@ -197,7 +197,7 @@ Message Flow:
 | Feature | Implementation |
 |:---|:---|
 | **Identity** | X25519 keys stored with 0o600 permissions |
-| **Handshake** | Noise IK with PSK authentication |
+| **Signaling Auth** | HMAC-SHA256 with cluster PSK |
 | **Encryption** | ChaCha20-Poly1305 or AES256-GCM |
 | **Forward Secrecy** | Ephemeral key rotation per session |
 | **Peer Auth** | Cluster-based PSK validation |
