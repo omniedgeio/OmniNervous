@@ -415,7 +415,7 @@ async fn main() -> Result<()> {
         let mut handler = MessageHandler {
             socket: &socket,
             peer_table: &mut peer_table,
-            wg_api: wg_api_opt.as_ref(),
+            wg_api: wg_api_opt.as_mut(),
             metrics: &_metrics,
             nucleus_state: &mut nucleus_state,
             nucleus_client: nucleus_client.as_ref(),
