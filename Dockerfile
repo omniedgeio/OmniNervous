@@ -19,15 +19,15 @@ COPY crates/daemon ./crates/daemon/
 # Build release binary
 RUN cargo build -p omninervous --release
 
-# Runtime stage - minimal image
-FROM debian:bookworm-slim
+# Runtime stage - minimal image with compatible glibc
+FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
     iproute2 \
     iputils-ping \
     iperf3 \
     wireguard-tools \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copy binary from builder
 COPY --from=builder /usr/src/omni/target/release/omninervous /usr/local/bin/
