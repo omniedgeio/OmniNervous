@@ -26,6 +26,8 @@ use std::time::{Instant, Duration};
 use tokio::net::UdpSocket;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use governor::{RateLimiter, Quota, Jitter};
+use std::num::NonZeroU32;
 
 /// Message types for signaling protocol
 const MSG_REGISTER: u8 = 0x01;
@@ -48,6 +50,16 @@ const MAX_CLUSTER_NAME_LEN: usize = 64;
 
 fn is_valid_cluster(name: &str) -> bool {
     !name.is_empty() && name.len() <= MAX_CLUSTER_NAME_LEN && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+fn is_private_ip(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    // 10.0.0.0/8
+    (octets[0] == 10) ||
+    // 172.16.0.0/12
+    (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) ||
+    // 192.168.0.0/16
+    (octets[0] == 192 && octets[1] == 168)
 }
 
 /// Registration message from Edge to Nucleus
@@ -145,14 +157,26 @@ struct ClusterState {
 
 /// Nucleus state - manages registered peers by cluster
 /// Optimized for 1000+ edges per cluster
-#[derive(Default)]
 pub struct NucleusState {
     clusters: HashMap<String, ClusterState>,
+    rate_limiter: RateLimiter<std::net::IpAddr, governor::state::keyed::DefaultKeyedStateStore<std::net::IpAddr>, governor::clock::DefaultClock>,
+}
+
+impl Default for NucleusState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NucleusState {
     pub fn new() -> Self {
-        Self { clusters: HashMap::new() }
+        // Rate limit: 10 requests per second per IP
+        let quota = Quota::per_second(NonZeroU32::new(10).unwrap());
+        let rate_limiter = RateLimiter::keyed(quota);
+        Self {
+            clusters: HashMap::new(),
+            rate_limiter,
+        }
     }
 
     /// Register or update a peer
@@ -294,6 +318,13 @@ pub fn handle_nucleus_message(
     src: SocketAddr,
     secret: Option<&str>,
 ) -> Option<Vec<u8>> {
+    // Rate limiting: Check if IP is allowed
+    let ip = src.ip();
+    if state.rate_limiter.check_key(&ip).is_err() {
+        warn!("Rate limit exceeded for IP: {}", ip);
+        return None;
+    }
+
     if data.is_empty() {
         return None;
     }
@@ -307,6 +338,10 @@ pub fn handle_nucleus_message(
                 Ok(reg) => {
                     if !is_valid_cluster(&reg.cluster) {
                         warn!("Invalid cluster name in REGISTER from {}: {}", src, reg.cluster);
+                        return None;
+                    }
+                    if !is_private_ip(reg.vip) {
+                        warn!("VIP {} is not in private IP range (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)", reg.vip);
                         return None;
                     }
                     if let Some(s) = secret {
@@ -356,6 +391,10 @@ pub fn handle_nucleus_message(
                         warn!("Invalid cluster name in HEARTBEAT from {}: {}", src, hb.cluster);
                         return None;
                     }
+                    if !is_private_ip(hb.vip) {
+                        warn!("VIP {} is not in private IP range", hb.vip);
+                        return None;
+                    }
 
                     if let Some(s) = secret {
                         let mut check_hb = hb.clone();
@@ -394,6 +433,10 @@ pub fn handle_nucleus_message(
                 Ok(query) => {
                     if !is_valid_cluster(&query.cluster) {
                         warn!("Invalid cluster name in QUERY_PEER from {}: {}", src, query.cluster);
+                        return None;
+                    }
+                    if !is_private_ip(query.target_vip) || !is_private_ip(query.requester_vip) {
+                        warn!("Invalid VIP in QUERY_PEER: target={}, requester={}", query.target_vip, query.requester_vip);
                         return None;
                     }
 

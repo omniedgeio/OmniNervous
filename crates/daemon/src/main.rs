@@ -256,8 +256,7 @@ async fn main() -> Result<()> {
 
     let cluster_secret = if let Some(s) = args.secret {
         if s.len() < 16 {
-            warn!("⚠️ Cluster secret is too short (min 16 chars). Disabling signaling auth.");
-            None
+            anyhow::bail!("Cluster secret must be at least 16 characters for security");
         } else {
             Some(s)
         }
