@@ -78,6 +78,10 @@ struct Args {
     /// Path to config file
     #[arg(long, short = 'C')]
     config: Option<std::path::PathBuf>,
+
+    /// Use userspace WireGuard implementation (cross-platform, no kernel modules)
+    #[arg(long)]
+    userspace: bool,
     
     /// Virtual IP address (e.g., 10.200.0.1)
     #[arg(long)]
@@ -267,10 +271,14 @@ async fn main() -> Result<()> {
     // Create WireGuard interface if VIP is specified
     let wg_api_opt = if let Some(vip) = args.vip {
         let ifname = args.tun_name.clone();
-        let wg_control: Box<dyn WgInterface> = Box::new(CliWgControl::new(&ifname));
+        let wg_control: Box<dyn WgInterface> = if args.userspace {
+            Box::new(UserspaceWgControl::new(&ifname))
+        } else {
+            Box::new(CliWgControl::new(&ifname))
+        };
         
         info!("🔧 Initializing WireGuard interface '{}' with IP {}", ifname, vip);
-        if let Err(e) = wg_control.setup_interface(
+        if let Err(e) = wg_control.setup_interface_sync(
             &vip.to_string(), 
             args.port, 
             &BASE64.encode(identity.private_key_bytes())
