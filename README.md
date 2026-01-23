@@ -27,18 +27,22 @@ Validated on **AWS Lightsail $5 Instances** (3-node cluster, cross-region: us-ea
 ## Quick Start
 
 ### Prerequisites
-- **Rust**: Stable 1.70+
-- **Linux Kernel**: 5.6+ (WireGuard support)
-- **WireGuard Tools**: `wg` and `wg-quick`
+- **Rust**: Stable 1.74+
+- **Linux Kernel**: 5.6+ (for Kernel Mode) OR **TUN/TAP support** (for Userspace Mode)
+- **WireGuard Tools**: `wg` and `wg-quick` (Optional for Userspace Mode)
 
 ### Build
 ```bash
 # Native build
 cargo build --release
 
-# Cross-platform build (Linux AMD64)
-./scripts/build_local_docker.sh
+# Docker-based build (Linux AMD64)
+# This handles local dependencies (e.g. patched boringtun)
+./scripts/build_local_docker.ps1  # Windows
+./scripts/build_local_docker.sh   # Linux/macOS
 ```
+
+The build script will produce a binary at: `scripts/omninervous-linux-amd64`
 
 ### Usage
 
@@ -57,7 +61,8 @@ sudo ./target/release/omninervous --mode nucleus --port 51820
 sudo ./target/release/omninervous \
   --nucleus <nucleus-host>:51820 \
   --cluster <cluster-name> \
-  --vip 10.200.0.1
+  --vip 10.200.0.1 \
+  --userspace  # Recommended for non-root/non-kernel setups
 ```
 
 **Advanced Options:**
@@ -73,6 +78,7 @@ sudo ./target/release/omninervous \
 | `--cluster` | Cluster name | Required |
 | `--vip` | Virtual IP (e.g., 10.200.0.1) | Required |
 | `--port` | UDP port | 51820 |
+| `--userspace` | Use BoringTun userspace implementation | Disabled (Kernel) |
 | `--stun` | STUN server(s) | Built-in fallback |
 | `--secret` | Cluster PSK | Optional |
 | `--init` | Generate identity | - |

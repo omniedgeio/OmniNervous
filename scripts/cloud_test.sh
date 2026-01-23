@@ -45,6 +45,7 @@ VIP_B="10.200.0.20"
 CLUSTER_NAME="${CLUSTER_NAME:-omni-test}"
 CLUSTER_SECRET="${CLUSTER_SECRET:-}"
 STUN_SERVERS=""
+USERSPACE=false
 
 show_help() {
     cat << EOF
@@ -71,9 +72,7 @@ Options:
   --duration      iperf3 test duration (default: 10s)
   --cluster       Cluster name (default: omni-test)
   --secret        Cluster secret (min 16 chars, recommended)
-  --stun          Custom STUN server(s) for edge nodes
-  --skip-build    Skip local cargo build
-  --skip-deploy   Skip binary deployment
+  --userspace     Use userspace WireGuard mode (BoringTun)
   --help          Show this help
 
 Environment Variables:
@@ -89,8 +88,8 @@ Prerequisites:
    - iperf3 installed on edge nodes
    - UDP port $OMNI_PORT open in firewalls
    - SSH access with key authentication
-   - Root access for WireGuard interface creation
-   - WireGuard kernel module installed on edge nodes
+   - Root access for WireGuard/TUN interface creation
+   - WireGuard kernel module (if NOT using --userspace)
 EOF
 }
 
@@ -193,9 +192,9 @@ preflight_check() {
     done
     
     # Check networking tools on edge nodes
-    print_step "Checking networking tools (iproute2, wireguard-tools) on edge nodes..."
+    print_step "Checking networking tools (iproute2) on edge nodes..."
     for node in "$NODE_A" "$NODE_B"; do
-        for cmd in ip wg; do
+        for cmd in ip; do
             if ssh_cmd "$node" "which $cmd" &>/dev/null; then
                 echo -e "  ✅ $cmd command found on $node"
             else
@@ -203,6 +202,13 @@ preflight_check() {
                 errors=$((errors + 1))
             fi
         done
+        
+        if [[ "$USERSPACE" == "false" ]]; then
+            if ! ssh_cmd "$node" "which wg" &>/dev/null; then
+                echo -e "  ❌ wg command NOT found on $node (required for kernel mode)"
+                errors=$((errors + 1))
+            fi
+        fi
     done
 
     if [[ $errors -gt 0 ]]; then
@@ -287,6 +293,13 @@ run_test() {
         echo -e "🌐 Custom STUN discovery enabled"
     fi
     
+    # Build userspace flag
+    local user_flag=""
+    if [[ "$USERSPACE" == "true" ]]; then
+        user_flag="--userspace"
+        echo -e "🚀 Using Userspace (BoringTun) mode"
+    fi
+
     # Kill any existing processes
     print_step "Cleaning up old processes and logs..."
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
@@ -301,12 +314,12 @@ run_test() {
     
     # Start Edge A with VIP
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
-    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_A --port $OMNI_PORT > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_A --port $OMNI_PORT $user_flag > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
     sleep 2
 
     # Start Edge B with VIP
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
-    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_B --port $((OMNI_PORT + 1)) > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_B --port $((OMNI_PORT + 1)) $user_flag > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Wait for WireGuard tunnel establishment (heartbeat cycle is 30s)
@@ -577,6 +590,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-deploy)
             SKIP_DEPLOY=true
+            shift
+            ;;
+        --userspace)
+            USERSPACE=true
             shift
             ;;
         --help|-h)

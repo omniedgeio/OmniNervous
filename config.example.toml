@@ -6,9 +6,10 @@ interface = "eth0"
 log_level = "info"
 
 [network]
-nucleus = "nucleus.omni.io"
-cluster = "ai-robot-fleet"
-stun_server = "stun.l.google.com:19302"
+# nucleus = "nucleus.omni.io"
+# cluster = "ai-robot-fleet"
+stun_servers = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"]
+use_builtin_stun = true
 
 [security]
 # identity_path = "~/.omni/identity.key"

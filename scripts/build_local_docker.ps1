@@ -20,28 +20,36 @@ Write-Host "Building $BinaryName using Docker..."
 Push-Location "$ProjectRoot"
 
 try {
+    # 0. Preparation: Copy local boringtun to build context
+    Write-Host "Staging local boringtun..."
+    $BoringTunSrc = Resolve-Path "$ProjectRoot/../boringtun"
+    $BoringTunDest = "$ProjectRoot/boringtun_temp"
+    
+    if (Test-Path $BoringTunDest) { Remove-Item -Recurse -Force $BoringTunDest }
+    Copy-Item -Recurse -Force "$BoringTunSrc" "$BoringTunDest"
+    
     # 1. Build the Docker image
-    docker build --platform linux/amd64 --no-cache -t "$ImageName" .
+    # Use -f Dockerfile.local
+    docker build -f Dockerfile.local --platform linux/amd64 --no-cache -t "$ImageName" .
     if ($LASTEXITCODE -ne 0) { throw "Docker build failed" }
 
     # 2. Extract the binary
     Write-Host "Extracting binary to $OutputPath..."
-    $ContainerId = docker create "$ImageName"
+    $ContainerId = docker create --platform linux/amd64 "$ImageName"
     if ($LASTEXITCODE -ne 0) { throw "Docker create failed" }
 
     # Ensure output directory exists
-    # If the destination is a file path, 'docker cp' on Windows/Linux works if the parent directory exists.
-    # The parent is 'scripts', which definitely exists.
-    
-    # Note: We use quotes around the source path to handle variables, but avoid backticks unless necessary.
-    # "$ContainerId:/..." is safe.
     docker cp "$ContainerId`:/usr/local/bin/$BinaryName" "$ProjectRoot/$OutputPath"
     if ($LASTEXITCODE -ne 0) { 
         docker rm "$ContainerId" | Out-Null
+        if (Test-Path $BoringTunDest) { Remove-Item -Recurse -Force $BoringTunDest }
         throw "Docker cp failed" 
     }
 
     docker rm "$ContainerId" | Out-Null
+    
+    # Cleanup staged folder
+    if (Test-Path $BoringTunDest) { Remove-Item -Recurse -Force $BoringTunDest }
 
     # 3. Cleanup (optional)
     # docker system prune -f # safer

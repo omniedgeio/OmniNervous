@@ -1,9 +1,16 @@
-# OmniNervous Daemon Docker Image
-# Stage 1: Build Userspace Daemon
+# OmniNervous Daemon Docker Image (Local Build)
+# Includes local boringtun dependency
+
 FROM rust:latest AS builder
 
+WORKDIR /usr/src
+
+# Copy boringtun dependency first
+# Expects 'boringtun_temp' to be present in build context
+COPY boringtun_temp ./boringtun
+
 WORKDIR /usr/src/omni
-ENV CACHE_BREAKER_TIMESTAMP=20260117_0550
+ENV CACHE_BREAKER_TIMESTAMP=20260122_local
 
 # Install build-time dependencies
 RUN apt-get update && apt-get install -y \

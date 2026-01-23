@@ -1,19 +1,45 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
-use log::{info, error};
-// use boringtun::crypto::{X25519PublicKey, X25519SecretKey};
-// use boringtun::noise::{Tunn, TunnResult};
+use tokio::sync::{Mutex, RwLock};
+use log::{info, error, warn, debug};
+use boringtun::noise::{Tunn, TunnResult, errors::WireGuardError};
+use boringtun::x25519::{PublicKey, StaticSecret};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub trait WgInterface {
-    fn setup_interface_sync(&self, vip: &str, port: u16, private_key: &str) -> Result<(), String> {
-        Ok(())
-    }
-    fn set_peer(&mut self, public_key: &str, endpoint: Option<SocketAddr>, allowed_ips: &[String], persistent_keepalive: Option<u32>) -> Result<(), String>;
+/// WgInterface unified enum
+/// Supports both Kernel (CLI) and Userspace (BoringTun) modes.
+#[derive(Clone)]
+pub enum WgInterface {
+    Cli(CliWgControl),
+    Userspace(UserspaceWgControl),
 }
 
+impl WgInterface {
+    pub async fn setup_interface(&mut self, vip: &str, port: u16, private_key: &str) -> Result<(), String> {
+        match self {
+            Self::Cli(c) => c.setup_interface_sync(vip, port, private_key),
+            Self::Userspace(u) => u.setup_tunnel(vip, port, private_key).await,
+        }
+    }
+
+    pub async fn set_peer(&mut self, public_key: &str, endpoint: Option<SocketAddr>, allowed_ips: &[String], persistent_keepalive: Option<u32>) -> Result<(), String> {
+        match self {
+            Self::Cli(c) => c.set_peer_sync(public_key, endpoint, allowed_ips, persistent_keepalive),
+            Self::Userspace(u) => u.set_peer(public_key, endpoint, allowed_ips, persistent_keepalive).await,
+        }
+    }
+
+    pub async fn start_loop(&mut self, socket: Arc<UdpSocket>) -> Result<(), String> {
+        match self {
+            Self::Cli(_) => Ok(()), // No-op for kernel mode
+            Self::Userspace(u) => u.run_packet_loop(socket).await,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct CliWgControl {
     interface: String,
 }
@@ -24,19 +50,18 @@ impl CliWgControl {
             interface: interface.to_string(),
         }
     }
-}
 
-impl WgInterface for CliWgControl {
-    fn setup_interface_sync(&self, vip: &str, port: u16, private_key: &str) -> Result<(), String> {
+    pub fn setup_interface_sync(&self, vip: &str, port: u16, private_key: &str) -> Result<(), String> {
         use std::process::Command;
+        use std::io::Write;
 
-        // 1. Create interface (ignore if exists)
+        // 1. Create interface (ok if exists)
         let _ = Command::new("ip").args(["link", "add", "dev", &self.interface, "type", "wireguard"]).output();
 
         // 2. Set private key and port
         let mut cmd = Command::new("wg");
         cmd.args(["set", &self.interface, "listen-port", &port.to_string(), "private-key", "/dev/stdin"]);
-        use std::io::Write;
+        
         let mut child = cmd.stdin(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -59,7 +84,7 @@ impl WgInterface for CliWgControl {
         Ok(())
     }
 
-    fn set_peer(&mut self, public_key: &str, endpoint: Option<SocketAddr>, allowed_ips: &[String], persistent_keepalive: Option<u32>) -> Result<(), String> {
+    pub fn set_peer_sync(&self, public_key: &str, endpoint: Option<SocketAddr>, allowed_ips: &[String], persistent_keepalive: Option<u32>) -> Result<(), String> {
         use std::process::Command;
 
         let mut cmd = Command::new("wg");
@@ -71,361 +96,277 @@ impl WgInterface for CliWgControl {
         }
 
         if !allowed_ips.is_empty() {
-            cmd.arg("allowed-ips").arg(allowed_ips.join(","));
+             cmd.arg("allowed-ips").arg(allowed_ips.join(","));
         }
 
         if let Some(keepalive) = persistent_keepalive {
             cmd.arg("persistent-keepalive").arg(keepalive.to_string());
         }
 
-        info!("Executing: {:?}", cmd);
-
         match cmd.output() {
-            Ok(output) if output.status.success() => {
-                info!("Successfully configured peer {}", public_key);
-                Ok(())
-            }
-            Ok(output) => {
-                let err = String::from_utf8_lossy(&output.stderr).to_string();
-                error!("Failed to configure peer {}: {}", public_key, err);
-                Err(err)
-            }
-            Err(e) => {
-                let err = e.to_string();
-                error!("Failed to execute wg command: {}", err);
-                Err(err)
-            }
+            Ok(output) if output.status.success() => Ok(()),
+            Ok(output) => Err(String::from_utf8_lossy(&output.stderr).to_string()),
+            Err(e) => Err(e.to_string()),
         }
     }
 }
 
-// pub struct UserspaceWgControl {
-//     interface: String,
-//     device: Option<tun::AsyncDevice>,
-//     tunnel: Option<Arc<Mutex<Tunn>>>,
-//     peers: HashMap<[u8; 32], PeerInfo>,
-// }
+// Inner state shared via Arc
+struct UserspaceInner {
+    // We store the private key here and only initialize Tunn when we have a peer.
+    // BoringTun Tunn is 1-to-1 (Peer Session).
+    private_key: Mutex<Option<StaticSecret>>,
+    tunnel: Mutex<Option<Tunn>>,
+    device: Mutex<Option<tun::AsyncDevice>>,
+    destinations: RwLock<HashMap<IpAddr, SocketAddr>>,
+}
 
-// struct PeerInfo {
-//     endpoint: Option<SocketAddr>,
-//     allowed_ips: Vec<String>,
-// }
-
-// impl UserspaceWgControl {
-//     pub fn new(interface: &str) -> Self {
-//         Self {
-//             interface: interface.to_string(),
-//             device: None,
-//             tunnel: None,
-//             peers: HashMap::new(),
-//         }
-//     }
-
-//     pub async fn setup_tunnel(&mut self, private_key: &str, port: u16) -> Result<(), String> {
-//         // Parse private key
-//         let secret_key = hex::decode(private_key).map_err(|e| e.to_string())?;
-//         let mut sk = [0u8; 32];
-//         sk.copy_from_slice(&secret_key);
-//         let secret = Arc::new(X25519SecretKey::from(&sk));
-//         let public = Arc::new(secret.pubkey());
-
-//         // Create tunnel
-//         let tunnel = Tunn::new(secret, public, None, 0, None).map_err(|e| e.to_string())?;
-//         self.tunnel = Some(Arc::new(Mutex::new(tunnel)));
-
-//         // Create TUN device
-//         let config = tun::Configuration::default()
-//             .name(&self.interface)
-//             .address("10.200.0.1") // Will be set later
-//             .netmask("255.255.255.0")
-//             .up();
-//         let device = tun::create(&config).map_err(|e| e.to_string())?;
-//         self.device = Some(device);
-
-//         Ok(())
-//     }
-
-//     pub async fn run_packet_loop(&mut self, udp_socket: Arc<UdpSocket>) -> Result<(), String> {
-//         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-//         if self.device.is_none() || self.tunnel.is_none() {
-//             return Err("Tunnel not set up".to_string());
-//         }
-
-//         let device = self.device.as_mut().unwrap();
-//         let tunnel = self.tunnel.as_ref().unwrap().clone();
-
-//         let udp_tx = udp_socket.clone();
-//         let device_tx = Arc::new(tokio::sync::Mutex::new(device));
-
-//         // TUN -> UDP loop
-//         tokio::spawn({
-//             let tunnel = tunnel.clone();
-//             let device_tx = device_tx.clone();
-//             async move {
-//                 let mut buf = [0u8; 2048];
-//                 loop {
-//                     let mut dev = device_tx.lock().await;
-//                     match dev.read(&mut buf).await {
-//                         Ok(n) if n > 0 => {
-//                             let mut t = tunnel.lock().await;
-//                             let mut out = [0u8; 2048];
-//                             match t.encapsulate(&buf[..n], &mut out) {
-//                                 TunnResult::WriteToNetwork(packet) => {
-//                                     if let Err(e) = udp_tx.send(packet).await {
-//                                         error!("Failed to send encrypted packet: {}", e);
-//                                     }
-//                                 }
-//                                 TunnResult::WriteToTunnelV4(_, _) | TunnResult::WriteToTunnelV6(_, _) => {
-//                                     // Handle if needed
-//                                 }
-//                                 _ => {}
-//                             }
-//                         }
-//                         Ok(_) => continue,
-//                         Err(e) => {
-//                             error!("TUN read error: {}", e);
-//                             break;
-//                         }
-//                     }
-//                 }
-//             }
-//         });
-
-//         // UDP -> TUN loop
-//         tokio::spawn({
-//             let tunnel = tunnel.clone();
-//             let device_tx = device_tx.clone();
-//             async move {
-//                 let mut buf = [0u8; 2048];
-//                 loop {
-//                     match udp_socket.recv(&mut buf).await {
-//                         Ok(n) => {
-//                             let mut t = tunnel.lock().await;
-//                             let mut out = [0u8; 2048];
-//                             match t.decapsulate(None, &buf[..n], &mut out) {
-//                                 TunnResult::WriteToNetwork(_) => {
-//                                     // Send back if needed
-//                                 }
-//                                 TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
-//                                     let mut dev = device_tx.lock().await;
-//                                     if let Err(e) = dev.write_all(packet).await {
-//                                         error!("Failed to write decrypted packet to TUN: {}", e);
-//                                     }
-//                                 }
-//                                 _ => {}
-//                             }
-//                         }
-//                         Err(e) => {
-//                             error!("UDP recv error: {}", e);
-//                             break;
-//                         }
-//                     }
-//                 }
-//             }
-//         });
-
-//         Ok(())
-//     }
-// }
-
-// impl WgInterface for UserspaceWgControl {
-//     fn setup_interface_sync(&self, _vip: &str, _port: u16, _private_key: &str) -> Result<(), String> {
-//         // For userspace, we create the TUN device here
-//         // Note: IP configuration might still need external tools, but TUN creation is handled
-//         // In a full implementation, IP setup could be done via netlink or left to the OS
-//         info!("Userspace WireGuard interface setup for {} with VIP {}", self.interface, _vip);
-//         Ok(())
-//     }
-
-//     fn set_peer(&mut self, public_key: &str, endpoint: Option<SocketAddr>, allowed_ips: &[String], persistent_keepalive: Option<u32>) -> Result<(), String> {
-//         // Parse public key
-//         let pk_bytes = hex::decode(public_key).map_err(|e| e.to_string())?;
-        
-//         if pk_bytes.len() != 32 {
-//             return Err("Invalid public key length".to_string());
-//         }
-//         let mut pk = [0u8; 32];
-//         pk.copy_from_slice(&pk_bytes);
-
-//         let public = X25519PublicKey::from(&pk);
-
-//         if let Some(tunnel) = &self.tunnel {
-//             // Add peer to boringtun
-//             // Note: boringtun uses peer index, need to manage indices
-//             // For simplicity, use 1 for first peer
-//             let mut t = tunnel.lock().await;
-//             t.set_peer(1, public, None); // Simplified
-//         }
-
-//         let peer = PeerInfo {
-//             endpoint,
-//             allowed_ips: allowed_ips.to_vec(),
-//         };
-
-//         self.peers.insert(pk, peer);
-
-//         info!("Configured userspace peer {}", public_key);
-//         Ok(())
-//     }
-// }
-
-struct PeerInfo {
-    endpoint: Option<SocketAddr>,
-    allowed_ips: Vec<String>,
+#[derive(Clone)]
+pub struct UserspaceWgControl {
+    interface: String,
+    inner: Arc<UserspaceInner>,
 }
 
 impl UserspaceWgControl {
     pub fn new(interface: &str) -> Self {
         Self {
             interface: interface.to_string(),
-            device: None,
-            tunnel: None,
-            peers: HashMap::new(),
+            inner: Arc::new(UserspaceInner {
+                private_key: Mutex::new(None),
+                tunnel: Mutex::new(None),
+                device: Mutex::new(None),
+                destinations: RwLock::new(HashMap::new()),
+            }),
         }
     }
 
-    pub async fn setup_tunnel(&mut self, private_key: &str, port: u16) -> Result<(), String> {
+    pub async fn setup_tunnel(&self, vip: &str, _port: u16, private_key: &str) -> Result<(), String> {
         // Parse private key
         let secret_key = hex::decode(private_key).map_err(|e| e.to_string())?;
         let mut sk = [0u8; 32];
+        if secret_key.len() != 32 { return Err("Invalid private key length".to_string()); }
         sk.copy_from_slice(&secret_key);
-        let secret = Arc::new(X25519SecretKey::from(&sk));
-        let public = Arc::new(secret.pubkey());
-
-        // Create tunnel
-        let tunnel = Tunn::new(secret, public, None, 0, None).map_err(|e| e.to_string())?;
-        self.tunnel = Some(Arc::new(Mutex::new(tunnel)));
+        let secret = StaticSecret::from(sk);
+        
+        {
+            let mut pk_lock = self.inner.private_key.lock().await;
+            *pk_lock = Some(secret);
+        }
 
         // Create TUN device
-        let config = tun::Configuration::default()
-            .name(&self.interface)
-            .address("10.200.0.1") // Will be set later
-            .netmask("255.255.255.0")
-            .up();
-        let device = tun::create(&config).map_err(|e| e.to_string())?;
-        self.device = Some(device);
+        let mut config = tun::Configuration::default();
+        config.name(&self.interface)
+              .address(vip)
+              .netmask("255.255.255.0")
+              .up();
+
+        #[cfg(target_os = "linux")]
+        config.platform(|config| {
+            config.packet_information(false);
+        });
+
+        let device = tun::create_as_async(&config).map_err(|e| e.to_string())?;
+        
+        {
+            let mut d_lock = self.inner.device.lock().await;
+            *d_lock = Some(device);
+        }
+        
+        info!("Userspace WireGuard TUN '{}' created with IP {}", self.interface, vip);
+        Ok(())
+    }
+
+    pub async fn set_peer(&self, public_key: &str, endpoint: Option<SocketAddr>, allowed_ips: &[String], persistent_keepalive: Option<u32>) -> Result<(), String> {
+        let pk_bytes = hex::decode(public_key).map_err(|e| e.to_string())?;
+        let mut pk = [0u8; 32];
+        if pk_bytes.len() != 32 { return Err("Invalid info public key".to_string()); }
+        pk.copy_from_slice(&pk_bytes);
+        let peer_public = PublicKey::from(pk);
+
+        // Update destinations map
+        if let Some(ep) = endpoint {
+            let mut dests = self.inner.destinations.write().await;
+            for cidr in allowed_ips {
+                if let Some((ip_str, _)) = cidr.split_once('/') {
+                    if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                        dests.insert(ip, ep);
+                    }
+                } else {
+                     if let Ok(ip) = cidr.parse::<IpAddr>() {
+                        dests.insert(ip, ep);
+                     }
+                }
+            }
+        }
+
+        // Initialize BoringTun Tunn (1-to-1)
+        let mut t_lock = self.inner.tunnel.lock().await;
+        
+        let pk_lock = self.inner.private_key.lock().await;
+        let my_private = pk_lock.as_ref().ok_or("Private key not set")?.clone();
+        
+        // Tunn::new(static_private, peer_static_public, preshared_key, persistent_keepalive, index, rate_limiter)
+        // Note: For boringtun 0.6.0, StaticSecret is not Clone without features, but we can recreate it if needed,
+        // or ensure we use the reference correctly. x25519_dalek StaticSecret usually clones by bytes.
+        
+        // Convert keepalive to u16
+        let keepalive_u16 = persistent_keepalive.map(|k| k as u16);
+
+        let tunnel = Tunn::new(my_private, peer_public, None, keepalive_u16, 0, None)
+            .map_err(|e| format!("{:?}", e))?;
+
+        *t_lock = Some(tunnel);
 
         Ok(())
     }
 
-    pub async fn run_packet_loop(&mut self, udp_socket: Arc<UdpSocket>) -> Result<(), String> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    pub async fn run_packet_loop(&self, udp_socket: Arc<UdpSocket>) -> Result<(), String> {
+        // Take device out of Option to split it
+        let device = {
+            let mut d_lock = self.inner.device.lock().await;
+            d_lock.take().ok_or("TUN device not initialized")?
+        };
+        
+        let (mut reader, mut writer) = tokio::io::split(device);
+        
+        let inner = self.inner.clone();
+        let socket_tx = udp_socket.clone();
 
-        if self.device.is_none() || self.tunnel.is_none() {
-            return Err("Tunnel not set up".to_string());
-        }
+        // TUN -> UDP (Encrypt)
+        let inner_tx = inner.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(n) if n > 0 => {
+                        let dest_ip = parse_dst_ip(&buf[..n]);
 
-        let device = self.device.as_mut().unwrap();
-        let tunnel = self.tunnel.as_ref().unwrap().clone();
+                        let endpoint = if let Some(ip) = dest_ip {
+                            let dests = inner_tx.destinations.read().await;
+                            dests.get(&ip).copied()
+                        } else { None };
 
-        let udp_tx = udp_socket.clone();
-        let device_tx = Arc::new(tokio::sync::Mutex::new(device));
-
-        // TUN -> UDP loop
-        tokio::spawn({
-            let tunnel = tunnel.clone();
-            let device_tx = device_tx.clone();
-            async move {
-                let mut buf = [0u8; 2048];
-                loop {
-                    let mut dev = device_tx.lock().await;
-                    match dev.read(&mut buf).await {
-                        Ok(n) if n > 0 => {
-                            let mut t = tunnel.lock().await;
-                            let mut out = [0u8; 2048];
-                            match t.encapsulate(1, &buf[..n], &mut out) { // Peer index 1
-                                TunnResult::WriteToNetwork(packet) => {
-                                    if let Err(e) = udp_tx.send(packet).await {
-                                        error!("Failed to send encrypted packet: {}", e);
+                         if let Some(ep) = endpoint {
+                            let mut t_lock = inner_tx.tunnel.lock().await;
+                            if let Some(t) = t_lock.as_mut() {
+                                let mut dst = [0u8; 2048];
+                                match t.encapsulate(&buf[..n], &mut dst) {
+                                    TunnResult::WriteToNetwork(packet) => {
+                                        if let Err(e) = socket_tx.send_to(packet, ep).await {
+                                            error!("Failed to send to {}: {}", ep, e);
+                                        }
                                     }
+                                    TunnResult::Err(e) => {
+                                        error!("Encapsulate error: {:?}", e);
+                                    }
+                                    _ => {}
                                 }
-                                TunnResult::WriteToTunnelV4(_, _) | TunnResult::WriteToTunnelV6(_, _) => {
-                                    // Handle if needed
-                                }
-                                _ => {}
                             }
-                        }
-                        Ok(_) => continue,
-                        Err(e) => {
-                            error!("TUN read error: {}", e);
-                            break;
-                        }
+                         }
+                    } 
+                    Ok(_) => continue,
+                    Err(e) => {
+                        error!("TUN read error: {}", e);
+                        break; // Fatal error for TUN
                     }
                 }
             }
         });
 
-        // UDP -> TUN loop
-        tokio::spawn({
-            let tunnel = tunnel.clone();
-            let device_tx = device_tx.clone();
-            async move {
-                let mut buf = [0u8; 2048];
-                loop {
-                    match udp_socket.recv(&mut buf).await {
-                        Ok(n) => {
-                            let mut t = tunnel.lock().await;
-                            let mut out = [0u8; 2048];
-                            match t.decapsulate(None, &buf[..n], &mut out) {
-                                TunnResult::WriteToNetwork(_) => {
-                                    // Send back if needed
-                                }
+        // UDP -> TUN (Decrypt)
+        let inner_rx = inner.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            loop {
+                match udp_socket.recv_from(&mut buf).await {
+                    Ok((n, src)) => {
+                        let mut t_lock = inner_rx.tunnel.lock().await;
+                         if let Some(t) = t_lock.as_mut() {
+                            let mut dst = [0u8; 2048];
+                            match t.decapsulate(Some(src.ip()), &buf[..n], &mut dst) {
                                 TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
-                                    let mut dev = device_tx.lock().await;
-                                    if let Err(e) = dev.write_all(packet).await {
-                                        error!("Failed to write decrypted packet to TUN: {}", e);
+                                    if let Err(e) = writer.write_all(packet).await {
+                                        error!("Failed to write to TUN: {}", e);
+                                    }
+                                }
+                                TunnResult::WriteToNetwork(packet) => {
+                                    if let Err(e) = udp_socket.send_to(packet, src).await {
+                                        error!("Failed to send handshake response to {}: {}", src, e);
                                     }
                                 }
                                 _ => {}
                             }
-                        }
-                        Err(e) => {
-                            error!("UDP recv error: {}", e);
-                            break;
-                        }
+                         }
+                    }
+                    Err(e) => {
+                        error!("UDP recv error: {}", e);
+                        // UDP errors might be transient, don't break immediately unless persistent
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     }
                 }
             }
         });
 
-        Ok(())
+        Ok(()) 
     }
 }
 
-impl WgInterface for UserspaceWgControl {
-    fn setup_interface_sync(&self, vip: &str, port: u16, private_key: &str) -> Result<(), String> {
-        // For userspace, we create the TUN device here
-        // Note: IP configuration might still need external tools, but TUN creation is handled
-        // In a full implementation, IP setup could be done via netlink or left to the OS
-        info!("Userspace WireGuard interface setup for {} with VIP {}", self.interface, vip);
-        Ok(())
+/// Helper to parse destination IP from raw IP packet
+fn parse_dst_ip(packet: &[u8]) -> Option<IpAddr> {
+    if packet.is_empty() { return None; }
+    
+    let version = packet[0] >> 4;
+    
+    if version == 4 {
+        if packet.len() >= 20 {
+            Some(IpAddr::V4(Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19])))
+        } else { None }
+    } else if version == 6 {
+        if packet.len() >= 40 {
+             let mut octets = [0u8; 16];
+             octets.copy_from_slice(&packet[24..40]);
+             Some(IpAddr::V6(Ipv6Addr::from(octets)))
+        } else { None }
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ipv4_dst() {
+        // Minimal IPv4 header (20 bytes)
+        // Dest at offset 16
+        let mut pkt = vec![0u8; 20];
+        pkt[0] = 0x45; // Version 4, IHL 5
+        pkt[16] = 192;
+        pkt[17] = 168;
+        pkt[18] = 0;
+        pkt[19] = 1;
+
+        let ip = parse_dst_ip(&pkt);
+        assert_eq!(ip, Some(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
     }
 
-    fn set_peer(&mut self, public_key: &str, endpoint: Option<SocketAddr>, allowed_ips: &[String], persistent_keepalive: Option<u32>) -> Result<(), String> {
-        // Parse public key
-        let pk_bytes = hex::decode(public_key).map_err(|e| e.to_string())?;
-        let mut pk = [0u8; 32];
-        pk.copy_from_slice(&pk_bytes);
+    #[test]
+    fn test_parse_ipv6_dst() {
+        // Minimal IPv6 header (40 bytes)
+        // Dest at offset 24
+        let mut pkt = vec![0u8; 40];
+        pkt[0] = 0x60; // Version 6
+        // Set dest: 2001:db8::1
+        // 20 01 0d b8 00 00 ... 00 01
+        pkt[24] = 0x20; pkt[25] = 0x01;
+        pkt[26] = 0x0d; pkt[27] = 0xb8;
+        pkt[39] = 0x01;
 
-        let public = X25519PublicKey::from(pk);
-
-        if let Some(tunnel) = &self.tunnel {
-            // Add peer to boringtun
-            // Note: boringtun uses peer index, need to manage indices
-            // For simplicity, use 1 for first peer
-            let mut t = tunnel.lock().await;
-            t.set_peer(1, public, None); // Simplified
+        let ip = parse_dst_ip(&pkt).unwrap();
+        match ip {
+            IpAddr::V6(v6) => assert_eq!(v6.segments()[0], 0x2001),
+            _ => panic!("Expected IPv6"),
         }
-
-        let peer = PeerInfo {
-            endpoint,
-            allowed_ips: allowed_ips.to_vec(),
-        };
-
-        self.peers.insert(pk, peer);
-
-        info!("Configured userspace peer {}", public_key);
-        Ok(())
     }
 }

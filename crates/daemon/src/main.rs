@@ -16,7 +16,7 @@ use handler::MessageHandler;
 
 use identity::Identity;
 use metrics::Metrics;
-use wg::{WgInterface, CliWgControl};
+use wg::{WgInterface, CliWgControl, UserspaceWgControl};
 use clap::Parser;
 use log::{info, warn, error};
 use tokio::time::{interval, Duration, timeout};
@@ -101,26 +101,34 @@ async fn test_stun_servers(stun_servers: &[String]) -> Result<String> {
         if n >= 28 && response[0..2] == [0x01, 0x01] { // Binding Success Response
             // Parse XOR-MAPPED-ADDRESS (Type 0x0020)
             if let Some(addr) = stun::parse_xor_mapped_address(&response[..n]) {
-                info!("Public endpoint: {}", addr);
-                return Ok(addr);
+                let addr_str = addr.to_string();
+                info!("Public endpoint: {}", addr_str);
+                return Ok(addr_str);
             }
         }
     }
     anyhow::bail!("All STUN servers failed");
 }
 
-fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<Box<dyn WgInterface>>> {
+async fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<WgInterface>> {
     if let Some(vip) = args.vip {
         let ifname = args.tun_name.clone();
-        let wg_control: Box<dyn WgInterface> = Box::new(CliWgControl::new(&ifname));
+        
+        let mut wg_control = if args.userspace {
+            WgInterface::Userspace(UserspaceWgControl::new(&ifname))
+        } else {
+            WgInterface::Cli(CliWgControl::new(&ifname))
+        };
 
-        info!("🔧 Initializing WireGuard interface '{}' with IP {}", ifname, vip);
-        if let Err(e) = wg_control.setup_interface_sync(
+        info!("🔧 Initializing WireGuard interface '{}' in {} mode with IP {}", 
+            ifname, if args.userspace { "USERSPACE" } else { "KERNEL" }, vip);
+
+        if let Err(e) = wg_control.setup_interface(
             &vip.to_string(),
             args.port,
             &BASE64.encode(identity.private_key_bytes())
-        ) {
-            warn!("⚠️ Failed to setup WireGuard interface via CLI: {}. Continuing in signaling-only mode.", e);
+        ).await {
+            warn!("⚠️ Failed to setup WireGuard interface: {}. Continuing in signaling-only mode.", e);
             Ok(None)
         } else {
             info!("✅ WireGuard interface '{}' is ready.", ifname);
@@ -181,6 +189,10 @@ struct Args {
     /// Path to config file
     #[arg(long, short = 'C')]
     config: Option<std::path::PathBuf>,
+
+    /// Use userspace WireGuard implementation (cross-platform, no kernel modules)
+    #[arg(long)]
+    userspace: bool,
 
 
     
@@ -244,47 +256,9 @@ async fn discover_public_endpoint_standard_stun(stun_servers: &[String]) -> Resu
         };
 
         if n >= 28 && response[0..2] == [0x01, 0x01] { // Binding Success Response
-            // For simplicity, return the source address as public endpoint
-            // In production, parse XOR-MAPPED-ADDRESS properly
-            info!("Public endpoint: {}", src);
-            return Ok(src);
-        }
-
-        // Parse MAPPED-ADDRESS or XOR-MAPPED-ADDRESS
-        let mut pos = 20;
-        while pos + 4 <= n {
-            let attr_type = u16::from_be_bytes([response[pos], response[pos+1]]);
-            let attr_len = u16::from_be_bytes([response[pos+2], response[pos+3]]) as usize;
-            pos += 4;
-            
-            if attr_type == 0x0001 { // MAPPED-ADDRESS
-                if attr_len >= 8 {
-                    let family = response[pos + 1];
-                    let port = u16::from_be_bytes([response[pos+2], response[pos+3]]);
-                    if family == 0x01 { // IPv4
-                        let ip = std::net::Ipv4Addr::new(response[pos+4], response[pos+5], response[pos+6], response[pos+7]);
-                        return Ok(std::net::SocketAddr::new(std::net::IpAddr::V4(ip), port));
-                    }
-                }
-            } else if attr_type == 0x0020 { // XOR-MAPPED-ADDRESS
-                 if attr_len >= 8 {
-                    let _family = response[pos + 1];
-                    let x_port = u16::from_be_bytes([response[pos+2], response[pos+3]]);
-                    let port = x_port ^ 0x2112; // XOR with magic cookie top 16 bits
-                    let x_ip = [response[pos+4], response[pos+5], response[pos+6], response[pos+7]];
-                    let cookie = [0x21, 0x12, 0xA4, 0x42];
-                    let ip = std::net::Ipv4Addr::new(
-                        x_ip[0] ^ cookie[0],
-                        x_ip[1] ^ cookie[1],
-                        x_ip[2] ^ cookie[2],
-                        x_ip[3] ^ cookie[3],
-                    );
-                    return Ok(std::net::SocketAddr::new(std::net::IpAddr::V4(ip), port));
-                }
-            }
-            pos += attr_len;
-            if attr_len % 4 != 0 {
-                pos += 4 - (attr_len % 4);
+            if let Some(addr) = stun::parse_xor_mapped_address(&response[..n]) {
+                info!("Public endpoint: {}", addr);
+                return Ok(addr);
             }
         }
     }
@@ -324,7 +298,7 @@ async fn main() -> Result<()> {
         config.network.use_builtin_stun
     };
 
-    let cluster_secret = if let Some(s) = args.secret {
+    let cluster_secret = if let Some(ref s) = args.secret {
         if s.len() < 16 {
             anyhow::bail!("Cluster secret must be at least 16 characters for security");
         } else {
@@ -337,10 +311,9 @@ async fn main() -> Result<()> {
     let _metrics = Metrics::new();
     let mut peer_table = peers::PeerTable::new();
 
-    // Create WireGuard interface if VIP is specified
-    let wg_api_opt = setup_wireguard(&args, &identity)?;
+    // Determine mode: Nucleus (signaling server) or Edge (P2P client)
+    let is_nucleus_mode = args.mode.as_ref().map(|m| m == "nucleus").unwrap_or(false);
 
-    
     // Cleanup interval - runs every 60 seconds
     let mut cleanup_interval = interval(Duration::from_secs(60));
     // Heartbeat interval - runs every 30 seconds (for edge mode)
@@ -348,13 +321,7 @@ async fn main() -> Result<()> {
     // STUN interval - runs every 5 minutes
     let mut stun_interval = interval(Duration::from_secs(300));
 
-    // Determine mode: Nucleus (signaling server) or Edge (P2P client)
-    let is_nucleus_mode = args.mode.as_ref().map(|m| m == "nucleus").unwrap_or(false);
-
-    // Bind signaling socket
-    // In Nucleus mode, we bind to the specified port.
-    // In Edge mode, we bind to an ephemeral port (0) to avoid conflict with the kernel WireGuard interface
-    // which also binds to args.port.
+    // Bind signaling socket first
     let bind_port = if is_nucleus_mode { args.port } else { 0 };
     let socket_raw = UdpSocket::bind(format!("0.0.0.0:{}", bind_port)).await
         .context("failed to bind UDP socket")?;
@@ -364,8 +331,19 @@ async fn main() -> Result<()> {
     if !is_nucleus_mode {
         info!("WireGuard data plane will use UDP/{}", args.port);
     }
-
     let socket = std::sync::Arc::new(socket_raw);
+
+    // Create WireGuard interface if VIP is specified
+    let mut wg_api_opt = setup_wireguard(&args, &identity).await?;
+
+    if let Some(mut wg) = wg_api_opt.clone() {
+        let socket_clone = socket.clone();
+        tokio::spawn(async move {
+            if let Err(e) = wg.start_loop(socket_clone).await {
+                error!("Packet processing loop failed: {}", e);
+            }
+        });
+    }
     
     // Nucleus state (only used in nucleus mode)
     let mut nucleus_state = signaling::NucleusState::new();
@@ -380,7 +358,7 @@ async fn main() -> Result<()> {
                     identity.public_key_bytes(),
                     vip,
                     args.port,
-                    cluster_secret.clone(),
+                    cluster_secret.cloned(),
                 ).await {
                     Ok(client) => {
                         // Register with nucleus immediately
@@ -461,12 +439,12 @@ async fn main() -> Result<()> {
         let mut handler = MessageHandler {
             socket: &socket,
             peer_table: &mut peer_table,
-            wg_api: wg_api_opt.as_mut().map(|b| &mut **b),
+            wg_api: wg_api_opt.as_mut(),
             metrics: &_metrics,
             nucleus_state: &mut nucleus_state,
             nucleus_client: nucleus_client.as_ref(),
             is_nucleus_mode,
-            secret: cluster_secret.as_deref(),
+            secret: cluster_secret.map(|s| s.as_str()),
         };
 
         tokio::select! {

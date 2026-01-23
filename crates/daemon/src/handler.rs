@@ -12,7 +12,7 @@ use base64::Engine;
 pub struct MessageHandler<'a> {
     pub socket: &'a UdpSocket,
     pub peer_table: &'a mut PeerTable,
-    pub wg_api: Option<&'a mut dyn WgInterface>,
+    pub wg_api: Option<&'a mut WgInterface>,
     pub metrics: &'a Metrics,
     pub nucleus_state: &'a mut NucleusState,
     pub nucleus_client: Option<&'a NucleusClient>,
@@ -174,7 +174,7 @@ impl<'a> MessageHandler<'a> {
                     Some(endpoint),
                     &[peer_info.vip.to_string()],
                     Some(25),
-                ) {
+                ).await {
                     warn!("Failed to configure WG peer {}: {}", peer_info.vip, e);
                 } else {
                     info!("Successfully configured WG peer {} at {}", peer_info.vip, peer_info.endpoint);

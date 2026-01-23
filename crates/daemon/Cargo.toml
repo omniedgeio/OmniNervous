@@ -2,6 +2,7 @@
 name = "omninervous"
 version = "0.2.3"
 edition = "2021"
+resolver = "2"
 
 [[bin]]
 name = "omninervous"
@@ -9,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-snow = "0.9"
+snow = { version = "0.9.6", default-features = false, features = ["ring-accelerated"] }
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0"
 env_logger = "0.10"
@@ -30,3 +31,5 @@ hex = "0.4"
 base64 = "0.21"
 serde_cbor = "0.11"
 governor = "0.6"
+boringtun = { path = "../../../boringtun/boringtun" }
+tun = { version = "0.6", features = ["async"] }
