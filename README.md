@@ -11,7 +11,7 @@ OmniNervous uses a dual-plane design: control plane for signaling and peer manag
 
 ## Performance Results (Jan 23, 2026)
 
-Validated on **AWS Lightsail $5 Instances** (3-node cluster, cross-region):
+Validated on **AWS Lightsail $5 Instances** (3-node cluster, cross-region: us-east-1 and us-east-1):
 
 | Metric | Result | Notes |
 |:---|---:|:---|
