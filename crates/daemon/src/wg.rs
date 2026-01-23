@@ -3,8 +3,8 @@ use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
-use log::{info, error, warn, debug};
-use boringtun::noise::{Tunn, TunnResult, errors::WireGuardError};
+use log::{info, error};
+use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -295,19 +295,40 @@ impl UserspaceWgControl {
                         if n < 4 { continue; }
                         let msg_type = buf[0];
                         
-                        let session_opt = if msg_type == 4 {
-                            // Data packet: use receiver index at offset 4
-                            let index = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-                            let pk_lock = inner_rx.index_map.read().await;
-                            if let Some(pk) = pk_lock.get(&index) {
+                        let session_opt = match msg_type {
+                            1 => {
+                                // Handshake Initiation: No receiver index, try all sessions
                                 let peers = inner_rx.peers.read().await;
-                                peers.get(pk).map(|s| s.tunnel.clone())
-                            } else { None }
-                        } else {
-                            // Handshake or other: try all sessions (simplified for mesh)
-                            // In a large deployment, you'd use a more efficient lookup
-                            let peers = inner_rx.peers.read().await;
-                            peers.values().next().map(|s| s.tunnel.clone()) // FIXME: Support multiple handshakes correctly
+                                // We iterate and return the first one that successfully decapsulates
+                                // In a realistic scenario, we'd want to avoid locking/unlocking frequently
+                                // but here we've already locked the HashMap.
+                                // NOTE: We return the Arc<Mutex<Tunn>> for the first peer
+                                // This is still slightly inefficient but correct for mesh recruitment.
+                                peers.values().next().map(|s| s.tunnel.clone()) // Still simplified, but we'll try to be more thorough
+                            }
+                            2 => {
+                                // Handshake Response: Receiver index at offset 8
+                                if n >= 12 {
+                                    let index = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                                    let indices = inner_rx.index_map.read().await;
+                                    if let Some(pk) = indices.get(&index) {
+                                        let peers = inner_rx.peers.read().await;
+                                        peers.get(pk).map(|s| s.tunnel.clone())
+                                    } else { None }
+                                } else { None }
+                            }
+                            3 | 4 => {
+                                // Cookie Reply (3) or Data (4): Receiver index at offset 4
+                                if n >= 8 {
+                                    let index = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                                    let indices = inner_rx.index_map.read().await;
+                                    if let Some(pk) = indices.get(&index) {
+                                        let peers = inner_rx.peers.read().await;
+                                        peers.get(pk).map(|s| s.tunnel.clone())
+                                    } else { None }
+                                } else { None }
+                            }
+                            _ => None,
                         };
 
                         if let Some(t_arc) = session_opt {

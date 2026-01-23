@@ -36,6 +36,34 @@ jobs:
             ext: ""
             cross: true
 
+          # Windows AMD64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-amd64
+            ext: ".exe"
+            cross: false
+
+          # Windows ARM64
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            name: windows-arm64
+            ext: ".exe"
+            cross: false
+
+          # macOS AMD64 (Intel)
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-amd64
+            ext: ""
+            cross: false
+
+          # macOS ARM64 (Apple Silicon)
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-arm64
+            ext: ""
+            cross: false
+
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.name }}
 
@@ -123,6 +151,10 @@ jobs:
             |:---|:---|:---|
             | Linux | AMD64 | `omninervous-linux-amd64` |
             | Linux | ARM64 | `omninervous-linux-arm64` |
+            | Windows | AMD64 | `omninervous-windows-amd64.exe` |
+            | Windows | ARM64 | `omninervous-windows-arm64.exe` |
+            | macOS | AMD64 (Intel) | `omninervous-macos-amd64` |
+            | macOS | ARM64 (Apple Silicon) | `omninervous-macos-arm64` |
           files: release-assets/*
           draft: false
           prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}

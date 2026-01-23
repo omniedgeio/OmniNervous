@@ -19,7 +19,7 @@ use metrics::Metrics;
 use wg::{WgInterface, CliWgControl, UserspaceWgControl};
 use clap::Parser;
 use log::{info, warn, error};
-use tokio::time::{interval, Duration, timeout};
+use tokio::time::{interval, Duration};
 use tokio::net::UdpSocket;
 use tokio::signal;
 use base64::engine::general_purpose::STANDARD as BASE64;
