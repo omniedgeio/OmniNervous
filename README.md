@@ -85,7 +85,7 @@ sudo ./target/release/omninervous \
 |:---|:---|
 | **Identity** | X25519 keys stored with 0o600 permissions |
 | **Signaling Auth** | HMAC-SHA256 with cluster PSK |
-| **Encryption** | ChaCha20-Poly1305 or AES256-GCM |
+| **Encryption** | ChaCha20-Poly1305|
 | **Forward Secrecy** | Ephemeral key rotation per session |
 | **Peer Auth** | Cluster-based PSK validation |
 
