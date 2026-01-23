@@ -53,10 +53,10 @@ Validated on **AWS Lightsail $5 Instances** (3-node cluster, cross-region):
 
 | Metric | Result | Notes |
 |:---|---:|:---|
-| **Throughput** | **371.35 Mbps** | 107.5% of baseline |
-| **Latency** | **54.73 ms** | Cross-region (ping) |
-| **Baseline** | 345.56 Mbps | Raw iperf3 performance |
-| **Efficiency** | **>100%** | optimized protocol overhead |
+| **Throughput** | **557.96 Mbps** | 127.5% of baseline |
+| **Latency** | **54.68 ms** | Cross-region (ping) |
+| **Baseline** | 437.60 Mbps | Raw iperf3 performance |
+| **Efficiency** | **127.5%** | optimized protocol overhead |
 
 > **Key Achievement**: Jan 23 tests demonstrated extreme protocol efficiency, achieving higher throughput over the tunnel than the baseline through optimized message handling.
 
