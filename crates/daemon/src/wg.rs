@@ -27,7 +27,7 @@ impl CliWgControl {
 }
 
 impl WgInterface for CliWgControl {
-    fn setup_interface(&self, vip: &str, port: u16, private_key: &str) -> Result<(), String> {
+    fn setup_interface_sync(&self, vip: &str, port: u16, private_key: &str) -> Result<(), String> {
         use std::process::Command;
 
         // 1. Create interface (ignore if exists)
@@ -229,7 +229,7 @@ impl UserspaceWgControl {
 }
 
 impl WgInterface for UserspaceWgControl {
-    fn setup_interface(&self, vip: &str, port: u16, private_key: &str) -> Result<(), String> {
+    fn setup_interface_sync(&self, vip: &str, port: u16, private_key: &str) -> Result<(), String> {
         // For userspace, we create the TUN device here
         // Note: IP configuration might still need external tools, but TUN creation is handled
         // In a full implementation, IP setup could be done via netlink or left to the OS
