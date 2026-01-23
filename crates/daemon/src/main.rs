@@ -1,22 +1,11 @@
-// Allow dead_code for utility modules with functions ready for future use
-#![allow(dead_code)]
-
 use anyhow::{Context, Result};
-mod identity;
-mod metrics;
-mod config;
-mod http;
-mod peers;
-mod signaling;
-mod handler;
-mod wg;
-mod stun;
-
-use handler::MessageHandler;
-
-use identity::Identity;
-use metrics::Metrics;
-use wg::{WgInterface, CliWgControl, UserspaceWgControl};
+use omninervous::{
+    identity::Identity,
+    metrics::Metrics,
+    wg::{WgInterface, CliWgControl, UserspaceWgControl},
+    handler::MessageHandler,
+    config, signaling, http, peers, stun,
+};
 use clap::Parser;
 use log::{info, warn, error};
 use tokio::time::{interval, Duration};

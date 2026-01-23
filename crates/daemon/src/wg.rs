@@ -37,6 +37,20 @@ impl WgInterface {
             Self::Userspace(u) => u.run_packet_loop(socket).await,
         }
     }
+
+    pub async fn get_peer_stats(&self, public_key: &str) -> Option<PeerStats> {
+        match self {
+            Self::Cli(c) => c.get_peer_stats_sync(public_key), // Placeholder
+            Self::Userspace(u) => u.get_peer_stats(public_key).await,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerStats {
+    pub last_handshake: Option<std::time::SystemTime>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -108,6 +122,11 @@ impl CliWgControl {
             Ok(output) => Err(String::from_utf8_lossy(&output.stderr).to_string()),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    pub fn get_peer_stats_sync(&self, _public_key: &str) -> Option<PeerStats> {
+        // In a real implementation, we'd use 'wg show <if> latest-handshakes'
+        None
     }
 }
 
@@ -358,6 +377,25 @@ impl UserspaceWgControl {
         });
 
         Ok(()) 
+    }
+
+    pub async fn get_peer_stats(&self, public_key: &str) -> Option<PeerStats> {
+        let pk_bytes = hex::decode(public_key).ok()?;
+        let mut pk = [0u8; 32];
+        if pk_bytes.len() != 32 { return None; }
+        pk.copy_from_slice(&pk_bytes);
+
+        let peers = self.inner.peers.read().await;
+        if let Some(session) = peers.get(&pk) {
+            let t_lock = session.tunnel.try_lock().ok()?;
+            Some(PeerStats {
+                last_handshake: t_lock.last_handshake_authenticated(),
+                rx_bytes: 0, // BoringTun doesn't track these directly in Tunn
+                tx_bytes: 0,
+            })
+        } else {
+            None
+        }
     }
 }
 
