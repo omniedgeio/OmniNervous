@@ -32,8 +32,6 @@ rsync -avz --progress \
     --exclude '.github/' \
     --exclude 'target/' \
     --exclude 'omni-daemon/target/' \
-    --exclude 'omni-ebpf/target/' \
-    --exclude '**/ebpf/omni-ebpf-core' \
     --exclude '.idea/' \
     --exclude '.vscode/' \
     --exclude '*.log' \

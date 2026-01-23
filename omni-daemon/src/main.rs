@@ -2,271 +2,25 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
-#[cfg(target_os = "linux")]
-use aya::{
-    programs::{Xdp, XdpFlags},
-    Bpf,
-};
-use clap::Parser;
-use log::{info, error, warn, debug};
-use tokio::net::UdpSocket;
-use tokio::signal;
-
-
-
-#[cfg(target_os = "linux")]
-use std::os::unix::prelude::AsRawFd;
-
-mod noise;
-mod session;
-mod p2p;
-mod fdb;
 mod identity;
-mod ratelimit;
 mod metrics;
 mod config;
-mod bpf_sync;
 mod http;
-mod nonce;
-mod crypto_util;
-mod poly1305;
-mod tun;
-
 mod peers;
 mod signaling;
 
-use noise::NoiseSession;
-use session::{SessionManager, SessionState};
-use p2p::P2PDiscovery;
-use fdb::Fdb;
+mod wg;
+
 use identity::Identity;
-use ratelimit::{RateLimiter, RateLimitConfig};
 use metrics::Metrics;
-use bpf_sync::BpfSync;
-
-use std::time::Duration;
-use tokio::time::interval;
-use lazy_static::lazy_static;
-use std::sync::Mutex;
-use base64;
-use defguard_wireguard_rs::{WGApi, InterfaceConfiguration, host::Peer};
-
-
-
-fn get_buffer(size: usize) -> Vec<u8> {
-    let mut pool = BUFFER_POOL.lock().unwrap();
-    if let Some(mut buf) = pool.pop() {
-        if buf.capacity() >= size {
-            buf.resize(size, 0);
-            return buf;
-        }
-    }
-    vec![0u8; size]
-}
-
-fn return_buffer(mut buf: Vec<u8>) {
-    buf.clear();
-    let mut pool = BUFFER_POOL.lock().unwrap();
-    if pool.len() < 10 { // Limit pool size to prevent memory bloat
-        pool.push(buf);
-    }
-}
-
-/// Embedded eBPF program binary (built by CI and placed in omni-ebpf/ target directory)
-#[cfg(target_os = "linux")]
-static EBPF_PROGRAM: &[u8] = include_bytes!("../../omni-ebpf/omni-ebpf-core/target/bpfel-unknown-none/release/omni-ebpf");
-
-/// Detect the default network interface on Linux
-#[cfg(target_os = "linux")]
-fn get_default_interface() -> Option<String> {
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
-    
-    if let Ok(file) = File::open("/proc/net/route") {
-        let reader = BufReader::new(file);
-        // Skip header
-        for line in reader.lines().skip(1) {
-            if let Ok(l) = line {
-                let parts: Vec<&str> = l.split_whitespace().collect();
-                // parts[1] is destination, "00000000" is default route
-                if parts.len() >= 2 && parts[1] == "00000000" {
-                    return Some(parts[0].to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Try to load eBPF/XDP program on Linux
-/// Returns Ok(Bpf) if successful, Err if not available or failed
-#[cfg(target_os = "linux")]
-/// Set CPU affinity for the current thread to improve cache locality
-#[cfg(target_os = "linux")]
-fn set_cpu_affinity(cpu_id: usize) -> Result<()> {
-    use nix::sched::{sched_setaffinity, CpuSet};
-    use nix::unistd::Pid;
-
-    let mut cpu_set = CpuSet::new();
-    cpu_set.set(cpu_id)?;
-
-    sched_setaffinity(Pid::from_raw(0), &cpu_set)
-        .context("Failed to set CPU affinity")?;
-
-    debug!("Set CPU affinity to core {}", cpu_id);
-    Ok(())
-}
-
-/// Get optimal CPU count for crypto operations
-#[cfg(target_os = "linux")]
-fn get_crypto_cpu_count() -> usize {
-    let total_cpus = num_cpus::get();
-    // Use 75% of available CPUs for crypto, leave some for networking
-    (total_cpus * 3 / 4).max(1)
-}
-
-/// Detect hardware crypto acceleration capabilities
-#[cfg(target_os = "linux")]
-fn detect_crypto_acceleration() -> (bool, bool) {
-    let mut has_aes_ni = false;
-    let mut has_avx = false;
-
-    // Check CPU features using rustc cfg
-    #[cfg(target_feature = "aes")]
-    {
-        has_aes_ni = true;
-    }
-
-    #[cfg(target_feature = "avx")]
-    {
-        has_avx = true;
-    }
-
-    // Also check at runtime using cpufeatures crate
-    if std::is_x86_feature_detected!("aes") {
-        has_aes_ni = true;
-    }
-
-    if std::is_x86_feature_detected!("avx") {
-        has_avx = true;
-    }
-
-    (has_aes_ni, has_avx)
-}
-
-
-
-fn detect_xdp_support() -> bool {
-    use std::process::Command;
-
-    // Check kernel version (need 5.4+ for good XDP support)
-    let kernel_version = match Command::new("uname").arg("-r").output() {
-        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        Err(_) => return false,
-    };
-
-    let version_parts: Vec<&str> = kernel_version.split('.').collect();
-    if version_parts.len() < 2 {
-        return false;
-    }
-
-    let major: u32 = version_parts[0].parse().unwrap_or(0);
-    let minor: u32 = version_parts[1].parse().unwrap_or(0);
-    if major < 5 || (major == 5 && minor < 4) {
-        info!("Kernel {}.{} too old for XDP (need 5.4+)", major, minor);
-        return false;
-    }
-
-    // Check if XDP tools are available (optional, but good indicator)
-    if Command::new("which").arg("bpftool").output().is_err() {
-        debug!("bpftool not available, XDP may not be fully supported");
-    }
-
-    info!("Kernel {}.{} detected, XDP potentially supported", major, minor);
-    true
-}
-
-fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
-    use std::process::Command;
-    
-    // Check if eBPF binary is available (not empty placeholder)
-    if EBPF_PROGRAM.is_empty() {
-        anyhow::bail!("eBPF program not embedded (placeholder only)");
-    }
-    
-    // Check kernel version (need 5.4+ for good XDP support)
-    let kernel_version = Command::new("uname")
-        .arg("-r")
-        .output()
-        .context("Failed to get kernel version")?;
-    let kernel_str = String::from_utf8_lossy(&kernel_version.stdout);
-    let version_parts: Vec<&str> = kernel_str.trim().split('.').collect();
-    
-    if version_parts.len() >= 2 {
-        let major: u32 = version_parts[0].parse().unwrap_or(0);
-        let minor: u32 = version_parts[1].parse().unwrap_or(0);
-        if major < 5 || (major == 5 && minor < 4) {
-            anyhow::bail!("Kernel {}.{} too old (need 5.4+)", major, minor);
-        }
-        info!("Kernel {}.{} detected, XDP supported", major, minor);
-    }
-    
-    // Check if interface exists, if not try to find default
-    let mut target_iface = iface.to_string();
-    let ip_output = Command::new("ip")
-        .args(["link", "show", &target_iface])
-        .output()
-        .context("Failed to check interface")?;
-    
-    if !ip_output.status.success() {
-        if iface == "eth0" {
-            if let Some(default_iface) = get_default_interface() {
-                info!("Interface eth0 not found, auto-detected default: {}", default_iface);
-                target_iface = default_iface;
-            } else {
-                anyhow::bail!("Interface eth0 not found and no default interface detected");
-            }
-        } else {
-            anyhow::bail!("Interface {} not found", iface);
-        }
-    }
-    
-    // Load embedded eBPF program
-    info!("Loading embedded XDP program ({} bytes) on {}...", EBPF_PROGRAM.len(), target_iface);
-    let mut bpf = match Bpf::load(EBPF_PROGRAM) {
-        Ok(bpf) => bpf,
-        Err(e) => {
-            warn!("eBPF/XDP not available: Failed to load eBPF program: {}", e);
-            return Err(anyhow::anyhow!("eBPF loading failed: {}", e));
-        }
-    };
-    
-    // Get and load the XDP program
-    let program: &mut Xdp = bpf.program_mut("xdp_synapse")
-        .context("xdp_synapse program not found")?
-        .try_into()
-        .context("Failed to cast to XDP program")?;
-    
-    match program.load() {
-        Ok(_) => {},
-        Err(e) => {
-            warn!("eBPF/XDP not available: Failed to load XDP program into kernel: {}", e);
-            return Err(e.into());
-        }
-    }
-    
-    // Attach to interface
-    program.attach(&target_iface, XdpFlags::default())
-        .context(format!("Failed to attach XDP to {}", target_iface))?;
-    
-    info!("XDP program attached to interface {}", target_iface);
-    
-    // Initialize BPF map sync
-    bpf_sync.init_from_bpf(&mut bpf)
-        .context("Failed to initialize BPF map sync")?;
-    
-    Ok(bpf)
-}
+use wg::WgControl;
+use clap::Parser;
+use log::{info, warn, error, debug};
+use tokio::time::{interval, Duration};
+use tokio::net::UdpSocket;
+use tokio::signal;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -278,8 +32,8 @@ fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
         A high-performance P2P VPN daemon with:\n\
         - Noise_IKpsk2 protocol (X25519 + ChaCha20-Poly1305)\n\
         - Cluster-based PSK authentication\n\
-        - XDP/eBPF acceleration (Linux)\n\
-        - Cross-platform TUN support\n\n\
+        - Native WireGuard data plane integration\n\
+        - Cross-platform support\n\n\
         Examples:\n  \
           # Run as Nucleus (signaling server)\n  \
           omni-daemon --mode nucleus --port 51820\n\n  \
@@ -287,10 +41,6 @@ fn try_load_ebpf(iface: &str, bpf_sync: &mut BpfSync) -> Result<Bpf> {
           omni-daemon --nucleus 1.2.3.4:51820 --cluster mynet --secret MySecret123456 --vip 10.200.0.1"
 )]
 struct Args {
-    /// Network interface for eBPF attachment (Linux only)
-    #[arg(short, long, default_value = "eth0")]
-    iface: String,
-    
     /// UDP port for VPN traffic
     #[arg(short, long, default_value = "51820")]
     port: u16,
@@ -323,10 +73,6 @@ struct Args {
     #[arg(long, short = 'C')]
     config: Option<std::path::PathBuf>,
     
-    /// Disable eBPF/XDP acceleration (Linux only)
-    #[arg(long)]
-    no_ebpf: bool,
-    
     /// Virtual IP address (e.g., 10.200.0.1)
     #[arg(long)]
     vip: Option<std::net::Ipv4Addr>,
@@ -349,9 +95,6 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     env_logger::init();
 
-    let cipher_type: noise::CipherType = args.cipher.parse()
-        .context("Invalid cipher specified")?;
-
     info!("Starting OmniNervous Ganglion Daemon on port {}...", args.port);
 
     // Handle --init flag
@@ -367,184 +110,53 @@ async fn main() -> Result<()> {
     let identity = Identity::load_or_generate(args.identity.as_ref())?;
     info!("Using identity: {}", identity.public_key_hex());
 
-    // Derive PSK from cluster + secret if provided
-    let psk: Option<[u8; 32]> = match (&args.cluster, &args.secret) {
-        (Some(cluster), Some(secret)) => {
-            // Validate secret length
-            noise::validate_secret(secret)?;
-            let psk = noise::derive_psk(cluster, secret);
-            info!("Cluster '{}' with authenticated secret (PSK enabled)", cluster);
-            Some(psk)
-        }
-        (Some(cluster), None) => {
-            warn!("⚠️ Cluster '{}' without secret - OPEN MODE (any peer can join)", cluster);
-            None
-        }
-        (None, Some(_)) => {
-            anyhow::bail!("--secret requires --cluster to be specified");
-        }
-        (None, None) => {
-            info!("No cluster specified, running in standalone mode");
-            None
-        }
-    };
-
-    let mut session_manager = SessionManager::new();
-    let _fdb = Fdb::new();
-    let mut p2p = P2PDiscovery::new(None).await?;
-    let mut rate_limiter = RateLimiter::new(RateLimitConfig::default());
-    let metrics = Metrics::new();
-    let mut bpf_sync = BpfSync::new();
+    let _metrics = Metrics::new();
     let mut peer_table = peers::PeerTable::new();
 
-    // Use the selected cipher
-    info!("Using {} cipher", cipher_type);
-
-    // Initialize CPU affinity and crypto acceleration (Phase 7.2)
-    #[cfg(target_os = "linux")]
-    {
-        let crypto_cpus = get_crypto_cpu_count();
-        let (has_aes_ni, has_avx) = detect_crypto_acceleration();
-
-        info!("🔥 Phase 7.2: Performance optimizations active");
-        info!("   • CPU Affinity: {} cores allocated for crypto", crypto_cpus);
-        info!("   • Hardware Acceleration: AES-NI={}, AVX={}", has_aes_ni, has_avx);
-        info!("   • Batch Processing: 32-packet optimized batches");
-        info!("   • Memory Alignment: 4KB page-aligned DMA buffers");
-        info!("   • Latency Target: <1ms end-to-end packet processing");
-
-        // Set affinity for main thread to CPU 0 (networking)
-        if let Err(e) = set_cpu_affinity(0) {
-            warn!("Failed to set CPU affinity for main thread: {}", e);
-        }
-    }
-    
-    // Our virtual IP (used for self-identification in peer exchange)
-    let _our_vip = args.vip;
-    
-    // Try to load eBPF/XDP on Linux if supported and not disabled
-    #[cfg(target_os = "linux")]
-    let bpf = if detect_xdp_support() && !args.no_ebpf {
-        match try_load_ebpf(&args.iface, &mut bpf_sync) {
-            Ok(bpf) => {
-                info!("✅ eBPF/XDP enabled on interface {}", args.iface);
-                Some(bpf)
-            }
-            Err(e) => {
-                warn!("eBPF/XDP failed to load: {}. Using userspace processing.", e);
-                None
-            }
-        }
-    } else {
-        if !detect_xdp_support() {
-            info!("XDP not supported on this system, using userspace processing");
-        } else {
-            info!("eBPF/XDP disabled via --no-ebpf flag");
-        }
-        None
-    };
-
-    #[cfg(not(target_os = "linux"))]
-    let bpf = {
-        info!("Running on non-Linux platform, using userspace processing");
-        None
-    };
-    
     // Create WireGuard interface if VIP is specified
-    let wg_api = if let Some(vip) = args.vip {
-        let ifname = "wg0".to_string(); // TODO: cross-platform
-        match WGApi::new(ifname.clone()) {
-            Ok(mut wg_api) => {
-                if let Err(e) = wg_api.create_interface() {
-                    error!("❌ Failed to create WireGuard interface: {}", e);
-                    anyhow::bail!("WireGuard interface creation failed: {}", e);
-                }
-                let interface_config = InterfaceConfiguration {
-                    name: ifname.clone(),
-                    prvkey: base64::encode(identity.private_key_bytes()),
-                    addresses: vec![vip],
-                    port: args.port,
-                    peers: vec![],
-                    mtu: Some(1420),
-                };
-                if let Err(e) = wg_api.configure_interface(&interface_config) {
-                    error!("❌ Failed to configure WireGuard interface: {}", e);
-                    anyhow::bail!("WireGuard interface configuration failed: {}", e);
-                }
-                info!("✅ WireGuard interface '{}' active with IP {}", ifname, vip);
-                Some(wg_api)
-            }
-            Err(e) => {
-                error!("❌ Failed to initialize WireGuard API: {}", e);
-                anyhow::bail!("WireGuard API init failed: {}", e);
-            }
-        }
-    } else {
-        info!("No --vip specified, running in signaling-only mode (Nucleus)");
-        None
-    };
+    let wg_api_opt = if let Some(vip) = args.vip {
+        let ifname = args.tun_name.clone();
+        let wg_control = WgControl::new(&ifname);
         
-        match tun::VirtualInterface::create(tun_config).await {
-            Ok(tun) => {
-                info!("✅ Virtual interface '{}' active with IP {}", tun.name(), tun.address());
-
-                #[cfg(target_os = "linux")]
-                {
-                    // Phase 6.5: TUN index binding and optional combined index update
-                    let tun_ifindex: Option<u32> = std::fs::read_to_string(&format!("/sys/class/net/{}/ifindex", tun.name())).ok()
-                        .and_then(|s| s.trim().parse::<u32>().ok());
-                    if let Some(index) = tun_ifindex {
-                        info!("TUN interface index found: {}", index);
-                        if let Err(e) = bpf_sync.set_tun_index(index) {
-                            warn!("Failed to update eBPF TUN index: {}", e);
-                        }
-
-                        // Try to update combined tun/phys indices if possible
-                        if let Some(def_iface) = get_default_interface() {
-                            let phys_path = format!("/sys/class/net/{}/ifindex", def_iface);
-                            if let Ok(pcontent) = std::fs::read_to_string(&phys_path) {
-                                if let Ok(phys_index) = pcontent.trim().parse::<u32>() {
-                                    if let Err(e) = bpf_sync.update_indices(index, phys_index) {
-                                        warn!("Failed to update combined BPF indices: {}", e);
-                                    } else {
-                                        info!("BPF combined indices updated: tun={} phys={}", index, phys_index);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Some(tun)
-            }
-            Err(e) => {
-                error!("❌ Failed to create TUN interface: {}", e);
-                error!("   Ensure you have root/admin privileges");
-                error!("   On Linux: sudo or CAP_NET_ADMIN capability required");
-                #[cfg(target_os = "linux")]
-                error!("   Run: sudo modprobe tun (if TUN module not loaded)");
-                #[cfg(target_os = "windows")]
-                error!("   Windows: Ensure wintun.dll is in the same directory");
-                // Exit with error - TUN is required when --vip is specified
-                anyhow::bail!("TUN interface creation failed: {}. Cannot operate VPN without interface.", e);
-            }
+        info!("🔧 Initializing WireGuard interface '{}' with IP {}", ifname, vip);
+        if let Err(e) = wg_control.setup_interface(
+            &vip.to_string(), 
+            args.port, 
+            &BASE64.encode(identity.private_key_bytes())
+        ) {
+            warn!("⚠️ Failed to setup WireGuard interface via CLI: {}. Continuing in signaling-only mode.", e);
+            None
+        } else {
+            info!("✅ WireGuard interface '{}' is ready.", ifname);
+            Some(wg_control)
         }
     } else {
-        info!("No --vip specified, running in signaling-only mode (Nucleus)");
+        info!("ℹ️ No --vip specified, running in signaling-only mode (Nucleus)");
         None
     };
+
     
     // Cleanup interval - runs every 60 seconds
     let mut cleanup_interval = interval(Duration::from_secs(60));
     // Heartbeat interval - runs every 30 seconds (for edge mode)
     let mut heartbeat_interval = interval(Duration::from_secs(30));
 
-    let socket = UdpSocket::bind(format!("0.0.0.0:{}", args.port)).await
-        .context("failed to bind UDP socket")?;
-    
-    info!("Ganglion listening on UDP/{}", args.port);
-
     // Determine mode: Nucleus (signaling server) or Edge (P2P client)
     let is_nucleus_mode = args.mode.as_ref().map(|m| m == "nucleus").unwrap_or(false);
+
+    // Bind signaling socket
+    // In Nucleus mode, we bind to the specified port.
+    // In Edge mode, we bind to an ephemeral port (0) to avoid conflict with the kernel WireGuard interface
+    // which also binds to args.port.
+    let bind_port = if is_nucleus_mode { args.port } else { 0 };
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", bind_port)).await
+        .context("failed to bind UDP socket")?;
+    
+    let local_addr = socket.local_addr()?;
+    info!("Ganglion signaling listening on UDP/{} (Signaling)", local_addr.port());
+    if !is_nucleus_mode {
+        info!("WireGuard data plane will use UDP/{}", args.port);
+    }
     
     // Nucleus state (only used in nucleus mode)
     let mut nucleus_state = signaling::NucleusState::new();
@@ -586,48 +198,24 @@ async fn main() -> Result<()> {
     };
 
     // Spawn metrics HTTP server
-    let metrics_clone = metrics.clone();
+    let metrics_clone = _metrics.clone();
     tokio::spawn(async move {
         if let Err(e) = http::serve_metrics(metrics_clone, 9090).await {
             error!("Metrics server failed: {}", e);
         }
     });
 
-    // Perform STUN discovery (using isolated ephemeral socket)
-    if let Err(e) = p2p.discover_self().await {
-        warn!("STUN discovery failed: {}", e);
-    } else if let Some(ref endpoint) = p2p.local_endpoint {
-        info!("Public endpoint: {}:{}", endpoint.ip, endpoint.port);
-    }
 
+    
     let mut buf = [0u8; 2048];
-    let mut tun_buf = [0u8; 2048];
     
     loop {
-        // TUN read future - only if TUN is active
-        let tun_read = async {
-            if let Some(ref mut tun) = _tun {
-                tun.read(&mut tun_buf).await
-            } else {
-                // No TUN, sleep forever on this branch
-                std::future::pending::<Result<usize>>().await
-            }
-        };
-        
         tokio::select! {
             _ = signal::ctrl_c() => {
                 info!("Exiting...");
                 break;
             }
             _ = cleanup_interval.tick() => {
-                // Periodic cleanup: rate limiter, expired sessions, BPF map
-                rate_limiter.cleanup();
-                let expired = rate_limiter.expired_sessions();
-                for sid in expired {
-                    let _ = bpf_sync.remove_session(sid);
-                    info!("Expired session {}", sid);
-                }
-                
                 // Nucleus mode: cleanup stale peers
                 if is_nucleus_mode {
                     nucleus_state.cleanup();
@@ -641,120 +229,11 @@ async fn main() -> Result<()> {
                         warn!("Failed to send heartbeat: {}", e);
                     }
                 }
-                
-                // Initiate handshakes to discovered peers that haven't been contacted yet
-                if !is_nucleus_mode {
-                    let peers_to_connect = peer_table.peers_needing_handshake();
-                    for peer in peers_to_connect {
-                        if let Some(pubkey) = peer.public_key {
-                            // Create initiator session
-                            info!("Initiated handshake to {} (Remote: {})", 
-                                peer.virtual_ip, 
-                                hex::encode(&pubkey[..4]));
-                            info!("Creating initiator session");
-                            match NoiseSession::new_initiator(&identity.private_key, &pubkey, psk.as_ref(), cipher_type) {
-                                Ok(mut session) => {
-                                    // Build handshake message 1 with our VIP
-                                    let mut payload = vec![];
-                                    if let Some(our_vip) = args.vip {
-                                        payload.extend_from_slice(&our_vip.octets());
-                                    }
-                                    
-                                    let mut msg = vec![0u8; 128];
-                                    match session.handshake.write_message(&payload, &mut msg) {
-                                        Ok(len) => {
-                                            // Build packet: [session_id(8)] [handshake]
-                                            let mut packet = peer.session_id.to_be_bytes().to_vec();
-                                            packet.extend_from_slice(&msg[..len]);
-                                            
-                                            if let Err(e) = socket.send_to(&packet, peer.endpoint).await {
-                                                warn!("Failed to send handshake to {}: {}", peer.virtual_ip, e);
-                                            } else {
-                                                // Store session and mark peer
-                                                session_manager.create_session(
-                                                    peer.session_id,
-                                                    SessionState::Handshaking(session)
-                                                );
-                                                peer_table.mark_handshake_initiated(&peer.virtual_ip);
-                                                info!("Initiated handshake to {} at {}", peer.virtual_ip, peer.endpoint);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            warn!("Failed to write handshake message: {}", e);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("Failed to create initiator session for {}: {}", peer.virtual_ip, e);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            // Read from TUN interface (local packets to send to VPN)
-            tun_result = tun_read => {
-                match tun_result {
-                    Ok(len) if len > 0 => {
-                        // IP packet from local TUN: encrypt + send to peer
-                        let ip_version = (tun_buf[0] >> 4) & 0xF;
-                        if ip_version == 4 && len >= 20 {
-                            let dst_ip = std::net::Ipv4Addr::new(
-                                tun_buf[16], tun_buf[17], tun_buf[18], tun_buf[19]
-                            );
-                            
-                            // Lookup peer by destination VIP
-                            if let Some(peer) = peer_table.lookup_by_vip(&dst_ip) {
-                                // Get session for encryption
-                                if let Some(SessionState::Active(transport)) = session_manager.get_session_mut(peer.session_id) {
-                                    // Generate random nonce for this packet
-                                    let nonce: u64 = rand::random();
-                                    
-                                    let mut encrypted = vec![0u8; len + 16]; // 16 bytes for tag
-                                    match transport.write_message(nonce, &tun_buf[..len], &mut encrypted) {
-                                        Ok(enc_len) => {
-                                            // Build packet: [session_id(8)] [nonce(8)] [encrypted_data]
-                                            let mut packet = peer.session_id.to_be_bytes().to_vec();
-                                            packet.extend_from_slice(&nonce.to_be_bytes());
-                                            packet.extend_from_slice(&encrypted[..enc_len]);
-                                            
-                                            if let Err(e) = socket.send_to(&packet, peer.endpoint).await {
-                                                error!("Failed to send encrypted packet: {}", e);
-                                            } else {
-                                                metrics.inc_packets_tx();
-                                                debug!("TUN->UDP: {} bytes to {} (session {}, nonce {})", len, dst_ip, peer.session_id, nonce);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Encryption failed: {}", e);
-                                        }
-                                    }
-                                } else {
-                                    warn!("No active session for peer {} (session {})", dst_ip, peer.session_id);
-                                }
-                            } else {
-                                // On-demand discovery: query nucleus for unknown peer
-                                if let Some(ref client) = nucleus_client {
-                                    if let Err(e) = client.query_peer(&socket, dst_ip).await {
-                                        warn!("Failed to query peer {}: {}", dst_ip, e);
-                                    } else {
-                                        debug!("Queried nucleus for peer {}", dst_ip);
-                                    }
-                                }
-                                // Packet will be dropped; retry after peer info arrives
-                            }
-                        }
-                    }
-                    Ok(_) => {} // Zero-length read, ignore
-                    Err(e) => {
-                        error!("TUN read error: {}", e);
-                    }
-                }
             }
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, src)) => {
-                        metrics.inc_packets_rx();
+                        _metrics.inc_packets_rx();
                         
                         // Check if this is a signaling message (first byte indicates type)
                         if len > 0 && buf[0] < 0x10 {
@@ -790,19 +269,20 @@ async fn main() -> Result<()> {
                                                         info!("Discovered peer {} at {}", peer_info.vip, endpoint);
 
                                                         // Configure WireGuard peer
-                                                        if let Some(ref wg_api) = wg_api {
-                                                            let peer = Peer::new(peer_info.public_key)
-                                                                .endpoint(Some(endpoint))
-                                                                .allowed_ips(vec![peer_info.vip.into()])
-                                                                .persistent_keepalive(25);
-                                                            if let Err(e) = wg_api.configure_peer(&peer) {
+                                                        if let Some(ref wg_api) = wg_api_opt {
+                                                            let pubkey_b64 = BASE64.encode(&peer_info.public_key);
+                                                            if let Err(e) = wg_api.set_peer(
+                                                                &pubkey_b64,
+                                                                Some(endpoint),
+                                                                &[peer_info.vip.to_string()],
+                                                                Some(25),
+                                                            ) {
                                                                 warn!("Failed to configure WG peer {}: {}", peer_info.vip, e);
                                                             } else {
                                                                 info!("Configured WG peer {} at {}", peer_info.vip, peer_info.endpoint);
                                                             }
                                                         }
                                                     }
-                                                }
                                                 }
                                             }
                                             Err(e) => warn!("Failed to parse REGISTER_ACK: {}", e),
@@ -823,19 +303,20 @@ async fn main() -> Result<()> {
                                                         info!("New peer joined: {} at {}", peer_info.vip, endpoint);
 
                                                         // Configure WireGuard peer
-                                                        if let Some(ref wg_api) = wg_api {
-                                                            let peer = Peer::new(peer_info.public_key)
-                                                                .endpoint(Some(endpoint))
-                                                                .allowed_ips(vec![peer_info.vip.into()])
-                                                                .persistent_keepalive(25);
-                                                            if let Err(e) = wg_api.configure_peer(&peer) {
+                                                        if let Some(ref wg_api) = wg_api_opt {
+                                                            let pubkey_b64 = BASE64.encode(&peer_info.public_key);
+                                                            if let Err(e) = wg_api.set_peer(
+                                                                &pubkey_b64,
+                                                                Some(endpoint),
+                                                                &[peer_info.vip.to_string()],
+                                                                Some(25),
+                                                            ) {
                                                                 warn!("Failed to configure WG peer {}: {}", peer_info.vip, e);
                                                             } else {
                                                                 info!("Configured WG peer {} at {}", peer_info.vip, peer_info.endpoint);
                                                             }
                                                         }
                                                     }
-                                                }
                                                 }
                                                 // Handle removed peers
                                                 for vip in ack.removed_vips {
@@ -861,20 +342,20 @@ async fn main() -> Result<()> {
                                                             info!("Query result: {} at {}", peer_info.vip, endpoint);
 
                                                             // Configure WireGuard peer
-                                                            if let Some(ref wg_api) = wg_api {
-                                                                let peer = Peer::new(peer_info.public_key)
-                                                                    .endpoint(Some(endpoint))
-                                                                    .allowed_ips(vec![peer_info.vip.into()])
-                                                                    .persistent_keepalive(25);
-                                                                if let Err(e) = wg_api.configure_peer(&peer) {
+                                                            if let Some(ref wg_api) = wg_api_opt {
+                                                                let pubkey_b64 = BASE64.encode(&peer_info.public_key);
+                                                                if let Err(e) = wg_api.set_peer(
+                                                                    &pubkey_b64,
+                                                                    Some(endpoint),
+                                                                    &[peer_info.vip.to_string()],
+                                                                    Some(25),
+                                                                ) {
                                                                     warn!("Failed to configure WG peer {}: {}", peer_info.vip, e);
                                                                 } else {
                                                                     info!("Configured WG peer {} at {}", peer_info.vip, peer_info.endpoint);
                                                                 }
                                                             }
                                                         }
-                                                    }
-                                                }
                                                     }
                                                 } else {
                                                     debug!("Peer not found in nucleus");
@@ -887,192 +368,6 @@ async fn main() -> Result<()> {
                                         debug!("Unknown signaling message type");
                                     }
                                 }
-                            }
-                            continue; // Skip normal packet processing for signaling
-                        }
-                        
-                        info!("Received {} bytes from {}", len, src);
-                        
-                        // All data/handshake packets start with 8-byte session_id
-                        if len >= 8 {
-                            let session_id = u64::from_be_bytes([
-                                buf[0], buf[1], buf[2], buf[3],
-                                buf[4], buf[5], buf[6], buf[7]
-                            ]);
-                            
-                            // Check session state to determine packet type
-                            let session_state = session_manager.get_session_mut(session_id)
-                                .map(|s| match s {
-                                    SessionState::Handshaking(_) => "handshaking",
-                                    SessionState::Active(_) => "active",
-                                });
-                            
-                            match session_state {
-                                Some("active") => {
-                                    // DATA PACKET: [session_id(8)] [nonce(8)] [encrypted_data]
-                                    // Minimum length: 8 (session) + 8 (nonce) + 1 (data) = 17
-                                    if len >= 17 {
-                                        // Extract nonce from bytes 8-15
-                                        let nonce = u64::from_be_bytes([
-                                            buf[8], buf[9], buf[10], buf[11],
-                                            buf[12], buf[13], buf[14], buf[15]
-                                        ]);
-                                        
-                                        if let Some(SessionState::Active(transport)) = session_manager.get_session_mut(session_id) {
-                                            let mut decrypted = get_buffer(len - 16); // Use pooled buffer
-                                            match transport.read_message(nonce, &buf[16..len], &mut decrypted) {
-                                                Ok(dec_len) => {
-                                                    // Write decrypted IP packet to TUN
-                                                    if let Some(ref mut tun) = _tun {
-                                                        if let Err(e) = tun.write(&decrypted[..dec_len]).await {
-                                                            error!("TUN write error: {}", e);
-                                                        } else {
-                                                            debug!("UDP->TUN: {} bytes from session {} (nonce {})", dec_len, session_id, nonce);
-                                                        }
-                                                    }
-
-                                                    // Update peer last_seen
-                                                    if let Some(peer) = peer_table.lookup_by_session(session_id) {
-                                                        let vip = peer.virtual_ip;
-                                                        peer_table.touch(&vip);
-                                                    }
-
-                                                    // Return buffer to pool
-                                                    return_buffer(decrypted);
-                                                }
-                                                Err(e) => {
-                                                    error!("Decryption failed: {}", e);
-                                                    // Still return buffer on error
-                                                    return_buffer(decrypted);
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        warn!("Data packet too short: {} bytes", len);
-                                    }
-                                }
-                                Some("handshaking") => {
-                                    // HANDSHAKE PACKET: advance handshake state
-                                    let mut peer_vip_from_handshake: Option<std::net::Ipv4Addr> = None;
-                                    
-                                             match session_manager.advance_handshake(session_id, &buf[8..len]) {
-                                                Ok(Some((response, peer_payload))) => {
-                                            // Extract peer VIP from payload (first 4 bytes)
-                                            let peer_payload: Vec<u8> = peer_payload;
-                                            if peer_payload.len() >= 4 {
-                                                peer_vip_from_handshake = Some(std::net::Ipv4Addr::new(
-                                                    peer_payload[0], peer_payload[1], 
-                                                    peer_payload[2], peer_payload[3]
-                                                ));
-                                            }
-                                            
-                                            let mut reply = session_id.to_be_bytes().to_vec();
-                                            reply.extend(response);
-                                            if let Err(e) = socket.send_to(&reply, src).await {
-                                                error!("Failed to send response: {}", e);
-                                            }
-                                        }
-                                        Ok(None) => {
-                                            warn!("Session {} not in handshaking state", session_id);
-                                        }
-                                        Err(e) => {
-                                            error!("Handshake error: {}", e);
-                                        }
-                                    }
-
-                                    // Try to finalize
-                                    if let Ok((true, key)) = session_manager.finalize_session(session_id) {
-                                        // Sync to BPF map
-                                        if let Some(session_key) = key {
-                                            if let Err(e) = bpf_sync.insert_session(session_id, session_key, src.ip(), src.port()) {
-                                                error!("BPF sync failed: {}", e);
-                                            } else {
-                                                metrics.inc_handshakes_completed();
-                                                info!("Session {} finalized and synced to BPF!", session_id);
-                                            }
-                                        }
-                                        
-                                        // Register peer with VIP from handshake (or fallback)
-                                        let peer_vip = peer_vip_from_handshake.unwrap_or_else(|| {
-                                            // Fallback: check if peer already exists in table (from signaling)
-                                            if let Some(peer) = peer_table.lookup_by_session(session_id) {
-                                                peer.virtual_ip
-                                            } else {
-                                                // Last resort: derive from session (not ideal)
-                                                std::net::Ipv4Addr::new(10, 200, 0, ((session_id % 250) + 1) as u8)
-                                            }
-                                        });
-                                        peer_table.upsert(peer_vip, session_id, src);
-                                        info!("Registered peer: {} at {} (session {})", peer_vip, src, session_id);
-                                    }
-                                }
-                                None => {
-                                    // NEW SESSION: create responder and start handshake
-                                    // Rate limiting check
-                                    if !rate_limiter.allow_new_session(src.ip()) {
-                                        metrics.inc_ratelimit_drops();
-                                        warn!("Rate limited: {} (session {})", src.ip(), session_id);
-                                        continue;
-                                    }
-                                    
-                                    info!("Creating responder session");
-                                    match NoiseSession::new_responder(&identity.private_key, psk.as_ref(), cipher_type) {
-                                        Ok(new_session) => {
-                                            session_manager.create_session(session_id, SessionState::Handshaking(new_session));
-                                            rate_limiter.record_session_start(session_id);
-                                            metrics.inc_sessions();
-                                            info!("Created new session: {} from {} (Local: {}, PSK: {})", 
-                                                session_id, src, hex::encode(&identity.public_key[..4]), if psk.is_some() { "Enabled" } else { "None" });
-                                            
-                                            // Process first handshake message
-                                            let mut peer_vip_from_handshake: Option<std::net::Ipv4Addr> = None;
-                                            
-                                             match session_manager.advance_handshake(session_id, &buf[8..len]) {
-                                                 Ok(Some((response, peer_payload))) => {
-                                                     let peer_payload: Vec<u8> = peer_payload;
-                                                     if peer_payload.len() >= 4 {
-                                                        peer_vip_from_handshake = Some(std::net::Ipv4Addr::new(
-                                                            peer_payload[0], peer_payload[1], 
-                                                            peer_payload[2], peer_payload[3]
-                                                        ));
-                                                    }
-                                                    
-                                                    let mut reply = session_id.to_be_bytes().to_vec();
-                                                    reply.extend(response);
-                                                    if let Err(e) = socket.send_to(&reply, src).await {
-                                                        error!("Failed to send response: {}", e);
-                                                    }
-                                                }
-                                                Ok(None) => {}
-                                                Err(e) => {
-                                                    error!("Handshake error: {}", e);
-                                                }
-                                            }
-                                            
-                                            // Try to finalize
-                                            if let Ok((true, key)) = session_manager.finalize_session(session_id) {
-                                                if let Some(session_key) = key {
-                                                    if let Err(e) = bpf_sync.insert_session(session_id, session_key, src.ip(), src.port()) {
-                                                        error!("BPF sync failed: {}", e);
-                                                    } else {
-                                                        metrics.inc_handshakes_completed();
-                                                        info!("Session {} finalized!", session_id);
-                                                    }
-                                                }
-
-                                                let peer_vip = peer_vip_from_handshake.unwrap_or_else(|| {
-                                                    std::net::Ipv4Addr::new(10, 200, 0, ((session_id % 250) + 1) as u8)
-                                                });
-                                                peer_table.upsert(peer_vip, session_id, src);
-                                                info!("Registered peer: {} at {} (session {})", peer_vip, src, session_id);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to create session: {}", e);
-                                        }
-                                    }
-                                }
-                                _ => {}
                             }
                         }
                     }

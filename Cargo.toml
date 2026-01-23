@@ -1,8 +1,6 @@
 [workspace]
 members = [
-    "omni-common",
     "omni-daemon",
-    "omni-ebpf/omni-ebpf-core",
 ]
 resolver = "2"
 

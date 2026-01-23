@@ -349,10 +349,10 @@ run_test() {
     # Check interfaces on edges
     print_step "Verifying WireGuard interfaces..."
     echo "Edge A interfaces:"
-    ssh_cmd "$NODE_A" "ip addr show wg0 2>/dev/null || echo 'wg0 not found'"
+    ssh_cmd "$NODE_A" "ip addr show omni0 2>/dev/null || echo 'omni0 not found'"
     echo ""
     echo "Edge B interfaces:"
-    ssh_cmd "$NODE_B" "ip addr show wg0 2>/dev/null || echo 'wg0 not found'"
+    ssh_cmd "$NODE_B" "ip addr show omni0 2>/dev/null || echo 'omni0 not found'"
     
     # Network tests over WireGuard tunnel
     print_header "VPN Tunnel Metrics (WireGuard: A → B)"
@@ -376,8 +376,8 @@ run_test() {
     done
     if [[ "$avg_latency" == "N/A" ]]; then
         echo "     Diagnostics (IP):"
-        ssh_cmd "$NODE_A" "ip addr show wg0" || true
-        ssh_cmd "$NODE_B" "ip addr show wg0" || true
+        ssh_cmd "$NODE_A" "ip addr show omni0" || true
+        ssh_cmd "$NODE_B" "ip addr show omni0" || true
         echo "     Diagnostics (Route):"
         ssh_cmd "$NODE_A" "ip route" || true
         ssh_cmd "$NODE_B" "ip route" || true
@@ -388,17 +388,17 @@ run_test() {
     print_step "Verifying WireGuard interfaces before iperf3..."
     local wg_a_up=false
     local wg_b_up=false
-    if ssh_cmd "$NODE_A" "ip addr show wg0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
+    if ssh_cmd "$NODE_A" "ip addr show omni0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
         wg_a_up=true
-        echo "  ✅ Edge A wg0: UP"
+        echo "  ✅ Edge A omni0: UP"
     else
-        echo "  ⚠️ Edge A wg0: DOWN or not found"
+        echo "  ⚠️ Edge A omni0: DOWN or not found"
     fi
-    if ssh_cmd "$NODE_B" "ip addr show wg0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
+    if ssh_cmd "$NODE_B" "ip addr show omni0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
         wg_b_up=true
-        echo "  ✅ Edge B wg0: UP"
+        echo "  ✅ Edge B omni0: UP"
     else
-        echo "  ⚠️ Edge B wg0: DOWN or not found"
+        echo "  ⚠️ Edge B omni0: DOWN or not found"
     fi
 
     # iperf3 over tunnel (only if WG is up)
@@ -573,4 +573,3 @@ fi
 run_test
 
 echo -e "\n${GREEN}✅ 3-Node WireGuard cloud test completed!${NC}"
-

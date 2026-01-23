@@ -1,44 +1,43 @@
-# OmniNervous: WireGuard-based VPN with Decentralized Peer Discovery
+# OmniNervous: High-Performance P2P VPN for AI & Robotics
 
 > [!IMPORTANT]
-> **OmniNervous** is an open-source, WireGuard-based VPN fabric built in **Rust**. It combines WireGuard's high-performance cryptography with decentralized peer discovery via the Nucleus signaling protocol for seamless, secure mesh networking.
+> **OmniNervous** is an open-source, high-performance P2P VPN daemon built in **Rust**. It combines the Noise IK protocol with native WireGuard integration for secure mesh networking with sub-millisecond latency.
 
-## 🧠 Core Architecture: Ganglion & WireGuard
-The project combines decentralized signaling with WireGuard's battle-tested data plane for maximum performance and simplicity.
+## Architecture Overview
 
-### 🚥 Ganglion: The Signaling Core (Control Plane)
-Implemented in asynchronous Rust (`tokio`), Ganglion provides decentralized peer discovery:
-- **Decentralized Discovery**: Nucleus signaling servers enable dynamic peer registration and lookup.
-- **Secure Authentication**: Cluster-based secrets with HMAC validation.
-- **NAT Traversal**: Built-in endpoint discovery for seamless connectivity.
+OmniNervous implements a dual-plane design with separate control and data paths:
 
-### ⚡ WireGuard: The Data Plane
-Leverages the Linux kernel's WireGuard module for high-performance, secure tunneling:
-- **Kernel-Optimized Crypto**: ChaCha20-Poly1305 with automatic hardware acceleration.
-- **Zero-Configuration**: Automatic key exchange and session management.
-- **Cross-Platform**: Native support for Linux, Windows, macOS, and mobile devices.
+### Ganglion (Control Plane)
+Asynchronous Rust daemon (`tokio`) handling signaling and peer management:
+- **Nucleus Protocol**: Decentralized peer discovery via REGISTER/HEARTBEAT/QUERY messages
+- **Cluster Authentication**: PSK-based authentication with X25519 identity verification
+- **NAT Traversal**: STUN-based endpoint discovery for seamless connectivity
 
----
+### WireGuard (Data Plane)
+Native WireGuard integration via `defguard_wireguard_rs`:
+- **Kernel-Optimized**: Uses Linux kernel WireGuard module when available
+- **Dual Cipher Support**: ChaCha20-Poly1305 and AES256-GCM with hardware acceleration
+- **Session Management**: Automatic peer configuration and keepalive
 
 ```mermaid
 graph LR
-    subgraph "Infrastructure Node A"
+    subgraph "Edge Node A"
         G_A[Ganglion<br/>Signaling]
         WG_A[WireGuard<br/>Data Plane]
     end
 
-    subgraph "The Ecosystem Hub"
+    subgraph "Nucleus Server"
         N[The Nucleus]
     end
 
-    subgraph "Infrastructure Node B"
+    subgraph "Edge Node B"
         G_B[Ganglion<br/>Signaling]
         WG_B[WireGuard<br/>Data Plane]
     end
 
-    G_A <-->|Peer Discovery| N
-    G_B <-->|Peer Discovery| N
-    WG_A <==>|Encrypted VPN<br/>ChaCha20-Poly1305| WG_B
+    G_A <-->|UDP/CBOR<br/>Signaling| N
+    G_B <-->|UDP/CBOR<br/>Signaling| N
+    WG_A <==>|Encrypted Tunnel<br/>WireGuard| WG_B
 
     style WG_A fill:#2d5a3d,color:#fff
     style WG_B fill:#2d5a3d,color:#fff
@@ -47,75 +46,263 @@ graph LR
 
 ---
 
-## ⚡ Performance Matrix (WireGuard Benchmarks)
+## Performance Results (v0.2.2)
 
-Validated on **AWS Lightsail $5 Instances** (Cross-Region: `us-east-1` ↔ `us-west-2` via Nucleus signaling):
+Validated on **AWS Lightsail $5 Instances** (3-node cluster, cross-region):
 
-| Feature | Methodology | Status | Result |
-|:---|:---:|:---:|:---|
-| **Cross-Region Latency** | WireGuard Kernel Module | ✅ EXCELLENT | **55.2ms (Total)** / **0.8ms Overhead** |
-| **Throughput (Base)** | ChaCha20-Poly1305 Crypto | ✅ STABLE | **180 Mbps** (96% WireGuard Efficiency) |
-| **Throughput (Peak)** | Kernel-Optimized WireGuard | ✅ PRODUCTION | **250+ Mbps** on optimized instances |
-| **Crypto Acceleration** | Automatic SIMD Detection | ✅ BUILT-IN | ChaCha20-Poly1305 with hardware acceleration |
-| **NAT Traversal** | Endpoint Discovery | ✅ ROBUST | 99% Success via Nucleus signaling |
+| Metric | Result | Notes |
+|:---|---:|:---|
+| **Throughput** | **133.24 Mbps** | 97.2% of baseline |
+| **Latency Overhead** | **0.4 ms** | VPN tunnel overhead |
+| **Baseline** | 137.02 Mbps | Raw iperf3 performance |
+| **Cipher** | AES256-GCM | ChaCha20 also supported |
 
-> **Note**: Performance leverages WireGuard's kernel implementation with automatic crypto acceleration. No manual cipher selection needed.
+> **Key Achievement**: Phase 7.2 achieved 97.2% baseline efficiency through hardware-accelerated AES-GCM and optimized logging.
 
-> **Note**: Benchmarks show 15-25% improvement over previous custom implementation while maintaining full compatibility.
+---
 
-## 🛠️ Developer Getting Started
+## Quick Start
 
-### 📋 Prerequisites
+### Prerequisites
 - **Rust**: Stable 1.70+
 - **Linux Kernel**: 5.6+ (for WireGuard support)
-- **WireGuard**: Kernel module installed
+- **WireGuard Tools**: `wg` and `wg-quick` installed
 
-### 🏗️ Build
-Build the daemon with standard Rust tooling:
-
+### Build
 ```bash
 cargo build --release
 ```
 
-### 🏃 Running a Cluster
-Deploy a Nucleus signaling server and connect your edge nodes:
+### Running OmniNervous
 
+**1. Start Nucleus (signaling server):**
 ```bash
-# Start Nucleus (signaling server)
 sudo ./target/release/omni-daemon --mode nucleus --port 51820
+```
 
-# Connect edge nodes
+**2. Connect edge nodes:**
+```bash
 sudo ./target/release/omni-daemon \
   --nucleus nucleus.example.com:51820 \
   --cluster my-network \
   --vip 10.200.0.1
 ```
 
-#### 🔐 Authentication
-For secure clusters, use a shared secret:
-
+**3. With PSK authentication:**
 ```bash
-# With authentication
 sudo ./target/release/omni-daemon \
   --nucleus nucleus.example.com:51820 \
   --cluster my-network \
   --secret "your-secure-secret-here" \
-  --vip 10.200.0.1
+  --vip 10.200.0.1 \
+  --cipher aesgcm
 ```
 
-### 🤝 How to Join the Ecosystem
-OmniNervous is an open-standard project. We are actively seeking contributors for:
-- **Signaling Protocol**: Enhancing the Nucleus protocol for larger clusters and better NAT traversal.
-- **Cross-Platform Support**: WireGuard implementations for additional platforms and embedded devices.
-- **Integration**: Kubernetes operators, Docker Compose examples, and cloud deployment templates.
-- **Performance Benchmarking**: Testing WireGuard performance across various network conditions and hardware.
----
-
-## 🔒 Security Architecture
-- **WireGuard Crypto**: Post-quantum secure ChaCha20-Poly1305 with automatic key rotation.
-- **Identity Verification**: X25519 keys tied to cluster authentication.
-- **Perfect Forward Secrecy**: Automatic session key regeneration.
-- **Kernel-Level Security**: All traffic processed in the Linux kernel with WireGuard.
+### CLI Options
+| Flag | Description | Default |
+|:---|:---|:---|
+| `--mode nucleus` | Run as signaling server | Edge mode |
+| `--nucleus` | Nucleus server address | Required for edge |
+| `--cluster` | Cluster name to join | Required |
+| `--secret` | Cluster PSK (min 16 chars) | Optional |
+| `--vip` | Virtual IP address (e.g., 10.200.0.1) | Required for edge |
+| `--port` | UDP port | 51820 |
+| `--cipher` | Encryption: `chachapoly` or `aesgcm` | chachapoly |
+| `--init` | Generate new identity and exit | - |
 
 ---
-*© 2026 OmniEdge Inc. WireGuard-powered networking for the decentralized future.*
+
+## Core Components
+
+### `omni-daemon/src/main.rs`
+Entry point handling CLI parsing, mode selection (nucleus/edge), WireGuard interface creation, and the main event loop.
+
+### `signaling.rs`
+Nucleus protocol implementation:
+- `REGISTER` / `REGISTER_ACK`: Peer registration with recent peer list
+- `HEARTBEAT` / `HEARTBEAT_ACK`: Keepalive with delta updates
+- `QUERY_PEER` / `PEER_INFO`: On-demand peer lookup (O(1))
+
+### `peers.rs`
+Peer routing table (VIP → endpoint mapping) with timeout-based cleanup.
+
+### `identity.rs`
+X25519 key generation, storage, and validation with 0o600 permissions.
+
+### `config.rs`
+TOML-based configuration with fallback paths (`/etc/omni/config.toml`, `~/.omni/config.toml`).
+
+### `metrics.rs` / `http.rs`
+Prometheus-compatible metrics server on port 9090 (`/metrics`, `/health` endpoints).
+
+---
+
+## Nucleus Signaling Protocol
+
+Scalable for 1000+ edges per cluster with O(1) lookups:
+
+```
+Nucleus State:
+  Cluster "robotics" → HashMap<VIP, Peer>  O(1)
+  Cluster "factory"  → HashMap<VIP, Peer>  O(1)
+
+Message Flow:
+  REGISTER          →  REGISTER_ACK (recent peers)
+  HEARTBEAT         →  HEARTBEAT_ACK (delta: new + removed)
+  QUERY_PEER        →  PEER_INFO (single peer)
+```
+
+**Bandwidth Optimization**:
+- No full peer lists (prevents O(n²) broadcasts)
+- Delta-only updates: ~100 KB/30s for 1000 edges
+- Recent peer window: 90 seconds (3x heartbeat)
+
+---
+
+## Security Features
+
+| Feature | Implementation |
+|:---|:---|
+| **Identity** | X25519 keys stored with 0o600 permissions |
+| **Handshake** | Noise IK with PSK authentication |
+| **Encryption** | ChaCha20-Poly1305 or AES256-GCM |
+| **Forward Secrecy** | Ephemeral key rotation per session |
+| **Peer Auth** | Cluster-based PSK validation |
+
+---
+
+## Current Status
+
+- **Version**: v0.2.2 (Phase 7.2 complete)
+- **Development Phase**: Production-ready for small clusters (10-100 edges)
+- **Active Development**: Phase 7.4 (QUIC signaling) in progress
+- **Performance**: 97.2% baseline efficiency, sub-1ms latency
+- **Scalability**: O(1) lookups, delta updates for 1000+ edges
+
+---
+
+## Deployment Options
+
+### Docker Deployment
+
+**1. Build the image:**
+```bash
+docker build -t omni-daemon:latest .
+```
+
+**2. Run with docker-compose (3-node test cluster):**
+```bash
+docker-compose up -d
+```
+
+This starts:
+- `omni-nucleus`: Signaling server at 10.0.0.2
+- `omni-edge-a`: Edge node with VIP 10.200.0.10
+- `omni-edge-b`: Edge node with VIP 10.200.0.20
+- `omni-tester`: Validation container
+
+**3. View logs:**
+```bash
+docker-compose logs -f
+```
+
+### Linux Binary Deployment
+
+**Build for linux-amd64:**
+```bash
+./scripts/build_linux_amd64.sh
+```
+
+This produces `scripts/omni-daemon-linux-amd64` for cloud deployment.
+
+**Deploy to cloud:**
+```bash
+./scripts/deploy_to_cloud.sh user@host
+```
+
+### Configuration File
+
+Create `config.toml`:
+
+```toml
+[daemon]
+port = 51820
+interface = "eth0"
+log_level = "info"
+
+[network]
+nucleus = "nucleus.example.com:51820"
+cluster = "my-network"
+
+[security]
+max_sessions_per_ip = 10
+handshake_timeout_secs = 5
+
+[[peers]]
+public_key = "abc123..."
+endpoint = "192.168.1.100:51820"
+```
+
+Load with: `omni-daemon --config config.toml`
+
+### Cloud Testing
+
+**3-node test orchestration:**
+```bash
+./scripts/cloud_test.sh \
+  --nucleus 104.x.x.x \
+  --node-a 54.x.x.x \
+  --node-b 35.x.x.x \
+  --ssh-key ~/.ssh/cloud.pem \
+  --secret "my-secure-secret-16"
+```
+
+This deploys binaries, runs baseline iperf3 tests, establishes WireGuard tunnel, and reports throughput/latency metrics.
+
+---
+
+## Directory Structure
+
+```
+OmniNervous/
+├── Dockerfile                    # Multi-stage Docker build
+├── docker-compose.yml           # 3-node test cluster
+├── config.example.toml          # Configuration template
+├── omni-daemon/
+│   └── src/
+│       ├── main.rs              # Entry point
+│       ├── signaling.rs         # Nucleus protocol
+│       ├── peers.rs             # Peer routing table
+│       ├── identity.rs          # X25519 identity
+│       ├── config.rs            # TOML config
+│       ├── metrics.rs           # Prometheus metrics
+│       └── http.rs              # /metrics, /health
+├── scripts/
+│   ├── build_linux_amd64.sh     # Cross-compile for amd64
+│   ├── build_local_docker.sh    # Docker build script
+│   ├── cloud_test.sh            # 3-node cloud test
+│   ├── deploy_to_cloud.sh       # rsync deployment
+│   └── auto_test_docker.sh      # Docker network test
+└── docs/
+    ├── WHITEPAPER.md            # Technical specification
+    └── ROADMAP.md               # Development roadmap
+```
+
+---
+
+## Contributing
+
+OmniNervous is seeking contributors for:
+- **Phase 7.4**: QUIC signaling plane implementation
+- **Plugins**: ROS2 transport, EtherCAT bridge, GPU-over-IP
+- **Performance**: AF_XDP zero-copy integration verification
+- **Testing**: Multi-region scalability testing
+
+---
+
+## License
+
+MIT / Apache 2.0 - See LICENSING.md
+
+---
+*© 2026 OmniEdge Inc. Engineering the nervous system of the future.*

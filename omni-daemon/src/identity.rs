@@ -138,4 +138,9 @@ impl Identity {
     pub fn public_key_bytes(&self) -> [u8; 32] {
         self.public_key
     }
+
+    /// Get raw private key bytes.
+    pub fn private_key_bytes(&self) -> [u8; 32] {
+        self.private_key
+    }
 }
