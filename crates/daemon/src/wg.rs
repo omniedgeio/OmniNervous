@@ -7,6 +7,7 @@ use log::{info, error};
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use serde::{Serialize, Deserialize};
 
 /// WgInterface unified enum
 /// Supports both Kernel (CLI) and Userspace (BoringTun) modes.
@@ -168,10 +169,17 @@ impl UserspaceWgControl {
     }
 
     pub async fn setup_tunnel(&self, vip: &str, _port: u16, private_key: &str) -> Result<(), String> {
+        info!("[WG] Setting up tunnel with interface '{}', VIP {}", self.interface, vip);
         // Parse private key
-        let secret_key = hex::decode(private_key).map_err(|e| e.to_string())?;
+        let secret_key = hex::decode(private_key).map_err(|e| {
+            error!("[WG] Failed to decode private key hex: {}", e);
+            e.to_string()
+        })?;
         let mut sk = [0u8; 32];
-        if secret_key.len() != 32 { return Err("Invalid private key length".to_string()); }
+        if secret_key.len() != 32 { 
+            error!("[WG] Invalid private key length: {}", secret_key.len());
+            return Err("Invalid private key length".to_string()); 
+        }
         sk.copy_from_slice(&secret_key);
         let secret = StaticSecret::from(sk);
         
@@ -181,6 +189,7 @@ impl UserspaceWgControl {
         }
 
         // Create TUN device
+        info!("[WG] Configuring TUN device...");
         let mut config = tun::Configuration::default();
         config.name(&self.interface)
               .address(vip)
@@ -192,14 +201,20 @@ impl UserspaceWgControl {
             config.packet_information(false);
         });
 
-        let device = tun::create_as_async(&config).map_err(|e| e.to_string())?;
+        info!("[WG] Calling tun::create_as_async for interface '{}'...", self.interface);
+        let device = tun::create_as_async(&config).map_err(|e| {
+            let err_msg = format!("[WG] Failed to create TUN device: {:?}", e);
+            error!("{}", err_msg);
+            err_msg
+        })?;
+        
+        info!("[WG] Userspace WireGuard TUN '{}' created successfully", self.interface);
         
         {
             let mut d_lock = self.inner.device.lock().await;
             *d_lock = Some(device);
         }
         
-        info!("Userspace WireGuard TUN '{}' created with IP {}", self.interface, vip);
         Ok(())
     }
 
@@ -389,7 +404,7 @@ impl UserspaceWgControl {
         if let Some(session) = peers.get(&pk) {
             let t_lock = session.tunnel.try_lock().ok()?;
             Some(PeerStats {
-                last_handshake: t_lock.last_handshake_authenticated(),
+                last_handshake: t_lock.time_since_last_handshake().map(|d| std::time::SystemTime::now() - d),
                 rx_bytes: 0, // BoringTun doesn't track these directly in Tunn
                 tx_bytes: 0,
             })
