@@ -22,11 +22,12 @@ impl Identity {
         let mut private_key = [0u8; 32];
         OsRng.fill_bytes(&mut private_key);
         
-        // For Ed25519, the public key is derived from the private key
-        // In a real implementation, use `ed25519-dalek` crate
-        // Here we use a simplified approach compatible with Noise_IK
+        Self::from_private_key(private_key)
+    }
+
+    /// Create identity from existing private key.
+    pub fn from_private_key(private_key: [u8; 32]) -> Self {
         let public_key = Self::derive_public_key(&private_key);
-        
         Self { private_key, public_key }
     }
 
