@@ -200,23 +200,25 @@ impl UserspaceWgControl {
 
         // Create TUN device
         info!("[WG] Configuring TUN device...");
-        let mut config = tun::Configuration::default();
-        config.name(&self.interface)
-              .address(vip)
-              .netmask("255.255.255.0")
-              .up();
+        let device = {
+            let mut config = tun::Configuration::default();
+            config.name(&self.interface)
+                  .address(vip)
+                  .netmask("255.255.255.0")
+                  .up();
 
-        #[cfg(target_os = "linux")]
-        config.platform(|config| {
-            config.packet_information(false);
-        });
+            #[cfg(target_os = "linux")]
+            config.platform(|config| {
+                config.packet_information(false);
+            });
 
-        info!("[WG] Calling tun::create_as_async for interface '{}'...", self.interface);
-        let device = tun::create_as_async(&config).map_err(|e| {
-            let err_msg = format!("[WG] Failed to create TUN device: {:?}", e);
-            error!("{}", err_msg);
-            err_msg
-        })?;
+            info!("[WG] Calling tun::create_as_async for interface '{}'...", self.interface);
+            tun::create_as_async(&config).map_err(|e| {
+                let err_msg = format!("[WG] Failed to create TUN device: {:?}", e);
+                error!("{}", err_msg);
+                err_msg
+            })?
+        };
         
         info!("[WG] Userspace WireGuard TUN '{}' created successfully", self.interface);
         
