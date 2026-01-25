@@ -1,0 +1,18 @@
+{
+  "timestamp": "20260125_044655",
+  "architecture": "3-node (Nucleus + WireGuard Edges)",
+  "nucleus": "18.214.99.197",
+  "edge_a": {"public_ip": "13.218.141.197", "vip": "10.200.0.10"},
+  "edge_b": {"public_ip": "54.202.146.75", "vip": "10.200.0.20"},
+  "cluster": "omni-test",
+  "authenticated": true,
+  "test_duration_sec": 10,
+  "baseline": {
+    "ping_ms": "54.340",
+    "throughput_mbps": "500.83"
+  },
+   "wireguard_tunnel": {
+     "ping_ms": "54.692",
+     "throughput_mbps": "470.74"
+   }
+}
