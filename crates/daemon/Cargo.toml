@@ -1,8 +1,18 @@
 [package]
 name = "omninervous"
-version = "0.2.3"
+version = "0.2.4"
+description = "High-Performance P2P VPN for AI & Robotics"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/omniedgeio/OmniNervous"
+homepage = "https://omniedge.io"
+keywords = ["p2p", "vpn", "mesh", "wireguard", "networking"]
+categories = ["network-programming"]
 edition = "2021"
 resolver = "2"
+
+[lib]
+name = "omninervous"
+path = "src/lib.rs"
 
 [[bin]]
 name = "omninervous"

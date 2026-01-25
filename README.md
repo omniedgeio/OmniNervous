@@ -117,7 +117,7 @@ sudo ./target/release/omninervous \
 
 ## Current Status
 
-- **Version**: v0.2.3 (Refined Architecture)
+- **Version**: v0.2.4 (Userspace WireGuard & Multi-Peer Mesh)
 - **Performance**: 371.35 Mbps throughput, optimized STUN fallback
 - **Scalability**: O(1) lookups, delta updates for 1000+ edges
 

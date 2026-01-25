@@ -1,5 +1,27 @@
 # Release Notes
 
+## v0.2.4: Userspace WireGuard & Multi-Peer Mesh
+
+**Date:** 2026-01-24
+
+This release introduces a significant architectural shift with the integration of a fully userspace WireGuard data plane via **BoringTun**, enabling multi-peer mesh connectivity across platforms without requiring kernel-space WireGuard.
+
+### 🚀 Major Achievements
+
+*   **Userspace WireGuard Integration**: Integrated `boringtun` to provide a high-performance, memory-safe userspace WireGuard implementation.
+*   **Multi-Peer Userspace Support**: The userspace data plane now fully supports multiple concurrent peer connections, enabling true mesh networking in userspace.
+*   **Enhanced CI/CD Pipeline**: Expanded the CI matrix to include more platforms and streamlined the build process for better reliability.
+*   **STUN Improvements**: Refined the STUN discovery logic for better NAT traversal reliability.
+
+### 🛠️ Changes
+
+*   **Data Plane**: Refactored `wg.rs` to support `WgInterface` unified enum, allowing seamless switching between Kernel (CLI) and Userspace (BoringTun) modes.
+*   **Networking**: Implemented packet encapsulation/decapsulation loops for userspace mode and a simplified routing table for peer management.
+*   **Build System**: Added `Dockerfile.local` and updated PowerShell build scripts for better local development workflows.
+*   **Testing**: Improved `cloud_test.sh` to support the new userspace data plane validation.
+
+---
+
 ## v0.2.3: Security Hardening & Zero-Config Roadmap
 
 **Date:** 2026-01-23
