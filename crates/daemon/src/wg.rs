@@ -3,7 +3,7 @@ use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
-use log::{info, error};
+use log::{info, error, debug};
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,7 +35,14 @@ impl WgInterface {
     pub async fn start_loop(&mut self, socket: Arc<UdpSocket>) -> Result<(), String> {
         match self {
             Self::Cli(_) => Ok(()), // No-op for kernel mode
-            Self::Userspace(u) => u.run_packet_loop(socket).await,
+            Self::Userspace(u) => u.start_tun_loop(socket).await,
+        }
+    }
+
+    pub async fn handle_incoming_packet(&mut self, buf: &[u8], src: SocketAddr, socket: &UdpSocket) -> Result<(), String> {
+        match self {
+            Self::Cli(_) => Ok(()), // Kernel handles this automatically
+            Self::Userspace(u) => u.handle_udp_packet(buf, src, socket).await,
         }
     }
 
@@ -141,6 +148,8 @@ struct UserspaceInner {
     routing_table: RwLock<HashMap<IpAddr, [u8; 32]>>,
     // Local Index -> Peer PublicKey (for decryption lookup)
     index_map: RwLock<HashMap<u32, [u8; 32]>>,
+    // Channel to TUN writer
+    tun_writer: RwLock<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>,
 }
 
 struct PeerSession {
@@ -164,6 +173,7 @@ impl UserspaceWgControl {
                 peers: RwLock::new(HashMap::new()),
                 routing_table: RwLock::new(HashMap::new()),
                 index_map: RwLock::new(HashMap::new()),
+                tun_writer: RwLock::new(None),
             }),
         }
     }
@@ -266,7 +276,7 @@ impl UserspaceWgControl {
         Ok(())
     }
 
-    pub async fn run_packet_loop(&self, udp_socket: Arc<UdpSocket>) -> Result<(), String> {
+    pub async fn start_tun_loop(&self, udp_socket: Arc<UdpSocket>) -> Result<(), String> {
         let device = {
             let mut d_lock = self.inner.device.lock().await;
             d_lock.take().ok_or("TUN device not initialized")?
@@ -277,7 +287,6 @@ impl UserspaceWgControl {
         let socket_tx = udp_socket.clone();
 
         // TUN -> UDP (Encrypt)
-        let inner_tx = inner.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
             loop {
@@ -286,12 +295,12 @@ impl UserspaceWgControl {
                         let dest_ip = parse_dst_ip(&buf[..n]);
                         if let Some(ip) = dest_ip {
                             let pk_opt = {
-                                let routing = inner_tx.routing_table.read().await;
+                                let routing = inner.routing_table.read().await;
                                 routing.get(&ip).copied()
                             };
 
                             if let Some(pk) = pk_opt {
-                                let peers = inner_tx.peers.read().await;
+                                let peers = inner.peers.read().await;
                                 if let Some(session) = peers.get(&pk) {
                                     if let Some(ep) = session.endpoint {
                                         let mut t_lock = session.tunnel.lock().await;
@@ -319,77 +328,90 @@ impl UserspaceWgControl {
             }
         });
 
-        // UDP -> TUN (Decrypt)
-        let inner_rx = inner.clone();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 2048];
-            loop {
-                match udp_socket.recv_from(&mut buf).await {
-                    Ok((n, src)) => {
-                        if n < 4 { continue; }
-                        let msg_type = buf[0];
-                        
-                        let session_opt = match msg_type {
-                            1 => {
-                                // Handshake Initiation: No receiver index, try all sessions
-                                let peers = inner_rx.peers.read().await;
-                                // We iterate and return the first one that successfully decapsulates
-                                // In a realistic scenario, we'd want to avoid locking/unlocking frequently
-                                // but here we've already locked the HashMap.
-                                // NOTE: We return the Arc<Mutex<Tunn>> for the first peer
-                                // This is still slightly inefficient but correct for mesh recruitment.
-                                peers.values().next().map(|s| s.tunnel.clone()) // Still simplified, but we'll try to be more thorough
-                            }
-                            2 => {
-                                // Handshake Response: Receiver index at offset 8
-                                if n >= 12 {
-                                    let index = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
-                                    let indices = inner_rx.index_map.read().await;
-                                    if let Some(pk) = indices.get(&index) {
-                                        let peers = inner_rx.peers.read().await;
-                                        peers.get(pk).map(|s| s.tunnel.clone())
-                                    } else { None }
-                                } else { None }
-                            }
-                            3 | 4 => {
-                                // Cookie Reply (3) or Data (4): Receiver index at offset 4
-                                if n >= 8 {
-                                    let index = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-                                    let indices = inner_rx.index_map.read().await;
-                                    if let Some(pk) = indices.get(&index) {
-                                        let peers = inner_rx.peers.read().await;
-                                        peers.get(pk).map(|s| s.tunnel.clone())
-                                    } else { None }
-                                } else { None }
-                            }
-                            _ => None,
-                        };
+        // Store writer in inner for the UDP -> TUN handler
+        // Actually, we can just spawn the writer task or use a channel
+        // Let's use a channel to communicate with the writer
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+        {
+            let mut writer_lock = self.inner.tun_writer.write().await;
+            *writer_lock = Some(tx);
+        }
 
-                        if let Some(t_arc) = session_opt {
-                            let mut t_lock = t_arc.lock().await;
-                            let mut dst = [0u8; 2048];
-                            match t_lock.decapsulate(Some(src.ip()), &buf[..n], &mut dst) {
-                                TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
-                                    if let Err(e) = writer.write_all(packet).await {
-                                        error!("Failed to write to TUN: {}", e);
-                                    }
-                                }
-                                TunnResult::WriteToNetwork(packet) => {
-                                    if let Err(e) = udp_socket.send_to(packet, src).await {
-                                        error!("Failed to send handshake response: {}", e);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("UDP recv error: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                    }
+        tokio::spawn(async move {
+            while let Some(packet) = rx.recv().await {
+                if let Err(e) = writer.write_all(&packet).await {
+                    error!("Failed to write to TUN: {}", e);
                 }
             }
         });
+
+        Ok(())
+    }
+
+    pub async fn handle_udp_packet(&self, buf: &[u8], src: SocketAddr, udp_socket: &UdpSocket) -> Result<(), String> {
+        if buf.len() < 4 { return Ok(()); }
+        let msg_type = buf[0];
+        
+        let tunnels_to_try = match msg_type {
+            1 => {
+                // Handshake Initiation: Try all sessions
+                let peers = self.inner.peers.read().await;
+                peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
+            }
+            2 => {
+                // Handshake Response: Receiver index at offset 8
+                if buf.len() >= 12 {
+                    let index = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                    let indices = self.inner.index_map.read().await;
+                    if let Some(pk) = indices.get(&index) {
+                        let peers = self.inner.peers.read().await;
+                        peers.get(pk).map(|s| vec![s.tunnel.clone()]).unwrap_or_default()
+                    } else { vec![] }
+                } else { vec![] }
+            }
+            3 | 4 => {
+                // Cookie Reply (3) or Data (4): Receiver index at offset 4
+                if buf.len() >= 8 {
+                    let index = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                    let indices = self.inner.index_map.read().await;
+                    if let Some(pk) = indices.get(&index) {
+                        let peers = self.inner.peers.read().await;
+                        peers.get(pk).map(|s| vec![s.tunnel.clone()]).unwrap_or_default()
+                    } else { vec![] }
+                } else { vec![] }
+            }
+            _ => vec![],
+        };
+
+        for t_arc in tunnels_to_try {
+            let mut t_lock = t_arc.lock().await;
+            let mut dst = [0u8; 2048];
+            match t_lock.decapsulate(Some(src.ip()), buf, &mut dst) {
+                TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
+                    let packet_vec = packet.to_vec();
+                    let tun_writer = self.inner.tun_writer.read().await;
+                    if let Some(tx) = tun_writer.as_ref() {
+                        let _ = tx.try_send(packet_vec);
+                    }
+                    return Ok(()); // Success
+                }
+                TunnResult::WriteToNetwork(packet) => {
+                    if let Err(e) = udp_socket.send_to(packet, src).await {
+                        error!("Failed to send handshake response: {}", e);
+                    }
+                    return Ok(()); // Handshake progression
+                }
+                TunnResult::Err(boringtun::noise::errors::WireGuardError::WrongIndex) => continue,
+                TunnResult::Err(e) => {
+                    debug!("Decapsulate error: {:?}", e);
+                    // Might be wrong peer, continue
+                }
+                _ => {
+                    // Handshake progression or nothing, but we found the peer
+                    return Ok(());
+                }
+            }
+        }
 
         Ok(()) 
     }

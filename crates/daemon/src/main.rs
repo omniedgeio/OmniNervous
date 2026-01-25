@@ -239,6 +239,9 @@ async fn main() -> Result<()> {
         config.network.use_builtin_stun
     };
 
+    // Determine mode: Nucleus (signaling server) or Edge (P2P client)
+    let is_nucleus_mode = args.mode.as_ref().map(|m| m == "nucleus").unwrap_or(false);
+
     let cluster_secret = if let Some(ref s) = args.secret {
         if s.len() < 16 {
             anyhow::bail!("Cluster secret must be at least 16 characters for security");
@@ -246,14 +249,25 @@ async fn main() -> Result<()> {
             Some(s)
         }
     } else {
+        if is_nucleus_mode || args.cluster.is_some() {
+             anyhow::bail!("--secret is REQUIRED for security. Please provide a secret (min 16 chars).");
+        }
         None
     };
 
+    #[cfg(target_os = "linux")]
+    {
+        if !args.userspace && args.vip.is_some() {
+            let output = std::process::Command::new("id").arg("-u").output()?;
+            let uid = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>().unwrap_or(0);
+            if uid != 0 {
+                anyhow::bail!("Root/sudo privileges are REQUIRED for KERNEL mode WireGuard on Linux.");
+            }
+        }
+    }
+
     let _metrics = Metrics::new();
     let mut peer_table = peers::PeerTable::new();
-
-    // Determine mode: Nucleus (signaling server) or Edge (P2P client)
-    let is_nucleus_mode = args.mode.as_ref().map(|m| m == "nucleus").unwrap_or(false);
 
     // Cleanup interval - runs every 60 seconds
     let mut cleanup_interval = interval(Duration::from_secs(60));
@@ -434,8 +448,25 @@ async fn main() -> Result<()> {
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, src)) => {
-                        if let Err(e) = handler.handle_packet(&buf[..len], src).await {
-                            error!("Error handling packet from {}: {}", src, e);
+                        let pkt = &buf[..len];
+                        if pkt.is_empty() { continue; }
+                        
+                        let first_byte = pkt[0];
+                        
+                        if first_byte >= 0x11 {
+                            // Signaling message
+                            if let Err(e) = handler.handle_packet(pkt, src).await {
+                                error!("Error handling signaling packet from {}: {}", src, e);
+                            }
+                        } else if first_byte >= 0x01 && first_byte <= 0x04 {
+                            // WireGuard packet
+                            if let Some(wg) = wg_api_opt.as_mut() {
+                                if let Err(e) = wg.handle_incoming_packet(pkt, src, &socket).await {
+                                    error!("Error handling WireGuard packet from {}: {}", src, e);
+                                }
+                            }
+                        } else {
+                            debug!("Ignored unknown packet type {} from {}", first_byte, src);
                         }
                     }
                     Err(e) => {

@@ -24,8 +24,8 @@ impl<'a> MessageHandler<'a> {
     pub async fn handle_packet(&mut self, buf: &[u8], src: SocketAddr) -> Result<()> {
         self.metrics.inc_packets_rx();
         
-        // Signaling message types are 0x01-0x0F
-        if !buf.is_empty() && buf[0] < 0x10 {
+        // Signaling message types are 0x11-0x1F
+        if !buf.is_empty() && buf[0] >= 0x11 {
             if self.is_nucleus_mode {
                 self.handle_nucleus_signaling(buf, src).await?;
             } else if signaling::is_signaling_message(buf) {

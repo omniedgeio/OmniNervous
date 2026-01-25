@@ -29,24 +29,27 @@ use sha2::Sha256;
 use governor::{RateLimiter, Quota};
 use std::num::NonZeroU32;
 
-/// Message types for signaling protocol
-const MSG_REGISTER: u8 = 0x01;
-const MSG_REGISTER_ACK: u8 = 0x02;
-const MSG_HEARTBEAT: u8 = 0x03;
-const MSG_HEARTBEAT_ACK: u8 = 0x04;
-const MSG_QUERY_PEER: u8 = 0x05;
-const MSG_PEER_INFO: u8 = 0x06;
+/// Message types for signaling protocol (0x11-0x1F to avoid WireGuard collision)
+const MSG_REGISTER: u8 = 0x11;
+const MSG_REGISTER_ACK: u8 = 0x12;
+const MSG_HEARTBEAT: u8 = 0x13;
+const MSG_HEARTBEAT_ACK: u8 = 0x14;
+const MSG_QUERY_PEER: u8 = 0x15;
+const MSG_PEER_INFO: u8 = 0x16;
 #[allow(dead_code)]
-const MSG_DEREGISTER: u8 = 0x07;
-const MSG_STUN_QUERY: u8 = 0x08;
-const MSG_STUN_RESPONSE: u8 = 0x09;
-pub const MSG_NAT_PUNCH: u8 = 0x0A;
+const MSG_DEREGISTER: u8 = 0x17;
+const MSG_STUN_QUERY: u8 = 0x18;
+const MSG_STUN_RESPONSE: u8 = 0x19;
+pub const MSG_NAT_PUNCH: u8 = 0x1A;
 
 /// How long peers stay in "recent" list for delta updates
 const RECENT_PEER_WINDOW_SECS: u64 = 90; // 3x heartbeat interval
 
 /// Maximum length for cluster names to prevent resource exhaustion
 const MAX_CLUSTER_NAME_LEN: usize = 64;
+
+/// Maximum number of removal records to keep per cluster
+const MAX_REMOVAL_RECORDS: usize = 1000;
 
 fn is_valid_cluster(name: &str) -> bool {
     !name.is_empty() && name.len() <= MAX_CLUSTER_NAME_LEN && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
@@ -284,6 +287,11 @@ impl NucleusState {
             
             // Cleanup old removal records
             state.removed.retain(|r| r.removed_at.elapsed() < removal_retention);
+            
+            // Enforce capacity limit
+            if state.removed.len() > MAX_REMOVAL_RECORDS {
+                state.removed.truncate(MAX_REMOVAL_RECORDS);
+            }
         }
     }
 
@@ -669,7 +677,7 @@ pub fn parse_peer_info(data: &[u8], secret: Option<&str>) -> Result<PeerInfoMess
 /// Check if message is a signaling message (from nucleus)
 pub fn is_signaling_message(data: &[u8]) -> bool {
     if data.is_empty() { return false; }
-    matches!(data[0], MSG_REGISTER_ACK | MSG_HEARTBEAT_ACK | MSG_PEER_INFO)
+    matches!(data[0], MSG_REGISTER_ACK | MSG_HEARTBEAT_ACK | MSG_PEER_INFO | MSG_STUN_RESPONSE | MSG_NAT_PUNCH)
 }
 
 /// Get signaling message type

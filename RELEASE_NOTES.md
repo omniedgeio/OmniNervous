@@ -1,5 +1,27 @@
 # Release Notes
 
+## v0.2.5: Protocol Alignment & Master Dispatcher
+
+**Date:** 2026-01-24
+
+This release addresses critical architectural issues identified in the v0.2.4 rollout, specifically resolving protocol collisions between signaling and WireGuard traffic, and fixing multi-peer handshake selection in userspace mode.
+
+### 🚀 Major Achievements
+
+*   **Protocol Collision RESOLVED**: Re-indexed all signaling messages to `0x11`+ to eliminate overlap with the WireGuard protocol (1-4). This ensures 100% reliable packet routing on a shared UDP socket.
+*   **Master UDP Dispatcher**: Refactored the daemon to use a single "Master" receiver loop, eliminating socket contention and non-deterministic packet delivery.
+*   **Userspace Mesh Fix**: Corrected the handshake selection logic to support true P2P mesh connectivity in userspace mode by validating handshakes against all known peers.
+*   **Signaling Security**: Enforced mandatory cluster secrets for all registration and heartbeat operations to prevent signaling spoofing.
+
+### 🛠️ Changes
+
+*   **Architecture**: Implemented `handle_incoming_packet` in `wg.rs` and a centralized dispatcher in `main.rs`.
+*   **Security**: Added pre-flight root/sudo checks for KERNEL mode WireGuard on Linux.
+*   **Reliability**: Added capacity limits to `RemovedPeer` tracking in `NucleusState` to prevent unbounded memory growth.
+*   **Developer Experience**: Standardized the `Identity` initialization to support easier persistence in consumer applications.
+
+---
+
 ## v0.2.4: Userspace WireGuard & Multi-Peer Mesh
 
 **Date:** 2026-01-24
