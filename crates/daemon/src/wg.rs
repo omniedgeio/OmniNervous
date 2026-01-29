@@ -201,8 +201,16 @@ impl UserspaceWgControl {
         // Create TUN device
         info!("[WG] Configuring TUN device...");
         let mut config = tun::Configuration::default();
-        config.name(&self.interface)
-              .address(vip)
+        
+        // On macOS, TUN interfaces must be named utunN - we cannot set custom names.
+        // Only set the interface name on Linux where custom names are supported.
+        // On macOS, the system will auto-assign the next available utun interface.
+        #[cfg(target_os = "linux")]
+        if !self.interface.is_empty() {
+            config.name(&self.interface);
+        }
+        
+        config.address(vip)
               .netmask("255.255.255.0")
               .up();
 
@@ -211,13 +219,20 @@ impl UserspaceWgControl {
             config.packet_information(false);
         });
 
+        #[cfg(target_os = "macos")]
+        info!("[WG] Calling tun::create_as_async (macOS will auto-assign utunN)...");
+        #[cfg(not(target_os = "macos"))]
         info!("[WG] Calling tun::create_as_async for interface '{}'...", self.interface);
+        
         let device = tun::create_as_async(&config).map_err(|e| {
             let err_msg = format!("[WG] Failed to create TUN device: {:?}", e);
             error!("{}", err_msg);
             err_msg
         })?;
         
+        #[cfg(target_os = "macos")]
+        info!("[WG] Userspace WireGuard TUN created successfully (macOS utun)");
+        #[cfg(not(target_os = "macos"))]
         info!("[WG] Userspace WireGuard TUN '{}' created successfully", self.interface);
         
         {
