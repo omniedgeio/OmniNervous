@@ -2,18 +2,18 @@
 //!
 //! Maps virtual IPs to peer UDP endpoints for packet routing.
 
-use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::time::{Duration, Instant};
 use log::info;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, Instant};
 
 /// Information about a connected peer
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
     /// Peer's UDP endpoint (public IP:port)
     pub endpoint: SocketAddr,
-    /// Peer's virtual IP
-    pub virtual_ip: Ipv4Addr,
+    /// Peer's virtual IP (supports both IPv4 and IPv6)
+    pub virtual_ip: IpAddr,
     /// Peer's X25519 public key
     pub public_key: Option<[u8; 32]>,
     /// Last activity time
@@ -22,8 +22,8 @@ pub struct PeerInfo {
 
 /// Peer routing table
 pub struct PeerTable {
-    /// VIP → PeerInfo mapping
-    by_vip: HashMap<Ipv4Addr, PeerInfo>,
+    /// VIP → PeerInfo mapping (supports both IPv4 and IPv6 VIPs)
+    by_vip: HashMap<IpAddr, PeerInfo>,
     /// Peer timeout duration
     timeout: Duration,
 }
@@ -35,9 +35,9 @@ impl PeerTable {
             timeout: Duration::from_secs(120), // 2 minute timeout
         }
     }
-    
+
     /// Add or update a peer
-    pub fn upsert(&mut self, virtual_ip: Ipv4Addr, endpoint: SocketAddr) {
+    pub fn upsert(&mut self, virtual_ip: IpAddr, endpoint: SocketAddr) {
         // Preserve existing public_key if peer already exists
         let existing_pubkey = self.by_vip.get(&virtual_ip).and_then(|p| p.public_key);
 
@@ -52,13 +52,21 @@ impl PeerTable {
 
         info!("Peer registered: {} → {}", virtual_ip, endpoint);
     }
-    
+
     /// Register a peer from signaling (includes public key and pinning check)
-    pub fn register(&mut self, public_key: [u8; 32], endpoint: SocketAddr, vip: Ipv4Addr) -> Result<(), String> {
+    pub fn register(
+        &mut self,
+        public_key: [u8; 32],
+        endpoint: SocketAddr,
+        vip: IpAddr,
+    ) -> Result<(), String> {
         if let Some(existing) = self.by_vip.get(&vip) {
             if let Some(pinned_key) = existing.public_key {
                 if pinned_key != public_key {
-                    let err = format!("ALERT: Public key mismatch for peer {}! Potential MITM attempt detected.", vip);
+                    let err = format!(
+                        "ALERT: Public key mismatch for peer {}! Potential MITM attempt detected.",
+                        vip
+                    );
                     log::warn!("{}", err);
                     return Err(err);
                 }
@@ -76,27 +84,21 @@ impl PeerTable {
         info!("Peer registered and pinned: {} → {}", vip, endpoint);
         Ok(())
     }
-    
 
-    
-
-    
     /// Lookup peer by virtual IP
-    pub fn lookup_by_vip(&self, vip: &Ipv4Addr) -> Option<&PeerInfo> {
+    pub fn lookup_by_vip(&self, vip: &IpAddr) -> Option<&PeerInfo> {
         self.by_vip.get(vip)
     }
-    
 
-    
     /// Update last_seen for a peer
-    pub fn touch(&mut self, vip: &Ipv4Addr) {
+    pub fn touch(&mut self, vip: &IpAddr) {
         if let Some(peer) = self.by_vip.get_mut(vip) {
             peer.last_seen = Instant::now();
         }
     }
-    
+
     /// Remove a peer by VIP (for delta updates from nucleus)
-    pub fn remove_by_vip(&mut self, vip: &Ipv4Addr) -> Option<[u8; 32]> {
+    pub fn remove_by_vip(&mut self, vip: &IpAddr) -> Option<[u8; 32]> {
         if let Some(peer) = self.by_vip.remove(vip) {
             info!("Removed peer {} from routing table", vip);
             peer.public_key
@@ -104,11 +106,13 @@ impl PeerTable {
             None
         }
     }
-    
+
     /// Remove expired peers
-    pub fn cleanup(&mut self) -> Vec<Ipv4Addr> {
+    pub fn cleanup(&mut self) -> Vec<IpAddr> {
         let now = Instant::now();
-        let expired: Vec<_> = self.by_vip.iter()
+        let expired: Vec<_> = self
+            .by_vip
+            .iter()
             .filter(|(_, p)| now.duration_since(p.last_seen) > self.timeout)
             .map(|(vip, _)| *vip)
             .collect();
@@ -121,17 +125,17 @@ impl PeerTable {
 
         expired
     }
-    
+
     /// Get peer count
     pub fn len(&self) -> usize {
         self.by_vip.len()
     }
-    
+
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.by_vip.is_empty()
     }
-    
+
     /// Iterate over all peers
     pub fn iter(&self) -> impl Iterator<Item = &PeerInfo> {
         self.by_vip.values()
@@ -147,13 +151,31 @@ impl Default for PeerTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use std::net::Ipv4Addr;
+
     #[test]
-    fn test_peer_upsert_and_lookup() {
+    fn test_peer_upsert_and_lookup_ipv4() {
         let mut table = PeerTable::new();
 
-        let vip = Ipv4Addr::new(10, 200, 0, 10);
+        let vip = IpAddr::V4(Ipv4Addr::new(10, 200, 0, 10));
         let endpoint: SocketAddr = "1.2.3.4:51820".parse().unwrap();
+
+        table.upsert(vip, endpoint);
+
+        let peer = table.lookup_by_vip(&vip).unwrap();
+        assert_eq!(peer.endpoint, endpoint);
+
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn test_peer_upsert_and_lookup_ipv6() {
+        use std::net::Ipv6Addr;
+        let mut table = PeerTable::new();
+
+        // ULA address: fd00::/8
+        let vip = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x10));
+        let endpoint: SocketAddr = "[2001:db8::1]:51820".parse().unwrap();
 
         table.upsert(vip, endpoint);
 

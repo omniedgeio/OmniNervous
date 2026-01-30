@@ -137,13 +137,13 @@ struct Args {
 
 
     
-    /// Virtual IP address (e.g., 10.200.0.1)
+    /// Virtual IP address (e.g., 10.200.0.1 or fd00::1)
     #[arg(long)]
-    vip: Option<std::net::Ipv4Addr>,
+    vip: Option<std::net::IpAddr>,
     
-    /// Virtual network mask
-    #[arg(long, default_value = "255.255.255.0")]
-    netmask: std::net::Ipv4Addr,
+    /// Virtual network prefix length (e.g., 24 for IPv4 /24, 64 for IPv6 /64)
+    #[arg(long, default_value = "24")]
+    prefix_len: u8,
     
     /// Virtual interface name
     #[arg(long, default_value = "omni0")]

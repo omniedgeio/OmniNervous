@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use log::{info, warn, debug};
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
-use std::net::{SocketAddr, Ipv4Addr};
+use std::net::{SocketAddr, IpAddr};
 use std::time::{Instant, Duration};
 use tokio::net::UdpSocket;
 use hmac::{Hmac, Mac};
@@ -55,21 +55,34 @@ fn is_valid_cluster(name: &str) -> bool {
     !name.is_empty() && name.len() <= MAX_CLUSTER_NAME_LEN && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
-fn is_private_ip(ip: Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    // 10.0.0.0/8
-    (octets[0] == 10) ||
-    // 172.16.0.0/12
-    (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) ||
-    // 192.168.0.0/16
-    (octets[0] == 192 && octets[1] == 168)
+/// Check if an IP address is in a private range
+/// Supports both IPv4 private ranges and IPv6 ULA/link-local
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets();
+            // 10.0.0.0/8
+            (octets[0] == 10) ||
+            // 172.16.0.0/12
+            (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) ||
+            // 192.168.0.0/16
+            (octets[0] == 192 && octets[1] == 168)
+        }
+        IpAddr::V6(ipv6) => {
+            let segments = ipv6.segments();
+            // fc00::/7 - Unique Local Addresses (ULA)
+            (segments[0] & 0xfe00) == 0xfc00 ||
+            // fe80::/10 - Link-Local Addresses
+            (segments[0] & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 /// Registration message from Edge to Nucleus
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RegisterMessage {
     pub cluster: String,
-    pub vip: Ipv4Addr,
+    pub vip: IpAddr,
     pub listen_port: u16,
     pub public_key: [u8; 32],
     pub hmac_tag: Option<[u8; 32]>,
@@ -87,7 +100,7 @@ pub struct RegisterAckMessage {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HeartbeatMessage {
     pub cluster: String,
-    pub vip: Ipv4Addr,
+    pub vip: IpAddr,
     pub last_seen_count: u32,  // Number of peers edge knows about
     pub hmac_tag: Option<[u8; 32]>,
 }
@@ -96,7 +109,7 @@ pub struct HeartbeatMessage {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HeartbeatAckMessage {
     pub new_peers: Vec<PeerInfo>,      // Joined since last heartbeat
-    pub removed_vips: Vec<Ipv4Addr>,   // Left since last heartbeat
+    pub removed_vips: Vec<IpAddr>,     // Left since last heartbeat
     pub hmac_tag: Option<[u8; 32]>,
 }
 
@@ -104,15 +117,15 @@ pub struct HeartbeatAckMessage {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct QueryPeerMessage {
     pub cluster: String,
-    pub target_vip: Ipv4Addr,
-    pub requester_vip: Ipv4Addr,
+    pub target_vip: IpAddr,
+    pub requester_vip: IpAddr,
     pub hmac_tag: Option<[u8; 32]>,
 }
 
 /// Peer info response (single peer)
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeerInfo {
-    pub vip: Ipv4Addr,
+    pub vip: IpAddr,
     pub endpoint: String,        // "ip:port"
     pub public_key: [u8; 32],
 }
@@ -134,7 +147,7 @@ pub struct StunResponse {
 /// Registered peer on Nucleus with join time tracking
 #[derive(Debug, Clone)]
 pub struct RegisteredPeer {
-    pub vip: Ipv4Addr,
+    pub vip: IpAddr,
     pub endpoint: SocketAddr,
     pub listen_port: u16,
     pub public_key: [u8; 32],
@@ -145,7 +158,7 @@ pub struct RegisteredPeer {
 /// Recently removed peer (for delta updates)
 #[derive(Debug, Clone)]
 struct RemovedPeer {
-    pub vip: Ipv4Addr,
+    pub vip: IpAddr,
     pub removed_at: Instant,
 }
 
@@ -153,7 +166,7 @@ struct RemovedPeer {
 #[derive(Default)]
 struct ClusterState {
     /// VIP → peer info (O(1) lookup for QUERY_PEER)
-    peers: HashMap<Ipv4Addr, RegisteredPeer>,
+    peers: HashMap<IpAddr, RegisteredPeer>,
     /// Recently removed peers for delta updates
     removed: Vec<RemovedPeer>,
 }
@@ -200,7 +213,7 @@ impl NucleusState {
     }
 
     /// Get peers that joined recently (for REGISTER_ACK)
-    fn get_recent_peers(&self, cluster: &str, exclude_vip: Ipv4Addr) -> Vec<PeerInfo> {
+    fn get_recent_peers(&self, cluster: &str, exclude_vip: IpAddr) -> Vec<PeerInfo> {
         let window = Duration::from_secs(RECENT_PEER_WINDOW_SECS);
         
         self.clusters.get(cluster)
@@ -218,8 +231,8 @@ impl NucleusState {
     }
 
     /// Update heartbeat and return delta (new peers + removed peers)
-    pub fn heartbeat(&mut self, cluster: &str, vip: Ipv4Addr, last_heartbeat_time: Option<Instant>) 
-        -> (Vec<PeerInfo>, Vec<Ipv4Addr>) 
+    pub fn heartbeat(&mut self, cluster: &str, vip: IpAddr, last_heartbeat_time: Option<Instant>) 
+        -> (Vec<PeerInfo>, Vec<IpAddr>) 
     {
         let state = match self.clusters.get_mut(cluster) {
             Some(s) => s,
@@ -245,7 +258,7 @@ impl NucleusState {
             .collect();
         
         // Removed peers since last heartbeat
-        let removed_vips: Vec<Ipv4Addr> = state.removed.iter()
+        let removed_vips: Vec<IpAddr> = state.removed.iter()
             .filter(|r| r.removed_at > since)
             .map(|r| r.vip)
             .collect();
@@ -254,7 +267,7 @@ impl NucleusState {
     }
 
     /// Lookup a specific peer by VIP (O(1))
-    pub fn query_peer(&self, cluster: &str, vip: Ipv4Addr) -> Option<PeerInfo> {
+    pub fn query_peer(&self, cluster: &str, vip: IpAddr) -> Option<PeerInfo> {
         self.clusters.get(cluster)
             .and_then(|state| state.peers.get(&vip))
             .map(|p| PeerInfo {
@@ -271,7 +284,7 @@ impl NucleusState {
         
         for (cluster, state) in self.clusters.iter_mut() {
             // Find and remove stale peers
-            let stale: Vec<Ipv4Addr> = state.peers.iter()
+            let stale: Vec<IpAddr> = state.peers.iter()
                 .filter(|(_, p)| p.last_seen.elapsed() > timeout)
                 .map(|(vip, _)| *vip)
                 .collect();
@@ -498,7 +511,7 @@ pub fn handle_nucleus_message(
 pub struct NucleusClient {
     nucleus_addr: SocketAddr,
     cluster: String,
-    vip: Ipv4Addr,
+    vip: IpAddr,
     listen_port: u16,
     public_key: [u8; 32],
     secret: Option<String>,
@@ -509,7 +522,7 @@ impl NucleusClient {
         nucleus: &str,
         cluster: String,
         public_key: [u8; 32],
-        vip: Ipv4Addr,
+        vip: IpAddr,
         listen_port: u16,
         secret: Option<String>,
     ) -> Result<Self> {
@@ -581,7 +594,7 @@ impl NucleusClient {
     }
 
     /// Query specific peer by VIP
-    pub async fn query_peer(&self, socket: &UdpSocket, target_vip: Ipv4Addr) -> Result<()> {
+    pub async fn query_peer(&self, socket: &UdpSocket, target_vip: IpAddr) -> Result<()> {
         let mut msg = QueryPeerMessage {
             cluster: self.cluster.clone(),
             target_vip,
@@ -604,7 +617,7 @@ impl NucleusClient {
         &self.cluster
     }
 
-    pub fn vip(&self) -> Ipv4Addr {
+    pub fn vip(&self) -> IpAddr {
         self.vip
     }
 
