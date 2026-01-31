@@ -221,7 +221,11 @@ impl DualStackSocket {
             }
         } else {
             // IPv6 not available, only receive from IPv4
-            let (len, addr) = self.pconn4.recv_from(buf4).await?;
+            let (len, addr) = self
+                .pconn4
+                .recv_from(buf4)
+                .await
+                .context("Failed to receive from IPv4 socket")?;
             Ok(RecvResult {
                 len,
                 addr,

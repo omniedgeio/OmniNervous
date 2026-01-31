@@ -29,11 +29,13 @@ const NAT_PMP_VERSION: u8 = 0;
 /// NAT-PMP opcodes
 const NAT_PMP_OP_EXTERNAL_ADDR: u8 = 0;
 const NAT_PMP_OP_MAP_UDP: u8 = 1;
+#[allow(dead_code)] // Reserved for future TCP mapping support
 const NAT_PMP_OP_MAP_TCP: u8 = 2;
 
 /// NAT-PMP response opcodes (opcode + 128)
 const NAT_PMP_RESP_EXTERNAL_ADDR: u8 = 128;
 const NAT_PMP_RESP_MAP_UDP: u8 = 129;
+#[allow(dead_code)] // Reserved for future TCP mapping support
 const NAT_PMP_RESP_MAP_TCP: u8 = 130;
 
 /// NAT-PMP result codes
@@ -45,6 +47,7 @@ const NAT_PMP_RESULT_OUT_OF_RESOURCES: u16 = 4;
 const NAT_PMP_RESULT_UNSUPPORTED_OPCODE: u16 = 5;
 
 /// Default mapping lifetime (2 hours)
+#[allow(dead_code)] // Used by request_mapping default parameter in future
 const DEFAULT_MAPPING_LIFETIME_SECS: u32 = 7200;
 
 /// Mapping refresh interval (half of lifetime)

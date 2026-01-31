@@ -7,9 +7,10 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-/// Information about a connected peer
+/// Information about a connected peer in the routing table
+/// Note: This is distinct from signaling::PeerInfo which represents peer info from the nucleus
 #[derive(Debug, Clone)]
-pub struct PeerInfo {
+pub struct PeerEntry {
     /// Peer's UDP endpoint (public IP:port)
     pub endpoint: SocketAddr,
     /// Peer's virtual IP
@@ -22,8 +23,8 @@ pub struct PeerInfo {
 
 /// Peer routing table
 pub struct PeerTable {
-    /// VIP → PeerInfo mapping
-    by_vip: HashMap<Ipv4Addr, PeerInfo>,
+    /// VIP → PeerEntry mapping
+    by_vip: HashMap<Ipv4Addr, PeerEntry>,
     /// Peer timeout duration
     timeout: Duration,
 }
@@ -41,7 +42,7 @@ impl PeerTable {
         // Preserve existing public_key if peer already exists
         let existing_pubkey = self.by_vip.get(&virtual_ip).and_then(|p| p.public_key);
 
-        let peer = PeerInfo {
+        let peer = PeerEntry {
             endpoint,
             virtual_ip,
             public_key: existing_pubkey,
@@ -73,7 +74,7 @@ impl PeerTable {
             }
         }
 
-        let peer = PeerInfo {
+        let peer = PeerEntry {
             endpoint,
             virtual_ip: vip,
             public_key: Some(public_key),
@@ -86,7 +87,7 @@ impl PeerTable {
     }
 
     /// Lookup peer by virtual IP
-    pub fn lookup_by_vip(&self, vip: &Ipv4Addr) -> Option<&PeerInfo> {
+    pub fn lookup_by_vip(&self, vip: &Ipv4Addr) -> Option<&PeerEntry> {
         self.by_vip.get(vip)
     }
 
@@ -137,12 +138,12 @@ impl PeerTable {
     }
 
     /// Iterate over all peers
-    pub fn iter(&self) -> impl Iterator<Item = &PeerInfo> {
+    pub fn iter(&self) -> impl Iterator<Item = &PeerEntry> {
         self.by_vip.values()
     }
 
     /// Find a peer by their public key
-    pub fn find_by_public_key(&self, public_key: &[u8; 32]) -> Option<&PeerInfo> {
+    pub fn find_by_public_key(&self, public_key: &[u8; 32]) -> Option<&PeerEntry> {
         self.by_vip
             .values()
             .find(|p| p.public_key.as_ref() == Some(public_key))

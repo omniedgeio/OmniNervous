@@ -45,3 +45,6 @@ governor = "0.6"
 boringtun = { git = "https://github.com/omniedgeio/boringtun", branch = "fix/legacy-deps" }
 tun = { version = "0.6", features = ["async"] }
 crypto_box = "0.9"
+lru = "0.12"
+subtle = "2.5"
+zeroize = { version = "1.7", features = ["derive"] }

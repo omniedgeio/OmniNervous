@@ -127,7 +127,12 @@ impl Metrics {
     }
 
     pub fn dec_sessions(&self) {
-        self.sessions_active.fetch_sub(1, Ordering::Relaxed);
+        // Use saturating subtraction to prevent underflow
+        self.sessions_active
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            })
+            .ok();
     }
 
     pub fn inc_packets_rx(&self) {
@@ -223,7 +228,12 @@ impl Metrics {
     }
 
     pub fn dec_relay_sessions(&self) {
-        self.relay_sessions_active.fetch_sub(1, Ordering::Relaxed);
+        // Use saturating subtraction to prevent underflow
+        self.relay_sessions_active
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            })
+            .ok();
     }
 
     pub fn add_relay_bytes(&self, bytes: u64) {
@@ -250,7 +260,12 @@ impl Metrics {
     }
 
     pub fn dec_portmap_active(&self) {
-        self.portmap_active.fetch_sub(1, Ordering::Relaxed);
+        // Use saturating subtraction to prevent underflow
+        self.portmap_active
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            })
+            .ok();
     }
 
     // === Connection Path Methods (Phase 6) ===

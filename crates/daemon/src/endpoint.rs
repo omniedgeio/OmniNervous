@@ -215,8 +215,8 @@ impl EndpointSet {
             return false;
         }
 
-        // Sort by latency (ascending)
-        candidates.sort_by_key(|(_, e)| e.latency.unwrap());
+        // Sort by latency (ascending) - unwrap is safe because we filtered for is_some()
+        candidates.sort_by_key(|(_, e)| e.latency.expect("filtered for Some latency"));
 
         // Get the best by latency
         let (best_idx, best) = candidates[0];

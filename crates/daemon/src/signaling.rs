@@ -32,13 +32,16 @@ use crypto_box::{
 use governor::{Quota, RateLimiter};
 use hmac::{Hmac, Mac};
 use log::{debug, info, warn};
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
 use tokio::net::UdpSocket;
+use zeroize::ZeroizeOnDrop;
 
 use crate::netcheck::NatType;
 
@@ -69,6 +72,9 @@ const MAX_CLUSTER_NAME_LEN: usize = 64;
 
 /// Maximum number of removal records to keep per cluster
 const MAX_REMOVAL_RECORDS: usize = 1000;
+
+/// Maximum number of cached peer boxes for encryption
+const MAX_PEER_BOX_CACHE_SIZE: usize = 1000;
 
 fn is_valid_cluster(name: &str) -> bool {
     !name.is_empty()
@@ -198,15 +204,20 @@ pub struct EncryptedEnvelope {
 
 /// Handles encryption/decryption of signaling messages
 /// Uses crypto_box (X25519 + XSalsa20-Poly1305)
+#[derive(ZeroizeOnDrop)]
 pub struct SignalingEncryption {
-    /// Our secret key
+    /// Our secret key (zeroized on drop)
+    #[zeroize(skip)] // SecretKey from crypto_box handles its own zeroization
     secret_key: SecretKey,
     /// Our public key
+    #[zeroize(skip)]
     public_key: PublicKey,
     /// Whether encryption is enabled
+    #[zeroize(skip)]
     enabled: bool,
-    /// Cached SalsaBox instances for known peers (public key -> box)
-    peer_boxes: HashMap<[u8; 32], SalsaBox>,
+    /// Cached SalsaBox instances for known peers (LRU cache with bounded size)
+    #[zeroize(skip)]
+    peer_boxes: LruCache<[u8; 32], SalsaBox>,
 }
 
 impl SignalingEncryption {
@@ -218,7 +229,7 @@ impl SignalingEncryption {
             secret_key,
             public_key,
             enabled,
-            peer_boxes: HashMap::new(),
+            peer_boxes: LruCache::new(NonZeroUsize::new(MAX_PEER_BOX_CACHE_SIZE).unwrap()),
         }
     }
 
@@ -230,7 +241,7 @@ impl SignalingEncryption {
             secret_key,
             public_key,
             enabled,
-            peer_boxes: HashMap::new(),
+            peer_boxes: LruCache::new(NonZeroUsize::new(MAX_PEER_BOX_CACHE_SIZE).unwrap()),
         }
     }
 
@@ -256,10 +267,10 @@ impl SignalingEncryption {
 
     /// Get or create a SalsaBox for a peer
     fn get_or_create_box(&mut self, peer_pubkey: &[u8; 32]) -> &SalsaBox {
-        if !self.peer_boxes.contains_key(peer_pubkey) {
+        if !self.peer_boxes.contains(peer_pubkey) {
             let peer_pk = PublicKey::from(*peer_pubkey);
             let salsa_box = SalsaBox::new(&peer_pk, &self.secret_key);
-            self.peer_boxes.insert(*peer_pubkey, salsa_box);
+            self.peer_boxes.put(*peer_pubkey, salsa_box);
         }
         self.peer_boxes.get(peer_pubkey).unwrap()
     }
@@ -343,6 +354,11 @@ impl SignalingEncryption {
     /// Clear cached boxes (e.g., when peer keys change)
     pub fn clear_cache(&mut self) {
         self.peer_boxes.clear();
+    }
+
+    /// Get the current cache size
+    pub fn cache_size(&self) -> usize {
+        self.peer_boxes.len()
     }
 }
 
@@ -560,6 +576,14 @@ fn calculate_hmac(secret: &str, data: &[u8]) -> [u8; 32] {
     result.into_bytes().into()
 }
 
+/// Constant-time comparison of HMAC tags to prevent timing attacks
+fn verify_hmac_tag(received: Option<[u8; 32]>, expected: [u8; 32]) -> bool {
+    match received {
+        Some(tag) => tag.ct_eq(&expected).into(),
+        None => false,
+    }
+}
+
 /// Handle incoming signaling message (Nucleus side)
 pub fn handle_nucleus_message(
     state: &mut NucleusState,
@@ -600,7 +624,7 @@ pub fn handle_nucleus_message(
                     check_reg.hmac_tag = None;
                     let check_bytes = serde_cbor::to_vec(&check_reg).ok()?;
                     let expected = calculate_hmac(s, &check_bytes);
-                    if reg.hmac_tag != Some(expected) {
+                    if !verify_hmac_tag(reg.hmac_tag, expected) {
                         warn!("HMAC verification failed for REGISTER from {}", src);
                         return None;
                     }
@@ -654,7 +678,7 @@ pub fn handle_nucleus_message(
                     check_hb.hmac_tag = None;
                     let check_bytes = serde_cbor::to_vec(&check_hb).ok()?;
                     let expected = calculate_hmac(s, &check_bytes);
-                    if hb.hmac_tag != Some(expected) {
+                    if !verify_hmac_tag(hb.hmac_tag, expected) {
                         warn!("HMAC verification failed for HEARTBEAT from {}", src);
                         return None;
                     }
@@ -702,7 +726,7 @@ pub fn handle_nucleus_message(
                     check_query.hmac_tag = None;
                     let check_bytes = serde_cbor::to_vec(&check_query).ok()?;
                     let expected = calculate_hmac(s, &check_bytes);
-                    if query.hmac_tag != Some(expected) {
+                    if !verify_hmac_tag(query.hmac_tag, expected) {
                         warn!("HMAC verification failed for QUERY_PEER from {}", src);
                         return None;
                     }
@@ -891,7 +915,7 @@ pub fn parse_register_ack(data: &[u8], secret: Option<&str>) -> Result<RegisterA
         check_ack.hmac_tag = None;
         let bytes = serde_cbor::to_vec(&check_ack)?;
         let expected = calculate_hmac(s, &bytes);
-        if ack.hmac_tag != Some(expected) {
+        if !verify_hmac_tag(ack.hmac_tag, expected) {
             anyhow::bail!("HMAC verification failed for REGISTER_ACK");
         }
     }
@@ -911,7 +935,7 @@ pub fn parse_heartbeat_ack(data: &[u8], secret: Option<&str>) -> Result<Heartbea
         check_ack.hmac_tag = None;
         let bytes = serde_cbor::to_vec(&check_ack)?;
         let expected = calculate_hmac(s, &bytes);
-        if ack.hmac_tag != Some(expected) {
+        if !verify_hmac_tag(ack.hmac_tag, expected) {
             anyhow::bail!("HMAC verification failed for HEARTBEAT_ACK");
         }
     }
@@ -931,7 +955,7 @@ pub fn parse_peer_info(data: &[u8], secret: Option<&str>) -> Result<PeerInfoMess
         check_info.hmac_tag = None;
         let bytes = serde_cbor::to_vec(&check_info)?;
         let expected = calculate_hmac(s, &bytes);
-        if info.hmac_tag != Some(expected) {
+        if !verify_hmac_tag(info.hmac_tag, expected) {
             anyhow::bail!("HMAC verification failed for PEER_INFO");
         }
     }

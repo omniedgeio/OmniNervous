@@ -93,7 +93,7 @@ impl RelaySession {
             last_activity: now,
             bytes_a_to_b: 0,
             bytes_b_to_a: 0,
-            rate_limit_bucket: 10 * 1024 * 1024, // 10 MB initial bucket
+            rate_limit_bucket: 1024 * 1024, // 1 MB initial bucket (reduced from 10 MB)
             rate_limit_refill: now,
         }
     }

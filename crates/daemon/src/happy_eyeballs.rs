@@ -175,8 +175,9 @@ impl ConnectionRace {
         let is_ipv6 = from.is_ipv6();
         let sent_time = if is_ipv6 { self.v6_sent } else { self.v4_sent };
 
+        // Use saturating conversion to prevent truncation on extremely long RTTs
         let rtt_us = sent_time
-            .map(|t| t.elapsed().as_micros() as u64)
+            .map(|t| t.elapsed().as_micros().min(u64::MAX as u128) as u64)
             .unwrap_or(0);
 
         self.phase = RacePhase::Complete;
