@@ -52,6 +52,14 @@ impl WgInterface {
             Self::Userspace(u) => u.get_peer_stats(public_key).await,
         }
     }
+    
+    /// Shutdown the WireGuard interface and release the TUN device
+    pub async fn shutdown(&self) {
+        match self {
+            Self::Cli(c) => c.shutdown_sync(),
+            Self::Userspace(u) => u.shutdown().await,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +144,24 @@ impl CliWgControl {
         // In a real implementation, we'd use 'wg show <if> latest-handshakes'
         None
     }
+    
+    /// Shutdown the CLI WireGuard interface
+    pub fn shutdown_sync(&self) {
+        use std::process::Command;
+        info!("[WG] Shutting down CLI interface: {}", self.interface);
+        
+        // Bring interface down
+        let _ = Command::new("ip")
+            .args(["link", "set", &self.interface, "down"])
+            .output();
+        
+        // Delete the interface
+        let _ = Command::new("ip")
+            .args(["link", "delete", &self.interface])
+            .output();
+        
+        info!("[WG] CLI interface {} shutdown complete", self.interface);
+    }
 }
 
 // Inner state shared via Arc
@@ -150,6 +176,8 @@ struct UserspaceInner {
     index_map: RwLock<HashMap<u32, [u8; 32]>>,
     // Channel to TUN writer
     tun_writer: RwLock<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>,
+    // Task handles for TUN reader/writer - needed for cleanup
+    tun_task_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 struct PeerSession {
@@ -174,6 +202,7 @@ impl UserspaceWgControl {
                 routing_table: RwLock::new(HashMap::new()),
                 index_map: RwLock::new(HashMap::new()),
                 tun_writer: RwLock::new(None),
+                tun_task_handles: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -200,26 +229,27 @@ impl UserspaceWgControl {
 
         // Create TUN device
         info!("[WG] Configuring TUN device...");
-        let device = {
-            let mut config = tun::Configuration::default();
-            config.name(&self.interface)
-                  .address(vip)
-                  .netmask("255.255.255.0")
-                  .up();
+        let mut config = tun::Configuration::default();
+        config.name(&self.interface)
+              .address(vip)
+              .netmask("255.255.255.0")
+              .up();
 
             #[cfg(target_os = "linux")]
             config.platform(|config| {
                 config.packet_information(false);
             });
 
-            info!("[WG] Calling tun::create_as_async for interface '{}'...", self.interface);
-            tun::create_as_async(&config).map_err(|e| {
-                let err_msg = format!("[WG] Failed to create TUN device: {:?}", e);
-                error!("{}", err_msg);
-                err_msg
-            })?
-        };
+        info!("[WG] Calling tun::create_as_async for interface '{}'...", self.interface);
+        let device = tun::create_as_async(&config).map_err(|e| {
+            let err_msg = format!("[WG] Failed to create TUN device: {:?}", e);
+            error!("{}", err_msg);
+            err_msg
+        })?;
         
+        #[cfg(target_os = "macos")]
+        info!("[WG] Userspace WireGuard TUN created successfully (macOS utun)");
+        #[cfg(not(target_os = "macos"))]
         info!("[WG] Userspace WireGuard TUN '{}' created successfully", self.interface);
         
         {
@@ -289,7 +319,7 @@ impl UserspaceWgControl {
         let socket_tx = udp_socket.clone();
 
         // TUN -> UDP (Encrypt)
-        tokio::spawn(async move {
+        let reader_handle = tokio::spawn(async move {
             let mut buf = [0u8; 2048];
             loop {
                 match reader.read(&mut buf).await {
@@ -339,13 +369,20 @@ impl UserspaceWgControl {
             *writer_lock = Some(tx);
         }
 
-        tokio::spawn(async move {
+        let writer_handle = tokio::spawn(async move {
             while let Some(packet) = rx.recv().await {
                 if let Err(e) = writer.write_all(&packet).await {
                     error!("Failed to write to TUN: {}", e);
                 }
             }
         });
+        
+        // Store task handles for cleanup
+        {
+            let mut handles = self.inner.tun_task_handles.lock().await;
+            handles.push(reader_handle);
+            handles.push(writer_handle);
+        }
 
         Ok(())
     }
@@ -435,6 +472,65 @@ impl UserspaceWgControl {
         } else {
             None
         }
+    }
+    
+    /// Shutdown the userspace WireGuard interface and release the TUN device.
+    /// This closes the TUN file descriptor which causes macOS to remove the utun interface.
+    pub async fn shutdown(&self) {
+        info!("[WG] Shutting down userspace interface: {}", self.interface);
+        
+        // Clear the TUN writer channel first to stop any pending writes
+        // This will cause the writer task to exit when channel closes
+        {
+            let mut writer = self.inner.tun_writer.write().await;
+            *writer = None;
+        }
+        
+        // Abort the TUN reader/writer tasks - this is critical!
+        // The reader task holds the TUN device reader half, aborting releases it
+        {
+            let mut handles = self.inner.tun_task_handles.lock().await;
+            for handle in handles.drain(..) {
+                info!("[WG] Aborting TUN task...");
+                handle.abort();
+            }
+        }
+        
+        // Clear peer sessions
+        {
+            let mut peers = self.inner.peers.write().await;
+            peers.clear();
+        }
+        
+        // Clear routing table
+        {
+            let mut routing = self.inner.routing_table.write().await;
+            routing.clear();
+        }
+        
+        // Clear index map
+        {
+            let mut index_map = self.inner.index_map.write().await;
+            index_map.clear();
+        }
+        
+        // Drop the TUN device if it's still there (shouldn't be after start_tun_loop)
+        // On macOS, closing the fd causes the kernel to remove the utun interface
+        {
+            let mut device = self.inner.device.lock().await;
+            if device.is_some() {
+                info!("[WG] Dropping TUN device to release interface");
+                *device = None;
+            }
+        }
+        
+        // Clear private key
+        {
+            let mut pk = self.inner.private_key.lock().await;
+            *pk = None;
+        }
+        
+        info!("[WG] Userspace interface {} shutdown complete", self.interface);
     }
 }
 
