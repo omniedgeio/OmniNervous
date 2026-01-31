@@ -1,5 +1,6 @@
 use crate::metrics::Metrics;
 use crate::peers::PeerTable;
+use crate::relay::{self, RelayClient, RelayServer};
 use crate::signaling::{self, NucleusClient, NucleusState};
 use crate::wg::WgInterface;
 use anyhow::Result;
@@ -73,18 +74,132 @@ pub struct MessageHandler<'a> {
     pub pending_pings: HashMap<[u8; 12], PendingPing>,
     /// Disco configuration
     pub disco_config: DiscoConfig,
+    /// Relay server (for nucleus mode)
+    pub relay_server: Option<&'a mut RelayServer>,
+    /// Relay client (for edge mode)
+    pub relay_client: Option<&'a mut RelayClient>,
 }
 
 impl<'a> MessageHandler<'a> {
     pub async fn handle_packet(&mut self, buf: &[u8], src: SocketAddr) -> Result<()> {
         self.metrics.inc_packets_rx();
 
+        if buf.is_empty() {
+            return Ok(());
+        }
+
+        // Check for relay messages (0x20-0x24)
+        if relay::is_relay_message(buf) {
+            return self.handle_relay_message(buf, src).await;
+        }
+
         // Signaling message types are 0x11-0x1F
-        if !buf.is_empty() && buf[0] >= 0x11 {
+        if buf[0] >= 0x11 {
             if self.is_nucleus_mode {
                 self.handle_nucleus_signaling(buf, src).await?;
             } else if signaling::is_signaling_message(buf) {
                 self.handle_edge_signaling(buf, src).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle relay protocol messages
+    async fn handle_relay_message(&mut self, buf: &[u8], src: SocketAddr) -> Result<()> {
+        let msg_type = buf[0];
+
+        match msg_type {
+            relay::MSG_RELAY_BIND => {
+                // Only nucleus/relay server handles bind requests
+                if let Some(relay_server) = self.relay_server.as_mut() {
+                    match relay::parse_relay_bind(buf) {
+                        Ok(request) => {
+                            let mut ack = relay_server.allocate_session(&request, src)?;
+
+                            // Fill in the relay endpoint (our listening address)
+                            if ack.success {
+                                if let Ok(local) = self.socket.local_addr() {
+                                    ack.relay_endpoint = Some(local.to_string());
+                                }
+                            }
+
+                            // Send acknowledgement
+                            if let Ok(ack_data) = relay::encode_relay_bind_ack(&ack) {
+                                if let Err(e) = self.socket.send_to(&ack_data, src).await {
+                                    warn!("Failed to send RELAY_BIND_ACK: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse RELAY_BIND from {}: {}", src, e);
+                        }
+                    }
+                }
+            }
+
+            relay::MSG_RELAY_BIND_ACK => {
+                // Edge clients handle bind acknowledgements
+                if let Some(relay_client) = self.relay_client.as_mut() {
+                    match relay::parse_relay_bind_ack(buf) {
+                        Ok(ack) => {
+                            // Find which peer this ack is for
+                            // (In a full implementation, we'd track pending requests)
+                            if ack.success {
+                                info!("Relay session established");
+                            } else {
+                                warn!("Relay bind failed: {:?}", ack.error);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse RELAY_BIND_ACK: {}", e);
+                        }
+                    }
+                }
+            }
+
+            relay::MSG_RELAY_DATA => {
+                // Forward relayed data
+                if let Some(relay_server) = self.relay_server.as_mut() {
+                    match relay::parse_relay_data(buf) {
+                        Ok((session_id, wg_packet)) => {
+                            // Determine destination and forward
+                            if let Some(dest) =
+                                relay_server.relay_packet(&session_id, src, wg_packet.len())
+                            {
+                                // Forward the packet (keep the relay header for the receiver)
+                                if let Err(e) = self.socket.send_to(buf, dest).await {
+                                    debug!("Failed to relay packet: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Failed to parse RELAY_DATA: {}", e);
+                        }
+                    }
+                }
+            }
+
+            relay::MSG_RELAY_UNBIND => {
+                if let Some(relay_server) = self.relay_server.as_mut() {
+                    match relay::parse_relay_unbind(buf) {
+                        Ok(session_id) => {
+                            relay_server.release_session(&session_id);
+                        }
+                        Err(e) => {
+                            debug!("Failed to parse RELAY_UNBIND: {}", e);
+                        }
+                    }
+                }
+            }
+
+            relay::MSG_RELAY_KEEPALIVE => {
+                // Just touch the session to prevent timeout
+                debug!("Relay keepalive from {}", src);
+            }
+
+            _ => {
+                debug!("Unknown relay message type: 0x{:02x}", msg_type);
             }
         }
 
@@ -499,5 +614,79 @@ impl<'a> MessageHandler<'a> {
         }
 
         Ok(true)
+    }
+
+    /// Request relay allocation for a peer when direct connection fails
+    pub async fn request_relay_for_peer(
+        &mut self,
+        target_key: [u8; 32],
+        target_vip: Ipv4Addr,
+    ) -> Result<bool> {
+        let relay_client = match self.relay_client.as_mut() {
+            Some(c) => c,
+            None => {
+                debug!("Relay not available, cannot fallback for {}", target_vip);
+                return Ok(false);
+            }
+        };
+
+        // Check if we already have an active relay for this peer
+        if relay_client.is_relay_active(&target_key) {
+            debug!("Relay already active for {}", target_vip);
+            return Ok(true);
+        }
+
+        // Create and send bind request
+        let request = relay_client.create_bind_request(target_key, target_vip);
+        let bind_data = relay::encode_relay_bind(&request)?;
+        let relay_endpoint = relay_client.relay_endpoint();
+
+        self.socket.send_to(&bind_data, relay_endpoint).await?;
+
+        info!(
+            "Requested relay allocation for {} via {}",
+            target_vip, relay_endpoint
+        );
+
+        Ok(true)
+    }
+
+    /// Check for peers that need relay fallback (disco timed out after max retries)
+    pub async fn check_relay_fallback(&mut self) -> Result<Vec<Ipv4Addr>> {
+        let timed_out = self.cleanup_expired_pings();
+        let mut relay_requested = Vec::new();
+
+        for vip in timed_out {
+            // Find the peer info for this VIP
+            if let Some(peer) = self.peer_table.lookup_by_vip(&vip) {
+                if let Some(pubkey) = peer.public_key {
+                    // Check retry count
+                    let should_retry = self
+                        .pending_pings
+                        .values()
+                        .filter(|p| p.target_vip == vip)
+                        .map(|p| p.retries)
+                        .max()
+                        .map(|r| r < self.disco_config.max_retries)
+                        .unwrap_or(true);
+
+                    if should_retry {
+                        // Retry disco ping
+                        if let Err(e) = self.send_disco_ping(peer.endpoint, vip).await {
+                            warn!("Failed to retry disco ping to {}: {}", vip, e);
+                        }
+                    } else {
+                        // Max retries exceeded, request relay
+                        if let Err(e) = self.request_relay_for_peer(pubkey, vip).await {
+                            warn!("Failed to request relay for {}: {}", vip, e);
+                        } else {
+                            relay_requested.push(vip);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(relay_requested)
     }
 }

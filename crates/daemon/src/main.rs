@@ -10,7 +10,9 @@ use omninervous::{
     http,
     identity::Identity,
     metrics::Metrics,
-    peers, signaling, stun,
+    peers,
+    relay::{RelayClient, RelayConfig, RelayServer},
+    signaling, stun,
     wg::{CliWgControl, UserspaceWgControl, WgInterface},
 };
 use serde_json;
@@ -416,6 +418,34 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Initialize relay components
+    // Relay server is enabled in nucleus mode, relay client in edge mode
+    let mut relay_server: Option<RelayServer> = if is_nucleus_mode {
+        info!("Relay server enabled (co-located with Nucleus)");
+        Some(RelayServer::new(RelayConfig::default()))
+    } else {
+        None
+    };
+
+    let mut relay_client: Option<RelayClient> = if !is_nucleus_mode {
+        if let (Some(nucleus_addr), Some(vip)) = (&args.nucleus, args.vip) {
+            match nucleus_addr.parse::<std::net::SocketAddr>() {
+                Ok(addr) => {
+                    info!("Relay client enabled, relay server at {}", addr);
+                    Some(RelayClient::new(identity.public_key_bytes(), vip, addr))
+                }
+                Err(e) => {
+                    warn!("Failed to parse nucleus address for relay: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Spawn metrics HTTP server
     let metrics_clone = _metrics.clone();
     tokio::spawn(async move {
@@ -440,6 +470,8 @@ async fn main() -> Result<()> {
             our_vip: args.vip,
             pending_pings: std::collections::HashMap::new(),
             disco_config: DiscoConfig::default(),
+            relay_server: relay_server.as_mut(),
+            relay_client: relay_client.as_mut(),
         };
 
         tokio::select! {
@@ -450,6 +482,10 @@ async fn main() -> Result<()> {
             _ = cleanup_interval.tick() => {
                 if is_nucleus_mode {
                     nucleus_state.cleanup();
+                    // Also cleanup relay sessions
+                    if let Some(ref mut rs) = relay_server {
+                        rs.cleanup_expired();
+                    }
                 }
             }
             _ = heartbeat_interval.tick() => {
