@@ -44,6 +44,10 @@ use tokio::net::UdpSocket;
 use zeroize::ZeroizeOnDrop;
 
 use crate::netcheck::NatType;
+use crate::portmap::PortMapCapabilities;
+use crate::relay::RelayStats;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Message types for signaling protocol (0x11-0x1F to avoid WireGuard collision)
 const MSG_REGISTER: u8 = 0x11;
@@ -765,6 +769,89 @@ pub fn handle_nucleus_message(
     }
 }
 
+// ============================================================================
+// Runtime State for Status Queries
+// ============================================================================
+
+/// Runtime state that can be shared across clones of NucleusClient
+///
+/// This allows querying the current state of relay and port mapping
+/// without requiring direct access to RelayClient or PortMapper.
+#[derive(Clone, Default)]
+pub struct RuntimeState {
+    /// Current relay statistics (updated by the daemon loop)
+    relay_stats: Arc<RwLock<Option<RelayStats>>>,
+    /// Current port mapping capabilities (updated by the daemon loop)
+    portmap_status: Arc<RwLock<Option<PortMapCapabilities>>>,
+    /// Whether relay is currently being used for any peer
+    using_relay: Arc<RwLock<bool>>,
+    /// Whether relay is enabled in configuration
+    relay_enabled: Arc<RwLock<bool>>,
+    /// Whether port mapping is enabled in configuration
+    portmap_enabled: Arc<RwLock<bool>>,
+}
+
+impl RuntimeState {
+    /// Create a new empty runtime state
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Update relay statistics
+    pub async fn set_relay_stats(&self, stats: Option<RelayStats>) {
+        *self.relay_stats.write().await = stats;
+    }
+
+    /// Update port mapping status
+    pub async fn set_portmap_status(&self, status: Option<PortMapCapabilities>) {
+        *self.portmap_status.write().await = status;
+    }
+
+    /// Update whether relay is being used
+    pub async fn set_using_relay(&self, using: bool) {
+        *self.using_relay.write().await = using;
+    }
+
+    /// Update whether relay is enabled
+    pub async fn set_relay_enabled(&self, enabled: bool) {
+        *self.relay_enabled.write().await = enabled;
+    }
+
+    /// Update whether port mapping is enabled
+    pub async fn set_portmap_enabled(&self, enabled: bool) {
+        *self.portmap_enabled.write().await = enabled;
+    }
+
+    /// Get current relay statistics
+    pub async fn relay_stats(&self) -> Option<RelayStats> {
+        self.relay_stats.read().await.clone()
+    }
+
+    /// Get current port mapping status
+    pub async fn portmap_status(&self) -> Option<PortMapCapabilities> {
+        self.portmap_status.read().await.clone()
+    }
+
+    /// Check if relay is currently being used
+    pub async fn is_using_relay(&self) -> bool {
+        *self.using_relay.read().await
+    }
+
+    /// Check if relay is enabled
+    pub async fn is_relay_enabled(&self) -> bool {
+        *self.relay_enabled.read().await
+    }
+
+    /// Check if port mapping is enabled
+    pub async fn is_portmap_enabled(&self) -> bool {
+        *self.portmap_enabled.read().await
+    }
+}
+
+// ============================================================================
+// NucleusClient
+// ============================================================================
+
 /// Edge client for connecting to Nucleus
 #[derive(Clone)]
 pub struct NucleusClient {
@@ -776,6 +863,8 @@ pub struct NucleusClient {
     secret: Option<String>,
     /// NAT type detected for this client
     nat_type: Option<NatType>,
+    /// Shared runtime state for status queries
+    runtime_state: RuntimeState,
 }
 
 impl NucleusClient {
@@ -802,7 +891,44 @@ impl NucleusClient {
             public_key,
             secret,
             nat_type: None,
+            runtime_state: RuntimeState::new(),
         })
+    }
+
+    /// Create a NucleusClient with a shared runtime state
+    ///
+    /// Use this when you need multiple clones to share the same state
+    pub async fn with_runtime_state(
+        nucleus: &str,
+        cluster: String,
+        public_key: [u8; 32],
+        vip: Ipv4Addr,
+        listen_port: u16,
+        secret: Option<String>,
+        runtime_state: RuntimeState,
+    ) -> Result<Self> {
+        use tokio::net::lookup_host;
+        let nucleus_addr = lookup_host(nucleus)
+            .await
+            .context("Failed to resolve nucleus address")?
+            .next()
+            .context("No addresses found for nucleus")?;
+
+        Ok(Self {
+            nucleus_addr,
+            cluster,
+            vip,
+            listen_port,
+            public_key,
+            secret,
+            nat_type: None,
+            runtime_state,
+        })
+    }
+
+    /// Get a reference to the shared runtime state
+    pub fn runtime_state(&self) -> &RuntimeState {
+        &self.runtime_state
     }
 
     /// Set the detected NAT type
@@ -899,6 +1025,64 @@ impl NucleusClient {
     #[allow(dead_code)]
     pub fn nucleus_addr(&self) -> SocketAddr {
         self.nucleus_addr
+    }
+
+    // ========================================================================
+    // Runtime State Query Methods (v0.3.1)
+    // ========================================================================
+
+    /// Get current relay statistics
+    ///
+    /// Returns None if relay is not active or stats haven't been updated.
+    pub async fn relay_stats(&self) -> Option<RelayStats> {
+        self.runtime_state.relay_stats().await
+    }
+
+    /// Get current port mapping status
+    ///
+    /// Returns None if port mapping is not active or status hasn't been updated.
+    pub async fn portmap_status(&self) -> Option<PortMapCapabilities> {
+        self.runtime_state.portmap_status().await
+    }
+
+    /// Check if relay is currently being used for any peer connection
+    pub async fn is_using_relay(&self) -> bool {
+        self.runtime_state.is_using_relay().await
+    }
+
+    /// Check if relay functionality is enabled
+    pub async fn is_relay_enabled(&self) -> bool {
+        self.runtime_state.is_relay_enabled().await
+    }
+
+    /// Check if port mapping is enabled
+    pub async fn is_portmap_enabled(&self) -> bool {
+        self.runtime_state.is_portmap_enabled().await
+    }
+
+    /// Update relay statistics (called by daemon loop)
+    pub async fn update_relay_stats(&self, stats: Option<RelayStats>) {
+        self.runtime_state.set_relay_stats(stats).await;
+    }
+
+    /// Update port mapping status (called by daemon loop)
+    pub async fn update_portmap_status(&self, status: Option<PortMapCapabilities>) {
+        self.runtime_state.set_portmap_status(status).await;
+    }
+
+    /// Update whether relay is being used (called by daemon loop)
+    pub async fn update_using_relay(&self, using: bool) {
+        self.runtime_state.set_using_relay(using).await;
+    }
+
+    /// Update whether relay is enabled (called by daemon on config change)
+    pub async fn update_relay_enabled(&self, enabled: bool) {
+        self.runtime_state.set_relay_enabled(enabled).await;
+    }
+
+    /// Update whether port mapping is enabled (called by daemon on config change)
+    pub async fn update_portmap_enabled(&self, enabled: bool) {
+        self.runtime_state.set_portmap_enabled(enabled).await;
     }
 }
 

@@ -122,7 +122,9 @@ pub use relay::{
 // Signaling
 // ============================================================================
 
-pub use signaling::{EncryptedEnvelope, NucleusClient, NucleusState, SignalingEncryption};
+pub use signaling::{
+    EncryptedEnvelope, NucleusClient, NucleusState, RuntimeState, SignalingEncryption,
+};
 
 // ============================================================================
 // Socket Utilities
