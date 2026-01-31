@@ -44,10 +44,23 @@ impl Default for DaemonConfig {
 pub struct NetworkConfig {
     pub nucleus: Option<String>,
     pub cluster: Option<String>,
+    /// IPv4 STUN servers
     #[serde(default = "default_stuns")]
     pub stun_servers: Vec<String>,
+    /// IPv6 STUN servers (Phase 7)
+    #[serde(default = "default_stuns_v6")]
+    pub stun_servers_v6: Vec<String>,
     #[serde(default = "default_true")]
     pub use_builtin_stun: bool,
+    /// Enable IPv6 support (Phase 7)
+    #[serde(default = "default_true")]
+    pub enable_ipv6: bool,
+    /// Prefer IPv6 connections when available (Phase 7)
+    #[serde(default = "default_true")]
+    pub prefer_ipv6: bool,
+    /// Happy Eyeballs delay in milliseconds (Phase 7)
+    #[serde(default = "default_happy_eyeballs_delay")]
+    pub happy_eyeballs_delay_ms: u64,
 }
 
 impl Default for NetworkConfig {
@@ -56,7 +69,11 @@ impl Default for NetworkConfig {
             nucleus: None,
             cluster: None,
             stun_servers: default_stuns(),
+            stun_servers_v6: default_stuns_v6(),
             use_builtin_stun: true,
+            enable_ipv6: true,
+            prefer_ipv6: true,
+            happy_eyeballs_delay_ms: default_happy_eyeballs_delay(),
         }
     }
 }
@@ -196,6 +213,17 @@ fn default_iface() -> String {
 }
 fn default_stuns() -> Vec<String> {
     vec![]
+}
+fn default_stuns_v6() -> Vec<String> {
+    // Default IPv6 STUN servers
+    // Google and Cloudflare provide reliable dual-stack STUN
+    vec![
+        "stun.l.google.com:19302".to_string(),
+        "stun1.l.google.com:19302".to_string(),
+    ]
+}
+fn default_happy_eyeballs_delay() -> u64 {
+    250 // RFC 8305 recommended delay in milliseconds
 }
 fn default_true() -> bool {
     true
