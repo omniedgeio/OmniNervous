@@ -1,26 +1,32 @@
 use anyhow::{Context, Result};
-use omninervous::{
-    identity::Identity,
-    metrics::Metrics,
-    wg::{WgInterface, CliWgControl, UserspaceWgControl},
-    handler::MessageHandler,
-    config, signaling, http, peers, stun,
-};
-use clap::Parser;
-use log::{info, warn, error};
-use tokio::time::{interval, Duration};
-use tokio::net::UdpSocket;
-use tokio::signal;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use std::sync::Arc;
-use serde_json;
+use clap::Parser;
 use log::debug;
+use log::{error, info, warn};
+use omninervous::{
+    config,
+    handler::{DiscoConfig, MessageHandler},
+    http,
+    identity::Identity,
+    metrics::Metrics,
+    peers,
+    relay::{RelayClient, RelayConfig, RelayServer},
+    signaling, stun,
+    wg::{CliWgControl, UserspaceWgControl, WgInterface},
+};
+use std::sync::Arc;
+use tokio::net::UdpSocket;
+use tokio::signal;
+use tokio::time::{interval, Duration};
 
 fn load_config(args: &Args) -> config::Config {
     if let Some(path) = &args.config {
         config::Config::load(path).unwrap_or_else(|e| {
-            warn!("Failed to load config from {:?}: {}. Using defaults.", path, e);
+            warn!(
+                "Failed to load config from {:?}: {}. Using defaults.",
+                path, e
+            );
             config::Config::default()
         })
     } else {
@@ -54,22 +60,36 @@ fn collect_stun_servers(args: &Args, config: &config::Config) -> Vec<String> {
 async fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<WgInterface>> {
     if let Some(vip) = args.vip {
         let ifname = args.tun_name.clone();
-        
+
         let mut wg_control = if args.userspace {
             WgInterface::Userspace(UserspaceWgControl::new(&ifname))
         } else {
             WgInterface::Cli(CliWgControl::new(&ifname))
         };
 
-        info!("🔧 Initializing WireGuard interface '{}' in {} mode with IP {}", 
-            ifname, if args.userspace { "USERSPACE" } else { "KERNEL" }, vip);
+        info!(
+            "🔧 Initializing WireGuard interface '{}' in {} mode with IP {}",
+            ifname,
+            if args.userspace {
+                "USERSPACE"
+            } else {
+                "KERNEL"
+            },
+            vip
+        );
 
-        if let Err(e) = wg_control.setup_interface(
-            &vip.to_string(),
-            args.port,
-            &BASE64.encode(identity.private_key_bytes())
-        ).await {
-            warn!("⚠️ Failed to setup WireGuard interface: {}. Continuing in signaling-only mode.", e);
+        if let Err(e) = wg_control
+            .setup_interface(
+                &vip.to_string(),
+                args.port,
+                &BASE64.encode(identity.private_key_bytes()),
+            )
+            .await
+        {
+            warn!(
+                "⚠️ Failed to setup WireGuard interface: {}. Continuing in signaling-only mode.",
+                e
+            );
             Ok(None)
         } else {
             info!("✅ WireGuard interface '{}' is ready.", ifname);
@@ -102,31 +122,31 @@ struct Args {
     /// UDP port for VPN traffic
     #[arg(short, long, default_value = "51820")]
     port: u16,
-    
+
     /// Run mode: 'nucleus' for signaling server, omit for edge client
     #[arg(short, long)]
     mode: Option<String>,
-    
+
     /// Nucleus server address (host:port) for edge clients
     #[arg(short, long)]
     nucleus: Option<String>,
-    
+
     /// Cluster/network name to join
     #[arg(short, long)]
     cluster: Option<String>,
-    
+
     /// Cluster secret for authentication (minimum 16 characters)
     #[arg(long)]
     secret: Option<String>,
-    
+
     /// Initialize new identity and exit
     #[arg(long)]
     init: bool,
-    
+
     /// Path to identity directory
     #[arg(long)]
     identity: Option<std::path::PathBuf>,
-    
+
     /// Path to config file
     #[arg(long, short = 'C')]
     config: Option<std::path::PathBuf>,
@@ -135,16 +155,14 @@ struct Args {
     #[arg(long)]
     userspace: bool,
 
-
-    
     /// Virtual IP address (e.g., 10.200.0.1)
     #[arg(long)]
     vip: Option<std::net::Ipv4Addr>,
-    
+
     /// Virtual network mask
     #[arg(long, default_value = "255.255.255.0")]
     netmask: std::net::Ipv4Addr,
-    
+
     /// Virtual interface name
     #[arg(long, default_value = "omni0")]
     tun_name: String,
@@ -156,13 +174,14 @@ struct Args {
     /// Disable built-in Nucleus STUN fallback
     #[arg(long)]
     disable_builtin_stun: bool,
-
 }
 
 /// Standard STUN Binding Request (minimal) - Try multiple servers and return first success
-async fn discover_public_endpoint_standard_stun(stun_servers: &[String]) -> Result<std::net::SocketAddr> {
+async fn discover_public_endpoint_standard_stun(
+    stun_servers: &[String],
+) -> Result<std::net::SocketAddr> {
     use tokio::time::timeout;
-    
+
     if stun_servers.is_empty() {
         anyhow::bail!("No STUN servers provided");
     }
@@ -181,9 +200,9 @@ async fn discover_public_endpoint_standard_stun(stun_servers: &[String]) -> Resu
         let mut request = [0u8; 20];
         request[0..2].copy_from_slice(&[0x00, 0x01]); // Binding Request
         request[4..8].copy_from_slice(&[0x21, 0x12, 0xA4, 0x42]); // Magic Cookie
-        // Transaction ID (random-ish)
-        for i in 8..20 {
-            request[i] = rand::random();
+                                                                  // Transaction ID (random-ish)
+        for byte in request.iter_mut().skip(8).take(12) {
+            *byte = rand::random();
         }
 
         if socket.send(&request).await.is_err() {
@@ -196,7 +215,8 @@ async fn discover_public_endpoint_standard_stun(stun_servers: &[String]) -> Resu
             _ => continue,
         };
 
-        if n >= 28 && response[0..2] == [0x01, 0x01] { // Binding Success Response
+        if n >= 28 && response[0..2] == [0x01, 0x01] {
+            // Binding Success Response
             if let Some(addr) = stun::parse_xor_mapped_address(&response[..n]) {
                 info!("Public endpoint: {}", addr);
                 return Ok(addr);
@@ -212,7 +232,10 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     env_logger::init();
 
-    info!("Starting OmniNervous Ganglion Daemon on port {}...", args.port);
+    info!(
+        "Starting OmniNervous Ganglion Daemon on port {}...",
+        args.port
+    );
 
     // Handle --init flag
     if args.init {
@@ -250,7 +273,9 @@ async fn main() -> Result<()> {
         }
     } else {
         if is_nucleus_mode || args.cluster.is_some() {
-             anyhow::bail!("--secret is REQUIRED for security. Please provide a secret (min 16 chars).");
+            anyhow::bail!(
+                "--secret is REQUIRED for security. Please provide a secret (min 16 chars)."
+            );
         }
         None
     };
@@ -259,9 +284,14 @@ async fn main() -> Result<()> {
     {
         if !args.userspace && args.vip.is_some() {
             let output = std::process::Command::new("id").arg("-u").output()?;
-            let uid = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>().unwrap_or(0);
+            let uid = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse::<u32>()
+                .unwrap_or(0);
             if uid != 0 {
-                anyhow::bail!("Root/sudo privileges are REQUIRED for KERNEL mode WireGuard on Linux.");
+                anyhow::bail!(
+                    "Root/sudo privileges are REQUIRED for KERNEL mode WireGuard on Linux."
+                );
             }
         }
     }
@@ -269,20 +299,24 @@ async fn main() -> Result<()> {
     let _metrics = Metrics::new();
     let mut peer_table = peers::PeerTable::new();
 
-    // Cleanup interval - runs every 60 seconds
-    let mut cleanup_interval = interval(Duration::from_secs(60));
-    // Heartbeat interval - runs every 30 seconds (for edge mode)
-    let mut heartbeat_interval = interval(Duration::from_secs(30));
-    // STUN interval - runs every 5 minutes
-    let mut stun_interval = interval(Duration::from_secs(300));
+    // Cleanup interval - runs every cleanup_interval_secs
+    let mut cleanup_interval = interval(config.timing.cleanup_interval());
+    // Heartbeat interval - for edge mode peer state sync
+    let mut heartbeat_interval = interval(config.timing.heartbeat_interval());
+    // STUN interval - detect endpoint changes from NAT rebinding
+    let mut stun_interval = interval(config.timing.stun_refresh());
 
     // Bind signaling socket first
     let bind_port = if is_nucleus_mode { args.port } else { 0 };
-    let socket_raw = UdpSocket::bind(format!("0.0.0.0:{}", bind_port)).await
+    let socket_raw = UdpSocket::bind(format!("0.0.0.0:{}", bind_port))
+        .await
         .context("failed to bind UDP socket")?;
-    
+
     let local_addr = socket_raw.local_addr()?;
-    info!("Ganglion signaling listening on UDP/{} (Signaling)", local_addr.port());
+    info!(
+        "Ganglion signaling listening on UDP/{} (Signaling)",
+        local_addr.port()
+    );
     if !is_nucleus_mode {
         info!("WireGuard data plane will use UDP/{}", args.port);
     }
@@ -299,10 +333,10 @@ async fn main() -> Result<()> {
             }
         });
     }
-    
+
     // Nucleus state (only used in nucleus mode)
     let mut nucleus_state = signaling::NucleusState::new();
-    
+
     // Nucleus client (only used in edge mode when --nucleus is specified)
     let nucleus_client: Option<signaling::NucleusClient> = if !is_nucleus_mode {
         if let (Some(nucleus_addr), Some(cluster)) = (&args.nucleus, &args.cluster) {
@@ -314,18 +348,20 @@ async fn main() -> Result<()> {
                     vip,
                     args.port,
                     cluster_secret.cloned(),
-                ).await {
+                )
+                .await
+                {
                     Ok(client) => {
                         // Register with nucleus immediately
                         if let Err(e) = client.register(&socket).await {
                             warn!("Failed to register with nucleus: {}", e);
                         }
-                        
+
                         // Initial STUN discovery
                         let client_clone = client.clone();
                         let socket_task = Arc::clone(&socket);
                         let stun_list = stun_servers.clone();
-                        
+
                         tokio::spawn(async move {
                             info!("🔍 Performing STUN discovery...");
                             let mut built_in_tried = false;
@@ -349,7 +385,10 @@ async fn main() -> Result<()> {
 
                                 match discover_public_endpoint_standard_stun(&stun_list).await {
                                     Ok(addr) => {
-                                        info!("✅ Public endpoint discovered via standard STUN: {}", addr);
+                                        info!(
+                                            "✅ Public endpoint discovered via standard STUN: {}",
+                                            addr
+                                        );
                                     }
                                     Err(e) => {
                                         warn!("❌ Public STUNs failed: {}", e);
@@ -357,7 +396,7 @@ async fn main() -> Result<()> {
                                 }
                             }
                         });
-                        
+
                         Some(client)
                     }
                     Err(e) => {
@@ -378,6 +417,34 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Initialize relay components
+    // Relay server is enabled in nucleus mode, relay client in edge mode
+    let mut relay_server: Option<RelayServer> = if is_nucleus_mode {
+        info!("Relay server enabled (co-located with Nucleus)");
+        Some(RelayServer::new(RelayConfig::default()))
+    } else {
+        None
+    };
+
+    let mut relay_client: Option<RelayClient> = if !is_nucleus_mode {
+        if let (Some(nucleus_addr), Some(vip)) = (&args.nucleus, args.vip) {
+            match nucleus_addr.parse::<std::net::SocketAddr>() {
+                Ok(addr) => {
+                    info!("Relay client enabled, relay server at {}", addr);
+                    Some(RelayClient::new(identity.public_key_bytes(), vip, addr))
+                }
+                Err(e) => {
+                    warn!("Failed to parse nucleus address for relay: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Spawn metrics HTTP server
     let metrics_clone = _metrics.clone();
     tokio::spawn(async move {
@@ -386,10 +453,8 @@ async fn main() -> Result<()> {
         }
     });
 
-
-    
     let mut buf = [0u8; 2048];
-    
+
     loop {
         let mut handler = MessageHandler {
             socket: &socket,
@@ -400,6 +465,12 @@ async fn main() -> Result<()> {
             nucleus_client: nucleus_client.as_ref(),
             is_nucleus_mode,
             secret: cluster_secret.map(|s| s.as_str()),
+            our_public_key: Some(identity.public_key_bytes()),
+            our_vip: args.vip,
+            pending_pings: std::collections::HashMap::new(),
+            disco_config: DiscoConfig::default(),
+            relay_server: relay_server.as_mut(),
+            relay_client: relay_client.as_mut(),
         };
 
         tokio::select! {
@@ -410,6 +481,10 @@ async fn main() -> Result<()> {
             _ = cleanup_interval.tick() => {
                 if is_nucleus_mode {
                     nucleus_state.cleanup();
+                    // Also cleanup relay sessions
+                    if let Some(ref mut rs) = relay_server {
+                        rs.cleanup_expired();
+                    }
                 }
             }
             _ = heartbeat_interval.tick() => {
@@ -450,15 +525,15 @@ async fn main() -> Result<()> {
                     Ok((len, src)) => {
                         let pkt = &buf[..len];
                         if pkt.is_empty() { continue; }
-                        
+
                         let first_byte = pkt[0];
-                        
+
                         if first_byte >= 0x11 {
                             // Signaling message
                             if let Err(e) = handler.handle_packet(pkt, src).await {
                                 error!("Error handling signaling packet from {}: {}", src, e);
                             }
-                        } else if first_byte >= 0x01 && first_byte <= 0x04 {
+                        } else if (0x01..=0x04).contains(&first_byte) {
                             // WireGuard packet
                             if let Some(wg) = wg_api_opt.as_mut() {
                                 if let Err(e) = wg.handle_incoming_packet(pkt, src, &socket).await {
@@ -479,4 +554,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-

@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use log::info;
-use std::fs;
-use std::path::PathBuf;
 use rand::rngs::OsRng;
 use rand::RngCore;
+use std::fs;
+use std::path::PathBuf;
 
 /// Default path for identity key storage
 const DEFAULT_IDENTITY_DIR: &str = ".omni";
@@ -21,14 +21,17 @@ impl Identity {
     pub fn generate() -> Self {
         let mut private_key = [0u8; 32];
         OsRng.fill_bytes(&mut private_key);
-        
+
         Self::from_private_key(private_key)
     }
 
     /// Create identity from existing private key.
     pub fn from_private_key(private_key: [u8; 32]) -> Self {
         let public_key = Self::derive_public_key(&private_key);
-        Self { private_key, public_key }
+        Self {
+            private_key,
+            public_key,
+        }
     }
 
     /// Derive public key from private key (X25519).
@@ -36,13 +39,13 @@ impl Identity {
     fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
         // Use snow's DH function to derive public key from private key
         // This creates a proper X25519 keypair relationship
-        use snow::resolvers::{DefaultResolver, CryptoResolver};
         use snow::params::DHChoice;
-        
+        use snow::resolvers::{CryptoResolver, DefaultResolver};
+
         let resolver = DefaultResolver;
         let mut dh = resolver.resolve_dh(&DHChoice::Curve25519).unwrap();
         dh.set(private_key);
-        
+
         let mut pk = [0u8; 32];
         pk.copy_from_slice(dh.pubkey());
         pk
@@ -60,11 +63,14 @@ impl Identity {
         let base_path = path.cloned().unwrap_or_else(Self::default_path);
         let key_path = base_path.join(IDENTITY_FILE);
 
-        let data = fs::read(&key_path)
-            .context(format!("Failed to read identity from {:?}", key_path))?;
+        let data =
+            fs::read(&key_path).context(format!("Failed to read identity from {:?}", key_path))?;
 
         if data.len() != 64 {
-            anyhow::bail!("Invalid identity file: expected 64 bytes, got {}", data.len());
+            anyhow::bail!(
+                "Invalid identity file: expected 64 bytes, got {}",
+                data.len()
+            );
         }
 
         let mut private_key = [0u8; 32];
@@ -78,22 +84,22 @@ impl Identity {
             anyhow::bail!("Invalid identity file: public key does not match private key. The file may be corrupted.");
         }
 
-
-
         info!("Loaded identity from {:?}", key_path);
-        Ok(Self { private_key, public_key })
+        Ok(Self {
+            private_key,
+            public_key,
+        })
     }
 
     /// Save identity to disk.
     pub fn save(&self, path: Option<&PathBuf>) -> Result<()> {
         let base_path = path.cloned().unwrap_or_else(Self::default_path);
-        
+
         // Create directory if it doesn't exist
-        fs::create_dir_all(&base_path)
-            .context("Failed to create identity directory")?;
+        fs::create_dir_all(&base_path).context("Failed to create identity directory")?;
 
         let key_path = base_path.join(IDENTITY_FILE);
-        
+
         // Combine private + public key
         let mut data = Vec::with_capacity(64);
         data.extend_from_slice(&self.private_key);
@@ -129,7 +135,8 @@ impl Identity {
 
     /// Format public key as hex string for display.
     pub fn public_key_hex(&self) -> String {
-        self.public_key.iter()
+        self.public_key
+            .iter()
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<_>>()
             .join("")

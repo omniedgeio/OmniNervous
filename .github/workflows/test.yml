@@ -2,7 +2,7 @@ name: Connection Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/*]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -14,9 +14,40 @@ env:
   CLUSTER_SECRET: ci-test-secret-min16
 
 jobs:
+  # Code quality checks
+  lint:
+    runs-on: ubuntu-latest
+    name: Lint & Format
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy -p omninervous -- -D warnings
+
   unit-tests:
     runs-on: ubuntu-latest
     name: Unit Tests
+    needs: lint
     
     steps:
       - uses: actions/checkout@v4
@@ -24,12 +55,24 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
       - name: Run unit tests
         run: cargo test -p omninervous --verbose
 
   vpn-integration:
     runs-on: ubuntu-latest
     name: VPN Integration Test
+    needs: unit-tests
     
     steps:
       - uses: actions/checkout@v4
@@ -231,10 +274,17 @@ jobs:
           echo "| 🏓 VPN Ping | ${{ steps.tests.outputs.PING_RESULT || 'N/A' }} | ${{ steps.tests.outputs.PING_LATENCY || 'N/A' }} ms |" >> $GITHUB_STEP_SUMMARY
           echo "| 📈 VPN TCP | ${{ steps.tests.outputs.TCP_RESULT || 'N/A' }} | ${{ steps.tests.outputs.TCP_THROUGHPUT || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Security Features" >> $GITHUB_STEP_SUMMARY
+          echo "### Security & NAT Traversal Features" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ HMAC-SHA256 Signaling Authentication" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Cluster PSK Authentication" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ 64-bit HMAC Session IDs" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ X25519 + XSalsa20-Poly1305 Encrypted Signaling" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Constant-time HMAC Comparison (timing attack protection)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ LRU Cache for Crypto Boxes (DoS protection)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Dual-Stack IPv4/IPv6 Sockets" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Happy Eyeballs (RFC 8305) Connection Racing" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ NAT-PMP/UPnP Port Mapping" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Relay Fallback for Symmetric NAT" >> $GITHUB_STEP_SUMMARY
 
       - name: Cleanup
         if: always()
