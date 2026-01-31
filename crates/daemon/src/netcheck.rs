@@ -109,7 +109,8 @@ impl Default for NatReport {
 pub struct NatChecker {
     /// STUN servers to query (IPv4)
     stun_servers_v4: Vec<String>,
-    /// STUN servers to query (IPv6)
+    /// STUN servers to query (IPv6) - reserved for future use
+    #[allow(dead_code)]
     stun_servers_v6: Vec<String>,
     /// Query timeout per server
     query_timeout: Duration,

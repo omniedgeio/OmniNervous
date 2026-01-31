@@ -15,7 +15,6 @@ use omninervous::{
     signaling, stun,
     wg::{CliWgControl, UserspaceWgControl, WgInterface},
 };
-use serde_json;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::signal;
@@ -202,8 +201,8 @@ async fn discover_public_endpoint_standard_stun(
         request[0..2].copy_from_slice(&[0x00, 0x01]); // Binding Request
         request[4..8].copy_from_slice(&[0x21, 0x12, 0xA4, 0x42]); // Magic Cookie
                                                                   // Transaction ID (random-ish)
-        for i in 8..20 {
-            request[i] = rand::random();
+        for byte in request.iter_mut().skip(8).take(12) {
+            *byte = rand::random();
         }
 
         if socket.send(&request).await.is_err() {
@@ -534,7 +533,7 @@ async fn main() -> Result<()> {
                             if let Err(e) = handler.handle_packet(pkt, src).await {
                                 error!("Error handling signaling packet from {}: {}", src, e);
                             }
-                        } else if first_byte >= 0x01 && first_byte <= 0x04 {
+                        } else if (0x01..=0x04).contains(&first_byte) {
                             // WireGuard packet
                             if let Some(wg) = wg_api_opt.as_mut() {
                                 if let Err(e) = wg.handle_incoming_packet(pkt, src, &socket).await {

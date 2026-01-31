@@ -140,7 +140,7 @@ impl<'a> MessageHandler<'a> {
 
             relay::MSG_RELAY_BIND_ACK => {
                 // Edge clients handle bind acknowledgements
-                if let Some(relay_client) = self.relay_client.as_mut() {
+                if let Some(_relay_client) = self.relay_client.as_mut() {
                     match relay::parse_relay_bind_ack(buf) {
                         Ok(ack) => {
                             // Find which peer this ack is for
@@ -337,7 +337,7 @@ impl<'a> MessageHandler<'a> {
 
             // Configure WireGuard peer
             if let Some(wg_api) = self.wg_api.as_mut() {
-                let pubkey_b64 = BASE64.encode(&peer_info.public_key);
+                let pubkey_b64 = BASE64.encode(peer_info.public_key);
                 if let Err(e) = wg_api
                     .set_peer(
                         &pubkey_b64,
@@ -421,7 +421,7 @@ impl<'a> MessageHandler<'a> {
 
                         // Update WireGuard peer endpoint
                         if let Some(wg_api) = self.wg_api.as_mut() {
-                            let pubkey_b64 = BASE64.encode(&ping.sender_key);
+                            let pubkey_b64 = BASE64.encode(ping.sender_key);
                             if let Err(e) = wg_api
                                 .set_peer(
                                     &pubkey_b64,
@@ -484,7 +484,7 @@ impl<'a> MessageHandler<'a> {
 
                         // Update WireGuard peer endpoint
                         if let Some(wg_api) = self.wg_api.as_mut() {
-                            let pubkey_b64 = BASE64.encode(&pong.responder_key);
+                            let pubkey_b64 = BASE64.encode(pong.responder_key);
                             if let Err(e) = wg_api
                                 .set_peer(
                                     &pubkey_b64,

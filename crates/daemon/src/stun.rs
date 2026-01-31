@@ -48,7 +48,7 @@ pub fn parse_xor_mapped_address(response: &[u8]) -> Option<std::net::SocketAddr>
         }
 
         pos += attr_len;
-        if attr_len % 4 != 0 {
+        if !attr_len.is_multiple_of(4) {
             pos += 4 - (attr_len % 4);
         }
     }

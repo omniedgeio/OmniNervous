@@ -95,9 +95,7 @@ impl ConnectionRace {
         addr_v6: Option<SocketAddr>,
         delay_ms: u64,
     ) -> Self {
-        let delay_ms = delay_ms
-            .max(HAPPY_EYEBALLS_MIN_DELAY_MS)
-            .min(HAPPY_EYEBALLS_MAX_DELAY_MS);
+        let delay_ms = delay_ms.clamp(HAPPY_EYEBALLS_MIN_DELAY_MS, HAPPY_EYEBALLS_MAX_DELAY_MS);
         Self {
             delay: Duration::from_millis(delay_ms),
             ..Self::new(addr_v4, addr_v6)
