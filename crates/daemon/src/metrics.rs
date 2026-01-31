@@ -50,7 +50,8 @@ impl Metrics {
     }
 
     pub fn inc_ratelimit_drops(&self) {
-        self.sessions_dropped_ratelimit.fetch_add(1, Ordering::Relaxed);
+        self.sessions_dropped_ratelimit
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn set_fdb_entries(&self, count: u64) {
