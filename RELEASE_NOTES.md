@@ -1,5 +1,111 @@
 # Release Notes
 
+## v0.3.0: NAT Traversal Enhancement - Complete Implementation
+
+**Date:** 2026-01-30
+
+This major release delivers comprehensive NAT traversal capabilities, enabling reliable peer-to-peer connectivity across all NAT types including symmetric NAT. The release integrates 7 phases of development with extensive security hardening from code review.
+
+### 🚀 Major Achievements
+
+*   **Universal NAT Traversal**: Full support for all NAT types (Full Cone, Restricted, Port-Restricted, Symmetric) with automatic fallback strategies.
+*   **Relay Infrastructure**: Production-ready relay server/client for symmetric NAT scenarios where direct P2P is impossible.
+*   **Encrypted Signaling**: End-to-end encrypted signaling using X25519 key exchange + XSalsa20-Poly1305 AEAD.
+*   **Dual-Stack IPv6**: Native IPv4/IPv6 dual-stack support with Happy Eyeballs (RFC 8305) connection racing.
+*   **Prometheus Metrics**: Comprehensive observability with 20+ metrics covering NAT, relay, disco, and connection state.
+
+### 🛡️ Security Hardening (Code Review)
+
+*   **Timing Attack Protection**: HMAC verification uses constant-time comparison (`subtle::ConstantTimeEq`).
+*   **DoS Protection**: LRU cache (1000 entries) for crypto boxes prevents unbounded memory growth.
+*   **Secret Zeroization**: `ZeroizeOnDrop` ensures cryptographic secrets are cleared from memory.
+*   **Rate Limiting**: Reduced initial rate limit bucket from 10MB to 1MB.
+*   **Counter Safety**: Saturating subtraction prevents atomic counter underflow.
+
+### 📊 New Modules
+
+| Module | Description |
+|:---|:---|
+| `netcheck.rs` | NAT type detection using STUN servers |
+| `portmap.rs` | NAT-PMP/UPnP port mapping client |
+| `relay.rs` | Relay server and client for symmetric NAT |
+| `endpoint.rs` | Multi-path endpoint management with latency tracking |
+| `socket.rs` | Dual-stack IPv4/IPv6 socket abstraction |
+| `happy_eyeballs.rs` | RFC 8305 connection racing implementation |
+
+### 🛠️ Changes
+
+*   **Dependencies**: Added `crypto_box`, `lru`, `subtle`, `zeroize` crates.
+*   **API Surface**: Complete `lib.rs` rewrite with comprehensive documentation and re-exports.
+*   **CI/CD**: Added lint job (rustfmt + clippy), cargo caching, updated security summary.
+*   **Tests**: 49 unit tests covering all new functionality.
+
+---
+
+## v0.2.7: CI/CD Improvements & Clippy Compliance
+
+**Date:** 2026-01-30
+
+This release focuses on CI/CD pipeline improvements and code quality enforcement.
+
+### 🛠️ CI/CD Improvements
+
+*   **Lint Job**: Added new `lint` job with `rustfmt` and `clippy` checks (warnings as errors).
+*   **Cargo Caching**: Added `actions/cache@v4` for cargo registry/git across all workflows.
+*   **Job Dependencies**: Proper pipeline flow: `lint` → `unit-tests` → `vpn-integration`.
+*   **Branch Triggers**: Added `feature/*` branch trigger for test workflow.
+*   **Security Summary**: Updated job summary with NAT traversal security features.
+
+### 🧹 Code Quality
+
+*   Fixed all clippy warnings across the codebase:
+    - Removed needless borrows in `BASE64.encode()` calls
+    - Used `.clamp()` instead of `.max().min()` pattern
+    - Used `.is_multiple_of()` for modulo checks
+    - Used `.contains()` for range checks
+    - Removed redundant imports
+    - Prefixed intentionally unused variables with `_`
+    - Added `#[allow(dead_code)]` for reserved fields
+
+---
+
+## v0.2.6: Code Review Security Fixes
+
+**Date:** 2026-01-30
+
+This release addresses all security and code quality issues identified in the comprehensive code review of the NAT traversal implementation.
+
+### 🛡️ Security Fixes
+
+*   **HMAC Constant-Time Comparison**: Replaced standard `!=` with `subtle::ConstantTimeEq` to prevent timing attacks on HMAC verification.
+*   **LRU Cache for Crypto Boxes**: Added bounded LRU cache (1000 entries) to `SignalingEncryption.peer_boxes` to prevent memory exhaustion attacks.
+*   **ZeroizeOnDrop**: Added `#[derive(ZeroizeOnDrop)]` to `SignalingEncryption` to ensure secrets are cleared on drop.
+*   **Rate Limit Bucket**: Reduced initial relay rate limit bucket from 10MB to 1MB to prevent burst abuse.
+
+### 🐛 Bug Fixes
+
+*   **Atomic Counter Underflow**: Changed `dec_sessions()`, `dec_relay_sessions()`, `dec_portmap_active()` to use saturating subtraction.
+*   **RTT Truncation**: Fixed potential u128→u64 truncation in Happy Eyeballs RTT calculation using saturating conversion.
+*   **Error Context**: Added `.context()` to IPv4-only receive path for better error diagnostics.
+
+### 🧹 Code Quality
+
+*   **PeerInfo Rename**: Renamed `peers::PeerInfo` to `PeerEntry` to avoid collision with `signaling::PeerInfo`.
+*   **Unused Constants**: Marked intentionally unused portmap constants with `#[allow(dead_code)]`.
+*   **Improved Unwrap**: Added descriptive `.expect()` message to endpoint candidate sorting.
+*   **lib.rs Rewrite**: Complete rewrite with crate-level documentation and comprehensive re-exports.
+
+### 📦 Dependencies Added
+
+```toml
+crypto_box = "0.9"
+lru = "0.12"
+subtle = "2.5"
+zeroize = { version = "1.7", features = ["derive"] }
+```
+
+---
+
 ## v0.2.5: Protocol Alignment & Master Dispatcher
 
 **Date:** 2026-01-24
