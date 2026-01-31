@@ -69,6 +69,11 @@ pub struct SecurityConfig {
     pub max_sessions_per_ip: u32,
     #[serde(default = "default_handshake_timeout")]
     pub handshake_timeout_secs: u64,
+    /// Enable encryption for signaling messages (nacl box)
+    #[serde(default)]
+    pub encrypt_signaling: bool,
+    /// Path to encryption keypair file (auto-generated if not exists)
+    pub encryption_key_path: Option<String>,
 }
 
 impl Default for SecurityConfig {
@@ -77,6 +82,8 @@ impl Default for SecurityConfig {
             identity_path: None,
             max_sessions_per_ip: default_rate_limit(),
             handshake_timeout_secs: default_handshake_timeout(),
+            encrypt_signaling: false,
+            encryption_key_path: None,
         }
     }
 }

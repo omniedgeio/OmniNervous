@@ -16,8 +16,19 @@
 //! ### Key Concept
 //! Nucleus acts as a VIP → endpoint registry (like DNS for VPN).
 //! Edges use delta updates (heartbeats) to stay in sync without full table refreshes.
+//!
+//! ### Encryption (Phase 5)
+//! Optional nacl box encryption for signaling messages:
+//! - Uses X25519 key exchange with XSalsa20-Poly1305
+//! - Each encrypted message includes sender's public key + nonce + ciphertext
+//! - Backward compatible: MSG_ENCRYPTED (0x1D) wraps any message type
+//! - Enable with `security.encrypt_signaling = true` in config
 
 use anyhow::{Context, Result};
+use crypto_box::{
+    aead::{Aead, AeadCore, OsRng},
+    PublicKey, SalsaBox, SecretKey,
+};
 use governor::{Quota, RateLimiter};
 use hmac::{Hmac, Mac};
 use log::{debug, info, warn};
@@ -47,6 +58,8 @@ pub const MSG_NAT_PUNCH: u8 = 0x1A;
 pub const MSG_DISCO_PING: u8 = 0x1B;
 /// Disco pong - response to ping with observed address
 pub const MSG_DISCO_PONG: u8 = 0x1C;
+/// Encrypted message envelope - wraps any message type with nacl box encryption
+pub const MSG_ENCRYPTED: u8 = 0x1D;
 
 /// How long peers stay in "recent" list for delta updates
 const RECENT_PEER_WINDOW_SECS: u64 = 90; // 3x heartbeat interval
@@ -169,6 +182,168 @@ pub struct DiscoPong {
     pub observed_addr: String, // "ip:port"
     /// Responder's WireGuard public key
     pub responder_key: [u8; 32],
+}
+
+/// Encrypted envelope for signaling messages
+/// Uses X25519 key exchange with XSalsa20-Poly1305 (nacl box)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EncryptedEnvelope {
+    /// Sender's X25519 public key (32 bytes)
+    pub sender_pubkey: [u8; 32],
+    /// Random nonce (24 bytes for XSalsa20)
+    pub nonce: [u8; 24],
+    /// Encrypted message (original msg_type + payload)
+    pub ciphertext: Vec<u8>,
+}
+
+/// Handles encryption/decryption of signaling messages
+/// Uses crypto_box (X25519 + XSalsa20-Poly1305)
+pub struct SignalingEncryption {
+    /// Our secret key
+    secret_key: SecretKey,
+    /// Our public key
+    public_key: PublicKey,
+    /// Whether encryption is enabled
+    enabled: bool,
+    /// Cached SalsaBox instances for known peers (public key -> box)
+    peer_boxes: HashMap<[u8; 32], SalsaBox>,
+}
+
+impl SignalingEncryption {
+    /// Create a new encryption context with a new random keypair
+    pub fn new(enabled: bool) -> Self {
+        let secret_key = SecretKey::generate(&mut OsRng);
+        let public_key = secret_key.public_key();
+        Self {
+            secret_key,
+            public_key,
+            enabled,
+            peer_boxes: HashMap::new(),
+        }
+    }
+
+    /// Create from an existing secret key
+    pub fn from_secret_key(secret_bytes: [u8; 32], enabled: bool) -> Self {
+        let secret_key = SecretKey::from(secret_bytes);
+        let public_key = secret_key.public_key();
+        Self {
+            secret_key,
+            public_key,
+            enabled,
+            peer_boxes: HashMap::new(),
+        }
+    }
+
+    /// Get our public key bytes
+    pub fn public_key_bytes(&self) -> [u8; 32] {
+        *self.public_key.as_bytes()
+    }
+
+    /// Get our secret key bytes (for persistence)
+    pub fn secret_key_bytes(&self) -> [u8; 32] {
+        self.secret_key.to_bytes()
+    }
+
+    /// Check if encryption is enabled
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Enable or disable encryption
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Get or create a SalsaBox for a peer
+    fn get_or_create_box(&mut self, peer_pubkey: &[u8; 32]) -> &SalsaBox {
+        if !self.peer_boxes.contains_key(peer_pubkey) {
+            let peer_pk = PublicKey::from(*peer_pubkey);
+            let salsa_box = SalsaBox::new(&peer_pk, &self.secret_key);
+            self.peer_boxes.insert(*peer_pubkey, salsa_box);
+        }
+        self.peer_boxes.get(peer_pubkey).unwrap()
+    }
+
+    /// Encrypt a message for a peer
+    /// Returns MSG_ENCRYPTED + serialized EncryptedEnvelope
+    pub fn encrypt(&mut self, plaintext: &[u8], peer_pubkey: &[u8; 32]) -> Result<Vec<u8>> {
+        if !self.enabled {
+            return Ok(plaintext.to_vec());
+        }
+
+        let salsa_box = self.get_or_create_box(peer_pubkey);
+        let nonce = SalsaBox::generate_nonce(&mut OsRng);
+
+        let ciphertext = salsa_box
+            .encrypt(&nonce, plaintext)
+            .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+
+        let envelope = EncryptedEnvelope {
+            sender_pubkey: self.public_key_bytes(),
+            nonce: nonce.into(),
+            ciphertext,
+        };
+
+        let mut data = vec![MSG_ENCRYPTED];
+        let encoded =
+            serde_cbor::to_vec(&envelope).context("Failed to encode EncryptedEnvelope")?;
+        data.extend(encoded);
+        Ok(data)
+    }
+
+    /// Decrypt an encrypted envelope
+    /// Returns the decrypted message (msg_type + payload)
+    pub fn decrypt(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        if data.is_empty() {
+            anyhow::bail!("Empty message");
+        }
+
+        // If not encrypted, return as-is
+        if data[0] != MSG_ENCRYPTED {
+            return Ok(data.to_vec());
+        }
+
+        let envelope: EncryptedEnvelope =
+            serde_cbor::from_slice(&data[1..]).context("Failed to decode EncryptedEnvelope")?;
+
+        let salsa_box = self.get_or_create_box(&envelope.sender_pubkey);
+        let nonce = crypto_box::Nonce::from(envelope.nonce);
+
+        let plaintext = salsa_box
+            .decrypt(&nonce, envelope.ciphertext.as_slice())
+            .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
+
+        Ok(plaintext)
+    }
+
+    /// Decrypt an encrypted envelope and return the sender's public key
+    pub fn decrypt_with_sender(&mut self, data: &[u8]) -> Result<(Vec<u8>, Option<[u8; 32]>)> {
+        if data.is_empty() {
+            anyhow::bail!("Empty message");
+        }
+
+        // If not encrypted, return as-is with no sender
+        if data[0] != MSG_ENCRYPTED {
+            return Ok((data.to_vec(), None));
+        }
+
+        let envelope: EncryptedEnvelope =
+            serde_cbor::from_slice(&data[1..]).context("Failed to decode EncryptedEnvelope")?;
+
+        let salsa_box = self.get_or_create_box(&envelope.sender_pubkey);
+        let nonce = crypto_box::Nonce::from(envelope.nonce);
+
+        let plaintext = salsa_box
+            .decrypt(&nonce, envelope.ciphertext.as_slice())
+            .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
+
+        Ok((plaintext, Some(envelope.sender_pubkey)))
+    }
+
+    /// Clear cached boxes (e.g., when peer keys change)
+    pub fn clear_cache(&mut self) {
+        self.peer_boxes.clear();
+    }
 }
 
 /// Registered peer on Nucleus with join time tracking
@@ -777,6 +952,7 @@ pub fn is_signaling_message(data: &[u8]) -> bool {
             | MSG_NAT_PUNCH
             | MSG_DISCO_PING
             | MSG_DISCO_PONG
+            | MSG_ENCRYPTED
     )
 }
 
@@ -827,3 +1003,69 @@ pub const SIGNALING_STUN_RESPONSE: u8 = MSG_STUN_RESPONSE;
 pub const SIGNALING_NAT_PUNCH: u8 = MSG_NAT_PUNCH;
 pub const SIGNALING_DISCO_PING: u8 = MSG_DISCO_PING;
 pub const SIGNALING_DISCO_PONG: u8 = MSG_DISCO_PONG;
+pub const SIGNALING_ENCRYPTED: u8 = MSG_ENCRYPTED;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encryption_roundtrip() {
+        let mut alice = SignalingEncryption::new(true);
+        let mut bob = SignalingEncryption::new(true);
+
+        // Original message
+        let original = b"Hello, encrypted world!";
+
+        // Alice encrypts for Bob
+        let encrypted = alice.encrypt(original, &bob.public_key_bytes()).unwrap();
+        assert!(encrypted[0] == MSG_ENCRYPTED, "Should be encrypted message");
+
+        // Bob decrypts
+        let decrypted = bob.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, original);
+    }
+
+    #[test]
+    fn test_encryption_disabled_passthrough() {
+        let mut enc = SignalingEncryption::new(false);
+        let peer_key = [0u8; 32];
+
+        let original = vec![MSG_REGISTER, 1, 2, 3];
+        let result = enc.encrypt(&original, &peer_key).unwrap();
+        assert_eq!(result, original, "Disabled encryption should pass through");
+    }
+
+    #[test]
+    fn test_decrypt_unencrypted_passthrough() {
+        let mut enc = SignalingEncryption::new(true);
+
+        let original = vec![MSG_REGISTER, 1, 2, 3];
+        let result = enc.decrypt(&original).unwrap();
+        assert_eq!(result, original, "Unencrypted messages should pass through");
+    }
+
+    #[test]
+    fn test_encryption_with_sender() {
+        let mut alice = SignalingEncryption::new(true);
+        let mut bob = SignalingEncryption::new(true);
+
+        let original = b"Message with sender tracking";
+        let encrypted = alice.encrypt(original, &bob.public_key_bytes()).unwrap();
+
+        let (decrypted, sender) = bob.decrypt_with_sender(&encrypted).unwrap();
+        assert_eq!(decrypted, original);
+        assert_eq!(sender, Some(alice.public_key_bytes()));
+    }
+
+    #[test]
+    fn test_from_secret_key() {
+        let secret_bytes = [42u8; 32];
+        let enc1 = SignalingEncryption::from_secret_key(secret_bytes, true);
+        let enc2 = SignalingEncryption::from_secret_key(secret_bytes, true);
+
+        // Same secret key should produce same public key
+        assert_eq!(enc1.public_key_bytes(), enc2.public_key_bytes());
+        assert_eq!(enc1.secret_key_bytes(), enc2.secret_key_bytes());
+    }
+}

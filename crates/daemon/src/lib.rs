@@ -23,5 +23,5 @@ pub use metrics::Metrics;
 pub use netcheck::{NatChecker, NatReport, NatType};
 pub use portmap::{PortMapCapabilities, PortMapper, PortMapping};
 pub use relay::{RelayClient, RelayConfig, RelayServer, RelaySession};
-pub use signaling::{NucleusClient, NucleusState};
+pub use signaling::{EncryptedEnvelope, NucleusClient, NucleusState, SignalingEncryption};
 pub use wg::{CliWgControl, UserspaceWgControl, WgInterface};
