@@ -480,32 +480,55 @@ mod tests {
 
     #[test]
     fn test_port_mapping_expiry() {
+        // Create a mapping with a very short lifetime that will be expired immediately
         let mapping = PortMapping {
             protocol: PortMapProtocol::NatPmp,
             internal_port: 51820,
             external_port: 51820,
-            created_at: Instant::now() - Duration::from_secs(3700),
-            lifetime: Duration::from_secs(3600),
+            created_at: Instant::now(),
+            lifetime: Duration::from_nanos(1), // Expires almost immediately
             gateway: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
         };
 
+        // Small sleep to ensure we're past the lifetime
+        std::thread::sleep(Duration::from_millis(1));
         assert!(mapping.is_expired());
+
+        // Also test a non-expired mapping
+        let fresh_mapping = PortMapping {
+            protocol: PortMapProtocol::NatPmp,
+            internal_port: 51820,
+            external_port: 51820,
+            created_at: Instant::now(),
+            lifetime: Duration::from_secs(3600),
+            gateway: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+        };
+        assert!(!fresh_mapping.is_expired());
     }
 
     #[test]
     fn test_port_mapping_needs_refresh() {
+        // Create a mapping with a short lifetime where half has passed
         let mapping = PortMapping {
             protocol: PortMapProtocol::NatPmp,
             internal_port: 51820,
             external_port: 51820,
-            created_at: Instant::now() - Duration::from_secs(1900),
-            lifetime: Duration::from_secs(3600),
+            created_at: Instant::now(),
+            lifetime: Duration::from_millis(10), // Very short lifetime
             gateway: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
         };
 
-        // 1900 seconds elapsed, which is > 1800 (half of 3600)
-        assert!(mapping.needs_refresh());
+        // Initially should not need refresh (just created)
+        assert!(!mapping.needs_refresh());
         assert!(!mapping.is_expired());
+
+        // Wait for more than half the lifetime (>5ms)
+        std::thread::sleep(Duration::from_millis(6));
+        assert!(mapping.needs_refresh());
+
+        // Wait until fully expired
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(mapping.is_expired());
     }
 
     #[test]
