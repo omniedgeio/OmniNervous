@@ -1,6 +1,6 @@
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -79,6 +79,25 @@ impl WgInterface {
         match self {
             Self::Cli(c) => c.shutdown_sync(),
             Self::Userspace(u) => u.shutdown().await,
+        }
+    }
+
+    /// Soft shutdown - clears peers and routing but keeps TUN device alive.
+    /// Use this on Windows to prevent adapter accumulation on disconnect/reconnect.
+    pub async fn soft_shutdown(&self) {
+        match self {
+            Self::Cli(_) => {
+                // For CLI mode, we can't soft shutdown - do nothing
+            }
+            Self::Userspace(u) => u.soft_shutdown().await,
+        }
+    }
+
+    /// Check if the TUN loop is active (device is in use by reader/writer tasks)
+    pub async fn is_tun_active(&self) -> bool {
+        match self {
+            Self::Cli(_) => true, // CLI mode is always "active" when created
+            Self::Userspace(u) => u.is_tun_active().await,
         }
     }
 }
@@ -247,6 +266,10 @@ pub struct UserspaceWgControl {
 
 impl UserspaceWgControl {
     pub fn new(interface: &str) -> Self {
+        info!(
+            "[WG] UserspaceWgControl::new() called with interface: '{}'",
+            interface
+        );
         Self {
             interface: interface.to_string(),
             inner: Arc::new(UserspaceInner {
@@ -289,53 +312,214 @@ impl UserspaceWgControl {
             *pk_lock = Some(secret);
         }
 
-        // Create TUN device
-        info!("[WG] Configuring TUN device...");
-        let mut config = tun::Configuration::default();
-
-        // On macOS, TUN interfaces must be named utunN - we cannot set custom names.
-        // Only set the interface name on Linux where custom names are supported.
-        // On macOS, the system will auto-assign the next available utun interface.
-        #[cfg(target_os = "linux")]
-        if !self.interface.is_empty() {
-            config.name(&self.interface);
+        // Check if we already have a TUN device (reconnect scenario)
+        {
+            let device_lock = self.inner.device.lock().await;
+            if device_lock.is_some() {
+                info!("[WG] TUN device already exists, reusing for reconnect");
+                return Ok(());
+            }
         }
 
-        config.address(vip).netmask("255.255.255.0").up();
+        // Create TUN device
+        info!("[WG] Configuring TUN device...");
 
-        #[cfg(target_os = "linux")]
-        config.platform(|config| {
-            config.packet_information(false);
-        });
+        // On Windows, try to reuse existing WinTun adapter to avoid accumulation
+        #[cfg(target_os = "windows")]
+        {
+            let device = self.setup_windows_tun(vip).await?;
+            let mut d_lock = self.inner.device.lock().await;
+            *d_lock = Some(device);
+            return Ok(());
+        }
 
-        #[cfg(target_os = "macos")]
-        info!("[WG] Calling tun::create_as_async (macOS will auto-assign utunN)...");
-        #[cfg(not(target_os = "macos"))]
+        // Non-Windows path
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut config = tun::Configuration::default();
+
+            // On macOS, TUN interfaces must be named utunN - we cannot set custom names.
+            // Only set the interface name on Linux where custom names are supported.
+            // On macOS, the system will auto-assign the next available utun interface.
+            #[cfg(target_os = "linux")]
+            if !self.interface.is_empty() {
+                config.name(&self.interface);
+            }
+
+            config.address(vip).netmask("255.255.255.0").up();
+
+            #[cfg(target_os = "linux")]
+            config.platform(|config| {
+                config.packet_information(false);
+            });
+
+            #[cfg(target_os = "macos")]
+            info!("[WG] Calling tun::create_as_async (macOS will auto-assign utunN)...");
+            #[cfg(target_os = "linux")]
+            info!(
+                "[WG] Calling tun::create_as_async for interface '{}'...",
+                self.interface
+            );
+
+            let device = tun::create_as_async(&config).map_err(|e| {
+                let err_msg = format!("[WG] Failed to create TUN device: {:?}", e);
+                error!("{}", err_msg);
+                err_msg
+            })?;
+
+            #[cfg(target_os = "macos")]
+            info!("[WG] Userspace WireGuard TUN created successfully (macOS utun)");
+            #[cfg(target_os = "linux")]
+            info!(
+                "[WG] Userspace WireGuard TUN '{}' created successfully",
+                self.interface
+            );
+
+            {
+                let mut d_lock = self.inner.device.lock().await;
+                *d_lock = Some(device);
+            }
+
+            Ok(())
+        }
+    }
+
+    /// Windows-specific TUN setup that reuses existing WinTun adapters
+    #[cfg(target_os = "windows")]
+    async fn setup_windows_tun(&self, vip: &str) -> Result<tun::AsyncDevice, String> {
+        use std::sync::Arc as StdArc;
+
         info!(
-            "[WG] Calling tun::create_as_async for interface '{}'...",
+            "[WG] Windows TUN setup - interface name: '{}'",
             self.interface
         );
 
-        let device = tun::create_as_async(&config).map_err(|e| {
+        // Try to load WinTun library
+        let wintun_dll = match unsafe { wintun::load() } {
+            Ok(dll) => StdArc::new(dll),
+            Err(e) => {
+                warn!(
+                    "[WG] Failed to load WinTun DLL, falling back to tun crate: {}",
+                    e
+                );
+                return self.create_tun_fallback(vip);
+            }
+        };
+
+        let adapter_name = if self.interface.is_empty() {
+            "wintun"
+        } else {
+            &self.interface
+        };
+
+        info!("[WG] Using adapter name: '{}'", adapter_name);
+
+        // First, try to open an existing adapter with the same name
+        info!(
+            "[WG] Checking for existing WinTun adapter '{}'...",
+            adapter_name
+        );
+
+        // Try to open existing adapter
+        match wintun::Adapter::open(&wintun_dll, adapter_name) {
+            Ok(existing_adapter) => {
+                info!(
+                    "[WG] Found existing WinTun adapter '{}', reusing it",
+                    adapter_name
+                );
+
+                // The existing adapter is already open. Now we need to create a session
+                // and wrap it in a tun::AsyncDevice. Unfortunately the tun crate doesn't
+                // expose a way to use an existing adapter directly.
+                //
+                // For now, we'll close the old adapter and recreate - this at least
+                // prevents accumulation since we're using the same name/GUID
+                drop(existing_adapter);
+
+                // Small delay to let Windows clean up
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+            Err(_) => {
+                info!("[WG] No existing adapter found, will create new one");
+            }
+        }
+
+        // Create the TUN device using the tun crate
+        // On Windows with a fixed interface name, this should reuse or recreate cleanly
+        info!(
+            "[WG] Calling create_tun_fallback with interface name: '{}'",
+            self.interface
+        );
+        self.create_tun_fallback(vip)
+    }
+
+    /// Fallback TUN creation using the tun crate directly
+    #[cfg(target_os = "windows")]
+    fn create_tun_fallback(&self, vip: &str) -> Result<tun::AsyncDevice, String> {
+        use tun::Device as TunDevice; // Import the Device trait for set_name()
+
+        let mut config = tun::Configuration::default();
+
+        // Set interface name on Windows
+        info!(
+            "[WG] create_tun_fallback: self.interface = '{}', is_empty = {}",
+            self.interface,
+            self.interface.is_empty()
+        );
+
+        let adapter_name = if self.interface.is_empty() {
+            "OmniEdge" // Default to OmniEdge if somehow empty
+        } else {
+            &self.interface
+        };
+
+        info!("[WG] Setting config.name to '{}'", adapter_name);
+        config.name(adapter_name);
+        info!("[WG] config.name set successfully");
+
+        config.address(vip).netmask("255.255.255.0").up();
+
+        info!(
+            "[WG] Calling tun::create_as_async for Windows interface '{}'...",
+            adapter_name
+        );
+
+        let mut device = tun::create_as_async(&config).map_err(|e| {
             let err_msg = format!("[WG] Failed to create TUN device: {:?}", e);
             error!("{}", err_msg);
             err_msg
         })?;
 
-        #[cfg(target_os = "macos")]
-        info!("[WG] Userspace WireGuard TUN created successfully (macOS utun)");
-        #[cfg(not(target_os = "macos"))]
-        info!(
-            "[WG] Userspace WireGuard TUN '{}' created successfully",
-            self.interface
-        );
-
-        {
-            let mut d_lock = self.inner.device.lock().await;
-            *d_lock = Some(device);
+        // Verify and fix the adapter name if needed
+        match device.get_ref().name() {
+            Ok(current_name) => {
+                info!("[WG] Created adapter with name: '{}'", current_name);
+                if current_name != adapter_name {
+                    info!(
+                        "[WG] Adapter name mismatch! Expected '{}', got '{}'. Renaming...",
+                        adapter_name, current_name
+                    );
+                    if let Err(e) = device.get_mut().set_name(adapter_name) {
+                        warn!(
+                            "[WG] Failed to rename adapter to '{}': {:?}",
+                            adapter_name, e
+                        );
+                    } else {
+                        info!("[WG] Successfully renamed adapter to '{}'", adapter_name);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("[WG] Could not get adapter name: {:?}", e);
+            }
         }
 
-        Ok(())
+        info!(
+            "[WG] Userspace WireGuard TUN '{}' created successfully",
+            adapter_name
+        );
+
+        Ok(device)
     }
 
     pub async fn set_peer(
@@ -651,6 +835,58 @@ impl UserspaceWgControl {
             "[WG] Userspace interface {} shutdown complete",
             self.interface
         );
+    }
+
+    /// Soft shutdown - clears peers and routing but keeps TUN device/tasks alive.
+    /// This is used on Windows to allow reconnect without recreating the WinTun adapter.
+    pub async fn soft_shutdown(&self) {
+        info!(
+            "[WG] Soft shutdown userspace interface: {} (keeping TUN alive)",
+            self.interface
+        );
+
+        // Clear peer sessions - stops WireGuard encryption/decryption
+        {
+            let mut peers = self.inner.peers.write().await;
+            peers.clear();
+        }
+
+        // Clear routing table - no packets will be routed
+        {
+            let mut routing = self.inner.routing_table.write().await;
+            routing.clear();
+        }
+
+        // Clear index map
+        {
+            let mut index_map = self.inner.index_map.write().await;
+            index_map.clear();
+        }
+
+        // NOTE: We do NOT:
+        // - Clear the TUN writer channel (tasks keep running)
+        // - Abort the TUN reader/writer tasks (device stays open)
+        // - Drop the TUN device (stays alive)
+        // - Clear the private key (can be reused)
+
+        info!(
+            "[WG] Soft shutdown complete for {} - TUN device still active",
+            self.interface
+        );
+    }
+
+    /// Check if the TUN loop is active (tasks are running with device)
+    pub async fn is_tun_active(&self) -> bool {
+        // If we have task handles and tun_writer, the loop is active
+        let has_handles = {
+            let handles = self.inner.tun_task_handles.lock().await;
+            !handles.is_empty()
+        };
+        let has_writer = {
+            let writer = self.inner.tun_writer.read().await;
+            writer.is_some()
+        };
+        has_handles && has_writer
     }
 }
 
