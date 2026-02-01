@@ -1014,6 +1014,7 @@ dependencies = [
  "tokio",
  "toml",
  "tun",
+ "wintun",
  "zeroize",
 ]
 
