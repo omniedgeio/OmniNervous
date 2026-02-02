@@ -156,7 +156,13 @@ pub struct HeartbeatAckMessage {
 pub struct QueryPeerMessage {
     pub cluster: String,
     pub target_vip: Ipv4Addr,
+    /// Target IPv6 VIP (alternative to target_vip for IPv6 lookups)
+    #[serde(default)]
+    pub target_vip_v6: Option<Ipv6Addr>,
     pub requester_vip: Ipv4Addr,
+    /// Requester's IPv6 VIP (dual-stack support)
+    #[serde(default)]
+    pub requester_vip_v6: Option<Ipv6Addr>,
     pub hmac_tag: Option<[u8; 32]>,
 }
 
@@ -213,6 +219,9 @@ pub struct DiscoPong {
     pub observed_addr: String, // "ip:port"
     /// Responder's WireGuard public key
     pub responder_key: [u8; 32],
+    /// Responder's IPv6 VIP (dual-stack support)
+    #[serde(default)]
+    pub responder_vip_v6: Option<Ipv6Addr>,
 }
 
 /// Encrypted envelope for signaling messages
@@ -809,6 +818,20 @@ pub fn handle_nucleus_message(
                     return None;
                 }
 
+                // Validate IPv6 VIPs if provided
+                if let Some(ref v6) = query.target_vip_v6 {
+                    if !is_private_ip_v6(*v6) {
+                        warn!("Invalid IPv6 target VIP in QUERY_PEER: {}", v6);
+                        return None;
+                    }
+                }
+                if let Some(ref v6) = query.requester_vip_v6 {
+                    if !is_private_ip_v6(*v6) {
+                        warn!("Invalid IPv6 requester VIP in QUERY_PEER: {}", v6);
+                        return None;
+                    }
+                }
+
                 if let Some(s) = secret {
                     let mut check_query = query.clone();
                     check_query.hmac_tag = None;
@@ -820,7 +843,14 @@ pub fn handle_nucleus_message(
                     }
                 }
 
-                let peer = state.query_peer(&query.cluster, query.target_vip);
+                // Try IPv6 lookup first if target_vip_v6 is provided, then fall back to IPv4
+                let peer = if let Some(v6) = query.target_vip_v6 {
+                    state.query_peer_v6(&query.cluster, v6)
+                } else {
+                    None
+                }
+                .or_else(|| state.query_peer(&query.cluster, query.target_vip));
+
                 let mut response = PeerInfoMessage {
                     found: peer.is_some(),
                     peer,
@@ -1150,7 +1180,9 @@ impl NucleusClient {
         let mut msg = QueryPeerMessage {
             cluster: self.cluster.clone(),
             target_vip,
+            target_vip_v6: None,
             requester_vip: self.vip,
+            requester_vip_v6: self.vip_v6,
             hmac_tag: None,
         };
 
@@ -1162,6 +1194,32 @@ impl NucleusClient {
         let data = encode_message(MSG_QUERY_PEER, &msg)?;
         socket.send_to(&data, self.nucleus_addr).await?;
         debug!("Queried peer {}", target_vip);
+        Ok(())
+    }
+
+    /// Query specific peer by IPv6 VIP
+    pub async fn query_peer_by_v6(
+        &self,
+        socket: &UdpSocket,
+        target_vip_v6: Ipv6Addr,
+    ) -> Result<()> {
+        let mut msg = QueryPeerMessage {
+            cluster: self.cluster.clone(),
+            target_vip: Ipv4Addr::UNSPECIFIED, // Placeholder, server will use v6
+            target_vip_v6: Some(target_vip_v6),
+            requester_vip: self.vip,
+            requester_vip_v6: self.vip_v6,
+            hmac_tag: None,
+        };
+
+        if let Some(s) = &self.secret {
+            let bytes = serde_cbor::to_vec(&msg)?;
+            msg.hmac_tag = Some(calculate_hmac(s, &bytes));
+        }
+
+        let data = encode_message(MSG_QUERY_PEER, &msg)?;
+        socket.send_to(&data, self.nucleus_addr).await?;
+        debug!("Queried peer by IPv6 {}", target_vip_v6);
         Ok(())
     }
 

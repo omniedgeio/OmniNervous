@@ -431,6 +431,7 @@ impl<'a> MessageHandler<'a> {
                     tx_id: ping.tx_id,
                     observed_addr: src.to_string(),
                     responder_key: self.our_public_key.unwrap_or([0u8; 32]),
+                    responder_vip_v6: self.our_vip_v6,
                 };
 
                 // Encode and send pong
