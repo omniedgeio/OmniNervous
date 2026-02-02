@@ -1,3 +1,4 @@
+use crate::happy_eyeballs::{ConnectionRace, RaceAction, RaceResult};
 use crate::metrics::Metrics;
 use crate::peers::PeerTable;
 use crate::relay::{self, RelayClient, RelayServer};
@@ -25,6 +26,19 @@ pub struct PendingPing {
     pub sent_at: Instant,
     /// Number of retries attempted
     pub retries: u32,
+    /// Race ID if this ping is part of a Happy Eyeballs race
+    pub race_id: Option<Ipv4Addr>,
+}
+
+/// Active Happy Eyeballs connection race
+#[derive(Debug)]
+pub struct ActiveRace {
+    /// The connection race state
+    pub race: ConnectionRace,
+    /// Target VIP
+    pub target_vip: Ipv4Addr,
+    /// Transaction IDs associated with this race (for both IPv4 and IPv6 pings)
+    pub tx_ids: Vec<[u8; 12]>,
 }
 
 /// Result of a successful disco ping/pong exchange
@@ -74,6 +88,8 @@ pub struct MessageHandler<'a> {
     pub our_vip_v6: Option<Ipv6Addr>,
     /// Pending disco pings awaiting responses
     pub pending_pings: HashMap<[u8; 12], PendingPing>,
+    /// Active Happy Eyeballs connection races (keyed by target VIP)
+    pub pending_races: HashMap<Ipv4Addr, ActiveRace>,
     /// Disco configuration
     pub disco_config: DiscoConfig,
     /// Relay server (for nucleus mode)
@@ -266,10 +282,15 @@ impl<'a> MessageHandler<'a> {
                 for peer_info in ack.new_peers {
                     self.add_peer(peer_info).await;
                 }
-                // Handle removed peers
+                // Handle removed peers (IPv4)
                 for vip in ack.removed_vips {
                     self.peer_table.remove_by_vip(&vip);
                     info!("Peer left: {}", vip);
+                }
+                // Handle removed peers (IPv6)
+                for vip_v6 in ack.removed_vips_v6 {
+                    self.peer_table.remove_by_vip_v6(&vip_v6);
+                    info!("Peer left (via IPv6): {}", vip_v6);
                 }
                 Ok(())
             }
@@ -328,32 +349,51 @@ impl<'a> MessageHandler<'a> {
                 return;
             }
 
-            if let Err(e) = self
-                .peer_table
-                .register(peer_info.public_key, endpoint, peer_info.vip)
-            {
+            // Validate IPv6 VIP if provided (must be in ULA range fd00::/8)
+            if let Some(vip_v6) = peer_info.vip_v6 {
+                let octets = vip_v6.octets();
+                if octets[0] != 0xfd {
+                    warn!(
+                        "Rejected peer with invalid IPv6 VIP {} (not in ULA range fd00::/8)",
+                        vip_v6
+                    );
+                    return;
+                }
+            }
+
+            if let Err(e) = self.peer_table.register_with_v6(
+                peer_info.public_key,
+                endpoint,
+                peer_info.vip,
+                peer_info.vip_v6,
+            ) {
                 warn!("Security alert for {}: {}", peer_info.vip, e);
                 return;
             }
-            info!("Discovered peer {} at {}", peer_info.vip, endpoint);
+            info!(
+                "Discovered peer {} (v6: {:?}) at {}",
+                peer_info.vip, peer_info.vip_v6, endpoint
+            );
 
-            // Configure WireGuard peer
+            // Configure WireGuard peer with both IPv4 and IPv6 allowed IPs
             if let Some(wg_api) = self.wg_api.as_mut() {
                 let pubkey_b64 = BASE64.encode(peer_info.public_key);
+
+                // Build allowed IPs list (IPv4 /32 + optional IPv6 /128)
+                let mut allowed_ips = vec![format!("{}/32", peer_info.vip)];
+                if let Some(vip_v6) = peer_info.vip_v6 {
+                    allowed_ips.push(format!("{}/128", vip_v6));
+                }
+
                 if let Err(e) = wg_api
-                    .set_peer(
-                        &pubkey_b64,
-                        Some(endpoint),
-                        &[peer_info.vip.to_string()],
-                        Some(25),
-                    )
+                    .set_peer(&pubkey_b64, Some(endpoint), &allowed_ips, Some(25))
                     .await
                 {
                     warn!("Failed to configure WG peer {}: {}", peer_info.vip, e);
                 } else {
                     info!(
-                        "Successfully configured WG peer {} at {}",
-                        peer_info.vip, peer_info.endpoint
+                        "Successfully configured WG peer {} at {} (allowed IPs: {:?})",
+                        peer_info.vip, peer_info.endpoint, allowed_ips
                     );
                 }
             }
@@ -460,23 +500,70 @@ impl<'a> MessageHandler<'a> {
                         src, pending.target_vip, rtt, pong.observed_addr
                     );
 
+                    // Check if this ping was part of a Happy Eyeballs race
+                    let race_result: Option<RaceResult> = if let Some(race_vip) = pending.race_id {
+                        if let Some(active_race) = self.pending_races.get_mut(&race_vip) {
+                            let result = active_race.race.record_response(src);
+                            if let Some(ref res) = result {
+                                info!(
+                                    "Happy Eyeballs race for {} complete: {} won in {:?}",
+                                    race_vip,
+                                    if res.ipv6_won { "IPv6" } else { "IPv4" },
+                                    res.race_duration
+                                );
+                            }
+                            result
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Clean up completed race and cancel other pending pings in the race
+                    if let Some(ref result) = race_result {
+                        if let Some(active_race) = self.pending_races.remove(&pending.target_vip) {
+                            // Remove other pending pings from this race
+                            for tx_id in active_race.tx_ids {
+                                if tx_id != pong.tx_id {
+                                    if self.pending_pings.remove(&tx_id).is_some() {
+                                        debug!(
+                                            "Cancelled racing ping {:02x?} (race won by {})",
+                                            &tx_id[..4],
+                                            if result.ipv6_won { "IPv6" } else { "IPv4" }
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Parse our observed address for NAT hairpin detection
                     let observed_addr: Option<SocketAddr> = pong.observed_addr.parse().ok();
 
                     // Log the disco result
-                    let result = DiscoResult {
+                    let disco_result = DiscoResult {
                         vip: pending.target_vip,
                         endpoint: src,
                         rtt,
                         observed_addr,
                     };
-                    debug!("Disco exchange successful: {:?}", result);
+                    debug!("Disco exchange successful: {:?}", disco_result);
 
-                    // Update peer endpoint if it changed (e.g., due to NAT rebinding)
-                    if pending.target != src {
+                    // Update peer endpoint if it changed (e.g., due to NAT rebinding or race winner)
+                    if pending.target != src || race_result.is_some() {
                         info!(
-                            "Peer {} endpoint discovered via disco: {} -> {}",
-                            pending.target_vip, pending.target, src
+                            "Peer {} endpoint discovered via disco: {} -> {}{}",
+                            pending.target_vip,
+                            pending.target,
+                            src,
+                            if race_result.as_ref().map(|r| r.ipv6_won).unwrap_or(false) {
+                                " (IPv6 won race)"
+                            } else if race_result.is_some() {
+                                " (IPv4 won race)"
+                            } else {
+                                ""
+                            }
                         );
 
                         // Update endpoint in peer table
@@ -522,6 +609,18 @@ impl<'a> MessageHandler<'a> {
         target: SocketAddr,
         target_vip: Ipv4Addr,
     ) -> Result<()> {
+        self.send_disco_ping_internal(target, target_vip, None)
+            .await?;
+        Ok(())
+    }
+
+    /// Internal function to send disco ping with optional race tracking
+    async fn send_disco_ping_internal(
+        &mut self,
+        target: SocketAddr,
+        target_vip: Ipv4Addr,
+        race_id: Option<Ipv4Addr>,
+    ) -> Result<[u8; 12]> {
         // Generate random transaction ID
         let tx_id: [u8; 12] = rand::random();
 
@@ -544,16 +643,201 @@ impl<'a> MessageHandler<'a> {
             target_vip,
             sent_at: Instant::now(),
             retries: 0,
+            race_id,
         };
         self.pending_pings.insert(tx_id, pending);
 
         debug!(
-            "Sent disco ping to {} ({}) tx: {:02x?}",
+            "Sent disco ping to {} ({}) tx: {:02x?}{}",
             target_vip,
             target,
-            &tx_id[..4]
+            &tx_id[..4],
+            if race_id.is_some() { " [racing]" } else { "" }
         );
-        Ok(())
+        Ok(tx_id)
+    }
+
+    /// Send DISCO_PINGs using Happy Eyeballs algorithm (RFC 8305)
+    ///
+    /// Races IPv4 and IPv6 endpoints, preferring IPv6 with a 250ms head start.
+    /// The first endpoint to respond wins and becomes the active endpoint.
+    ///
+    /// # Arguments
+    /// * `target_v4` - Optional IPv4 endpoint
+    /// * `target_v6` - Optional IPv6 endpoint
+    /// * `target_vip` - Target's virtual IP (used as race identifier)
+    ///
+    /// # Returns
+    /// * `Ok(RaceAction)` - The initial action taken (ProbeV6/ProbeV4/NoAddresses)
+    pub async fn send_disco_ping_with_race(
+        &mut self,
+        target_v4: Option<SocketAddr>,
+        target_v6: Option<SocketAddr>,
+        target_vip: Ipv4Addr,
+    ) -> Result<RaceAction> {
+        // Check if a race is already in progress for this peer
+        if self.pending_races.contains_key(&target_vip) {
+            debug!("Race already in progress for {}, skipping", target_vip);
+            return Ok(RaceAction::RaceOver);
+        }
+
+        // Create new connection race
+        let mut race = ConnectionRace::new(target_v4, target_v6);
+        let action = race.next_action();
+
+        // Send probe based on race action
+        let tx_id = match &action {
+            RaceAction::ProbeV6(addr) => {
+                info!(
+                    "Happy Eyeballs: starting race for {} with IPv6 {}",
+                    target_vip, addr
+                );
+                Some(
+                    self.send_disco_ping_internal(*addr, target_vip, Some(target_vip))
+                        .await?,
+                )
+            }
+            RaceAction::ProbeV4(addr) => {
+                info!(
+                    "Happy Eyeballs: starting race for {} with IPv4 (no IPv6 available)",
+                    target_vip
+                );
+                Some(
+                    self.send_disco_ping_internal(*addr, target_vip, Some(target_vip))
+                        .await?,
+                )
+            }
+            RaceAction::NoAddresses => {
+                warn!("Happy Eyeballs: no addresses for {}", target_vip);
+                None
+            }
+            _ => None,
+        };
+
+        // Store the active race
+        if let Some(tx_id) = tx_id {
+            let active_race = ActiveRace {
+                race,
+                target_vip,
+                tx_ids: vec![tx_id],
+            };
+            self.pending_races.insert(target_vip, active_race);
+        }
+
+        Ok(action)
+    }
+
+    /// Check and advance pending races (call periodically, e.g., every 50-100ms)
+    ///
+    /// This checks if any races have elapsed their IPv6 delay and need to start
+    /// the IPv4 fallback probe.
+    ///
+    /// # Returns
+    /// List of (VIP, SocketAddr) pairs for IPv4 fallback probes that were sent
+    pub async fn advance_pending_races(&mut self) -> Vec<(Ipv4Addr, SocketAddr)> {
+        let mut fallbacks_sent = Vec::new();
+
+        // First pass: collect VIPs and addresses that need fallback, advance race state
+        let mut fallback_targets: Vec<(Ipv4Addr, SocketAddr)> = Vec::new();
+        for (vip, active_race) in self.pending_races.iter_mut() {
+            if active_race.race.should_start_fallback() {
+                let action = active_race.race.next_action();
+                if let RaceAction::ProbeV4(addr) = action {
+                    fallback_targets.push((*vip, addr));
+                }
+            }
+        }
+
+        // Second pass: send pings and update race tx_ids
+        for (vip, addr) in fallback_targets {
+            info!(
+                "Happy Eyeballs: IPv6 delay elapsed for {}, starting IPv4 fallback to {}",
+                vip, addr
+            );
+
+            // Generate transaction ID and send ping inline
+            let tx_id: [u8; 12] = rand::random();
+            let ping = signaling::DiscoPing {
+                tx_id,
+                sender_key: self.our_public_key.unwrap_or([0u8; 32]),
+                sender_vip: self.our_vip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+                sender_vip_v6: self.our_vip_v6,
+            };
+
+            match signaling::encode_disco_ping(&ping) {
+                Ok(ping_data) => {
+                    match self.socket.send_to(&ping_data, addr).await {
+                        Ok(_) => {
+                            // Track the pending ping
+                            let pending = PendingPing {
+                                tx_id,
+                                target: addr,
+                                target_vip: vip,
+                                sent_at: Instant::now(),
+                                retries: 0,
+                                race_id: Some(vip),
+                            };
+                            self.pending_pings.insert(tx_id, pending);
+
+                            // Update race with new tx_id
+                            if let Some(race) = self.pending_races.get_mut(&vip) {
+                                race.tx_ids.push(tx_id);
+                            }
+
+                            debug!(
+                                "Sent disco ping to {} ({}) tx: {:02x?} [racing fallback]",
+                                vip,
+                                addr,
+                                &tx_id[..4]
+                            );
+                            fallbacks_sent.push((vip, addr));
+                        }
+                        Err(e) => {
+                            warn!("Failed to send IPv4 fallback ping for {}: {}", vip, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to encode IPv4 fallback ping for {}: {}", vip, e);
+                }
+            }
+        }
+
+        fallbacks_sent
+    }
+
+    /// Clean up expired races (races that took too long without any response)
+    ///
+    /// # Arguments
+    /// * `timeout` - Maximum race duration before cleanup
+    ///
+    /// # Returns
+    /// List of VIPs whose races timed out
+    pub fn cleanup_expired_races(&mut self, timeout: Duration) -> Vec<Ipv4Addr> {
+        let mut expired = Vec::new();
+
+        self.pending_races.retain(|vip, race| {
+            if race.race.elapsed() > timeout {
+                debug!(
+                    "Happy Eyeballs race for {} expired after {:?}",
+                    vip,
+                    race.race.elapsed()
+                );
+                race.race.mark_failed();
+                expired.push(*vip);
+                false
+            } else {
+                true
+            }
+        });
+
+        // Also clean up pending pings that were part of expired races
+        for vip in &expired {
+            self.pending_pings
+                .retain(|_, ping| ping.race_id.as_ref() != Some(vip));
+        }
+
+        expired
     }
 
     /// Clean up expired pending pings

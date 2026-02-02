@@ -101,9 +101,7 @@ fn is_private_ip(ip: Ipv4Addr) -> bool {
 /// Validates that an IPv6 address is in the Unique Local Address (ULA) range
 /// ULA addresses are in the fd00::/8 range (fc00::/7 with the L bit set)
 fn is_private_ip_v6(ip: Ipv6Addr) -> bool {
-    let octets = ip.octets();
-    // fd00::/8 - Unique Local Addresses (the commonly used subset of fc00::/7)
-    octets[0] == 0xfd
+    crate::ipv6_utils::is_valid_ula(&ip)
 }
 
 /// Registration message from Edge to Nucleus
@@ -608,7 +606,10 @@ impl NucleusState {
                     vip_v6,
                     removed_at: Instant::now(),
                 });
-                info!("Removed stale peer {} (v6: {:?}) from cluster '{}'", vip, vip_v6, cluster);
+                info!(
+                    "Removed stale peer {} (v6: {:?}) from cluster '{}'",
+                    vip, vip_v6, cluster
+                );
             }
 
             // Cleanup old removal records
@@ -769,7 +770,8 @@ pub fn handle_nucleus_message(
                     }
                 }
 
-                let (new_peers, removed_vips, removed_vips_v6) = state.heartbeat(&hb.cluster, hb.vip, None);
+                let (new_peers, removed_vips, removed_vips_v6) =
+                    state.heartbeat(&hb.cluster, hb.vip, None);
 
                 let mut ack = HeartbeatAckMessage {
                     new_peers,

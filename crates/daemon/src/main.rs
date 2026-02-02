@@ -159,6 +159,10 @@ struct Args {
     #[arg(long)]
     vip: Option<std::net::Ipv4Addr>,
 
+    /// Virtual IPv6 address (e.g., fd00::1) - ULA range recommended
+    #[arg(long)]
+    vip6: Option<std::net::Ipv6Addr>,
+
     /// Virtual network mask
     #[arg(long, default_value = "255.255.255.0")]
     netmask: std::net::Ipv4Addr,
@@ -467,8 +471,9 @@ async fn main() -> Result<()> {
             secret: cluster_secret.map(|s| s.as_str()),
             our_public_key: Some(identity.public_key_bytes()),
             our_vip: args.vip,
-            our_vip_v6: None, // TODO: Add IPv6 VIP CLI argument
+            our_vip_v6: args.vip6,
             pending_pings: std::collections::HashMap::new(),
+            pending_races: std::collections::HashMap::new(),
             disco_config: DiscoConfig::default(),
             relay_server: relay_server.as_mut(),
             relay_client: relay_client.as_mut(),

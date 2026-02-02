@@ -43,6 +43,7 @@ pub mod handler;
 pub mod happy_eyeballs;
 pub mod http;
 pub mod identity;
+pub mod ipv6_utils;
 pub mod metrics;
 pub mod netcheck;
 pub mod peers;
@@ -131,6 +132,15 @@ pub use signaling::{
 // ============================================================================
 
 pub use socket::{DualStackAddr, DualStackSocket, RecvResult};
+
+// ============================================================================
+// IPv6 Utilities
+// ============================================================================
+
+pub use ipv6_utils::{
+    is_documentation, is_global_unicast, is_link_local, is_loopback, is_unspecified, is_valid_ula,
+    is_valid_virtual_ip,
+};
 
 // ============================================================================
 // WireGuard

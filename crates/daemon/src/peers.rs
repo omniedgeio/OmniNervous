@@ -2,6 +2,7 @@
 //!
 //! Maps virtual IPs to peer UDP endpoints for packet routing.
 
+use crate::ipv6_utils::is_valid_ula;
 use log::info;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -78,7 +79,10 @@ impl PeerTable {
         self.by_vip.insert(virtual_ip, peer);
 
         if let Some(v6) = final_v6 {
-            info!("Peer registered: {} (v6: {}) → {}", virtual_ip, v6, endpoint);
+            info!(
+                "Peer registered: {} (v6: {}) → {}",
+                virtual_ip, v6, endpoint
+            );
         } else {
             info!("Peer registered: {} → {}", virtual_ip, endpoint);
         }
@@ -102,12 +106,33 @@ impl PeerTable {
         vip: Ipv4Addr,
         vip_v6: Option<Ipv6Addr>,
     ) -> Result<(), String> {
+        // Validate IPv6 VIP is in ULA range if provided
+        if let Some(v6) = vip_v6 {
+            if !is_valid_ula(&v6) {
+                return Err(format!("IPv6 VIP {} is not in ULA range (fd00::/8)", v6));
+            }
+        }
+
         if let Some(existing) = self.by_vip.get(&vip) {
             if let Some(pinned_key) = existing.public_key {
                 if pinned_key != public_key {
                     let err = format!(
                         "ALERT: Public key mismatch for peer {}! Potential MITM attempt detected.",
                         vip
+                    );
+                    log::warn!("{}", err);
+                    return Err(err);
+                }
+            }
+        }
+
+        // Check for IPv6 collision (same IPv6 VIP, different IPv4 VIP)
+        if let Some(v6) = vip_v6 {
+            if let Some(&existing_v4) = self.by_vip_v6.get(&v6) {
+                if existing_v4 != vip {
+                    let err = format!(
+                        "ALERT: IPv6 VIP {} already assigned to peer {} (attempting to assign to {})",
+                        v6, existing_v4, vip
                     );
                     log::warn!("{}", err);
                     return Err(err);
@@ -133,9 +158,12 @@ impl PeerTable {
         }
 
         self.by_vip.insert(vip, peer);
-        
+
         if let Some(v6) = final_v6 {
-            info!("Peer registered and pinned: {} (v6: {}) → {}", vip, v6, endpoint);
+            info!(
+                "Peer registered and pinned: {} (v6: {}) → {}",
+                vip, v6, endpoint
+            );
         } else {
             info!("Peer registered and pinned: {} → {}", vip, endpoint);
         }
@@ -168,7 +196,10 @@ impl PeerTable {
             if let Some(v6) = peer.virtual_ip_v6 {
                 self.by_vip_v6.remove(&v6);
             }
-            info!("Removed peer {} (v6: {:?}) from routing table", vip, peer.virtual_ip_v6);
+            info!(
+                "Removed peer {} (v6: {:?}) from routing table",
+                vip, peer.virtual_ip_v6
+            );
             peer.public_key
         } else {
             None
@@ -179,7 +210,10 @@ impl PeerTable {
     pub fn remove_by_vip_v6(&mut self, vip_v6: &Ipv6Addr) -> Option<[u8; 32]> {
         if let Some(vip) = self.by_vip_v6.remove(vip_v6) {
             if let Some(peer) = self.by_vip.remove(&vip) {
-                info!("Removed peer {} (v6: {}) from routing table via IPv6", vip, vip_v6);
+                info!(
+                    "Removed peer {} (v6: {}) from routing table via IPv6",
+                    vip, vip_v6
+                );
                 return peer.public_key;
             }
         }
@@ -330,5 +364,94 @@ mod tests {
 
         assert!(table.lookup_by_vip(&vip).is_none());
         assert!(table.lookup_by_vip_v6(&vip_v6).is_none());
+    }
+
+    #[test]
+    fn test_register_rejects_non_ula_ipv6() {
+        let mut table = PeerTable::new();
+
+        let vip = Ipv4Addr::new(10, 200, 0, 10);
+        let public_key = [1u8; 32];
+        let endpoint: SocketAddr = "1.2.3.4:51820".parse().unwrap();
+
+        // Global unicast address (not ULA) - should be rejected
+        let global_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+
+        let result = table.register_with_v6(public_key, endpoint, vip, Some(global_v6));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("ULA range"));
+
+        // Verify peer was not added
+        assert!(table.lookup_by_vip(&vip).is_none());
+    }
+
+    #[test]
+    fn test_register_accepts_ula_ipv6() {
+        let mut table = PeerTable::new();
+
+        let vip = Ipv4Addr::new(10, 200, 0, 10);
+        let public_key = [1u8; 32];
+        let endpoint: SocketAddr = "1.2.3.4:51820".parse().unwrap();
+
+        // ULA address (fd00::/8) - should be accepted
+        let ula_v6: Ipv6Addr = "fd12:3456:789a::1".parse().unwrap();
+
+        let result = table.register_with_v6(public_key, endpoint, vip, Some(ula_v6));
+        assert!(result.is_ok());
+
+        // Verify peer was added with IPv6
+        let peer = table.lookup_by_vip(&vip).unwrap();
+        assert_eq!(peer.virtual_ip_v6, Some(ula_v6));
+    }
+
+    #[test]
+    fn test_register_detects_ipv6_collision() {
+        let mut table = PeerTable::new();
+
+        let vip1 = Ipv4Addr::new(10, 200, 0, 10);
+        let vip2 = Ipv4Addr::new(10, 200, 0, 20);
+        let pubkey1 = [1u8; 32];
+        let pubkey2 = [2u8; 32];
+        let endpoint1: SocketAddr = "1.2.3.4:51820".parse().unwrap();
+        let endpoint2: SocketAddr = "5.6.7.8:51820".parse().unwrap();
+
+        // Same IPv6 address
+        let shared_v6: Ipv6Addr = "fd00:1234::99".parse().unwrap();
+
+        // First registration should succeed
+        let result1 = table.register_with_v6(pubkey1, endpoint1, vip1, Some(shared_v6));
+        assert!(result1.is_ok());
+
+        // Second registration with same IPv6 but different IPv4 should fail
+        let result2 = table.register_with_v6(pubkey2, endpoint2, vip2, Some(shared_v6));
+        assert!(result2.is_err());
+        assert!(result2.unwrap_err().contains("already assigned"));
+
+        // Original peer should still be there
+        assert!(table.lookup_by_vip(&vip1).is_some());
+        assert!(table.lookup_by_vip(&vip2).is_none());
+    }
+
+    #[test]
+    fn test_is_valid_ula() {
+        // Valid ULA addresses (fd00::/8)
+        assert!(is_valid_ula(&"fd00::1".parse().unwrap()));
+        assert!(is_valid_ula(&"fd12:3456:789a:bcde::1".parse().unwrap()));
+        assert!(is_valid_ula(
+            &"fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()
+        ));
+
+        // Invalid: Global unicast
+        assert!(!is_valid_ula(&"2001:db8::1".parse().unwrap()));
+        assert!(!is_valid_ula(&"2607:f8b0:4004:800::200e".parse().unwrap()));
+
+        // Invalid: Link-local
+        assert!(!is_valid_ula(&"fe80::1".parse().unwrap()));
+
+        // Invalid: Loopback
+        assert!(!is_valid_ula(&"::1".parse().unwrap()));
+
+        // Invalid: fc00::/8 (reserved, L bit not set)
+        assert!(!is_valid_ula(&"fc00::1".parse().unwrap()));
     }
 }
