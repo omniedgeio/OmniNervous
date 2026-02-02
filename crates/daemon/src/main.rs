@@ -474,7 +474,10 @@ async fn main() -> Result<()> {
             our_vip_v6: args.vip6,
             pending_pings: std::collections::HashMap::new(),
             pending_races: std::collections::HashMap::new(),
-            disco_config: DiscoConfig::default(),
+            disco_config: DiscoConfig {
+                happy_eyeballs_delay_ms: config.network.happy_eyeballs_delay_ms,
+                ..DiscoConfig::default()
+            },
             relay_server: relay_server.as_mut(),
             relay_client: relay_client.as_mut(),
         };

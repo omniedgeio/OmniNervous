@@ -60,6 +60,8 @@ pub struct DiscoConfig {
     pub ping_timeout: Duration,
     /// Number of retries before giving up
     pub max_retries: u32,
+    /// Happy Eyeballs delay in milliseconds before fallback to IPv4
+    pub happy_eyeballs_delay_ms: u64,
 }
 
 impl Default for DiscoConfig {
@@ -67,6 +69,7 @@ impl Default for DiscoConfig {
         Self {
             ping_timeout: Duration::from_secs(5),
             max_retries: 3,
+            happy_eyeballs_delay_ms: crate::happy_eyeballs::HAPPY_EYEBALLS_DELAY_MS,
         }
     }
 }
@@ -682,8 +685,12 @@ impl<'a> MessageHandler<'a> {
             return Ok(RaceAction::RaceOver);
         }
 
-        // Create new connection race
-        let mut race = ConnectionRace::new(target_v4, target_v6);
+        // Create new connection race with configured delay
+        let mut race = ConnectionRace::with_delay(
+            target_v4,
+            target_v6,
+            self.disco_config.happy_eyeballs_delay_ms,
+        );
         let action = race.next_action();
 
         // Send probe based on race action
