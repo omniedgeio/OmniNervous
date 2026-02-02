@@ -41,6 +41,10 @@ pub fn parse_xor_mapped_address(response: &[u8]) -> Option<std::net::SocketAddr>
 
         if attr_type == 0x0020 {
             // XOR-MAPPED-ADDRESS
+            // Ensure we have at least the minimum bytes to read family and port
+            if pos + 4 > n {
+                break;
+            }
             let family = response[pos + 1];
             let x_port = u16::from_be_bytes([response[pos + 2], response[pos + 3]]);
             let port = x_port ^ 0x2112; // XOR with magic cookie top 16 bits
@@ -121,6 +125,10 @@ pub fn parse_all_xor_mapped_addresses(
 
         if attr_type == 0x0020 {
             // XOR-MAPPED-ADDRESS
+            // Ensure we have at least the minimum bytes to read family and port
+            if pos + 4 > n {
+                break;
+            }
             let family = response[pos + 1];
             let x_port = u16::from_be_bytes([response[pos + 2], response[pos + 3]]);
             let port = x_port ^ 0x2112;
