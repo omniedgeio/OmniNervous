@@ -8,7 +8,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use log::{debug, info, warn};
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
@@ -70,6 +70,8 @@ pub struct MessageHandler<'a> {
     pub our_public_key: Option<[u8; 32]>,
     /// Our VIP (for disco messages)
     pub our_vip: Option<Ipv4Addr>,
+    /// Our IPv6 VIP (for disco messages, dual-stack support)
+    pub our_vip_v6: Option<Ipv6Addr>,
     /// Pending disco pings awaiting responses
     pub pending_pings: HashMap<[u8; 12], PendingPing>,
     /// Disco configuration
@@ -528,6 +530,7 @@ impl<'a> MessageHandler<'a> {
             tx_id,
             sender_key: self.our_public_key.unwrap_or([0u8; 32]),
             sender_vip: self.our_vip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            sender_vip_v6: self.our_vip_v6,
         };
 
         // Encode and send

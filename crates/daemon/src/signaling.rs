@@ -36,7 +36,7 @@ use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
@@ -98,11 +98,22 @@ fn is_private_ip(ip: Ipv4Addr) -> bool {
     (octets[0] == 192 && octets[1] == 168)
 }
 
+/// Validates that an IPv6 address is in the Unique Local Address (ULA) range
+/// ULA addresses are in the fd00::/8 range (fc00::/7 with the L bit set)
+fn is_private_ip_v6(ip: Ipv6Addr) -> bool {
+    let octets = ip.octets();
+    // fd00::/8 - Unique Local Addresses (the commonly used subset of fc00::/7)
+    octets[0] == 0xfd
+}
+
 /// Registration message from Edge to Nucleus
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RegisterMessage {
     pub cluster: String,
     pub vip: Ipv4Addr,
+    /// IPv6 virtual IP address (dual-stack support)
+    #[serde(default)]
+    pub vip_v6: Option<Ipv6Addr>,
     pub listen_port: u16,
     pub public_key: [u8; 32],
     /// NAT type detected by the edge (for peer selection optimization)
@@ -124,6 +135,9 @@ pub struct RegisterAckMessage {
 pub struct HeartbeatMessage {
     pub cluster: String,
     pub vip: Ipv4Addr,
+    /// IPv6 virtual IP address (dual-stack support)
+    #[serde(default)]
+    pub vip_v6: Option<Ipv6Addr>,
     pub last_seen_count: u32, // Number of peers edge knows about
     pub hmac_tag: Option<[u8; 32]>,
 }
@@ -133,6 +147,9 @@ pub struct HeartbeatMessage {
 pub struct HeartbeatAckMessage {
     pub new_peers: Vec<PeerInfo>,    // Joined since last heartbeat
     pub removed_vips: Vec<Ipv4Addr>, // Left since last heartbeat
+    /// IPv6 VIPs of removed peers (dual-stack support)
+    #[serde(default)]
+    pub removed_vips_v6: Vec<Ipv6Addr>,
     pub hmac_tag: Option<[u8; 32]>,
 }
 
@@ -149,6 +166,9 @@ pub struct QueryPeerMessage {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeerInfo {
     pub vip: Ipv4Addr,
+    /// IPv6 virtual IP address (dual-stack support)
+    #[serde(default)]
+    pub vip_v6: Option<Ipv6Addr>,
     pub endpoint: String, // "ip:port"
     pub public_key: [u8; 32],
     /// NAT type of this peer (helps with connection strategy)
@@ -180,6 +200,9 @@ pub struct DiscoPing {
     pub sender_key: [u8; 32],
     /// Sender's VIP for routing
     pub sender_vip: Ipv4Addr,
+    /// Sender's IPv6 VIP for routing (dual-stack support)
+    #[serde(default)]
+    pub sender_vip_v6: Option<Ipv6Addr>,
 }
 
 /// Disco Pong - response to DiscoPing
@@ -370,6 +393,8 @@ impl SignalingEncryption {
 #[derive(Debug, Clone)]
 pub struct RegisteredPeer {
     pub vip: Ipv4Addr,
+    /// IPv6 virtual IP address (dual-stack support)
+    pub vip_v6: Option<Ipv6Addr>,
     pub endpoint: SocketAddr,
     pub listen_port: u16,
     pub public_key: [u8; 32],
@@ -383,6 +408,8 @@ pub struct RegisteredPeer {
 #[derive(Debug, Clone)]
 struct RemovedPeer {
     pub vip: Ipv4Addr,
+    /// IPv6 VIP of removed peer (dual-stack support)
+    pub vip_v6: Option<Ipv6Addr>,
     pub removed_at: Instant,
 }
 
@@ -391,6 +418,8 @@ struct RemovedPeer {
 struct ClusterState {
     /// VIP → peer info (O(1) lookup for QUERY_PEER)
     peers: HashMap<Ipv4Addr, RegisteredPeer>,
+    /// IPv6 VIP → IPv4 VIP mapping for dual-stack lookup
+    vip_v6_to_v4: HashMap<Ipv6Addr, Ipv4Addr>,
     /// Recently removed peers for delta updates
     removed: Vec<RemovedPeer>,
 }
@@ -430,11 +459,16 @@ impl NucleusState {
 
         if is_new {
             info!(
-                "New peer {} at {} in cluster '{}'",
-                peer.vip, peer.endpoint, cluster
+                "New peer {} (v6: {:?}) at {} in cluster '{}'",
+                peer.vip, peer.vip_v6, peer.endpoint, cluster
             );
         } else {
             debug!("Updated peer {} in cluster '{}'", peer.vip, cluster);
+        }
+
+        // Update IPv6 → IPv4 mapping if peer has IPv6
+        if let Some(vip_v6) = peer.vip_v6 {
+            state.vip_v6_to_v4.insert(vip_v6, peer.vip);
         }
 
         state.peers.insert(peer.vip, peer.clone());
@@ -456,6 +490,7 @@ impl NucleusState {
                     .filter(|p| p.vip != exclude_vip && p.joined_at.elapsed() < window)
                     .map(|p| PeerInfo {
                         vip: p.vip,
+                        vip_v6: p.vip_v6,
                         endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
                         public_key: p.public_key,
                         nat_type: p.nat_type,
@@ -471,10 +506,10 @@ impl NucleusState {
         cluster: &str,
         vip: Ipv4Addr,
         last_heartbeat_time: Option<Instant>,
-    ) -> (Vec<PeerInfo>, Vec<Ipv4Addr>) {
+    ) -> (Vec<PeerInfo>, Vec<Ipv4Addr>, Vec<Ipv6Addr>) {
         let state = match self.clusters.get_mut(cluster) {
             Some(s) => s,
-            None => return (vec![], vec![]),
+            None => return (vec![], vec![], vec![]),
         };
 
         // Update last_seen
@@ -492,6 +527,7 @@ impl NucleusState {
             .filter(|p| p.vip != vip && p.joined_at > since)
             .map(|p| PeerInfo {
                 vip: p.vip,
+                vip_v6: p.vip_v6,
                 endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
                 public_key: p.public_key,
                 nat_type: p.nat_type,
@@ -506,7 +542,15 @@ impl NucleusState {
             .map(|r| r.vip)
             .collect();
 
-        (new_peers, removed_vips)
+        // Removed IPv6 VIPs since last heartbeat
+        let removed_vips_v6: Vec<Ipv6Addr> = state
+            .removed
+            .iter()
+            .filter(|r| r.removed_at > since && r.vip_v6.is_some())
+            .filter_map(|r| r.vip_v6)
+            .collect();
+
+        (new_peers, removed_vips, removed_vips_v6)
     }
 
     /// Lookup a specific peer by VIP (O(1))
@@ -516,10 +560,27 @@ impl NucleusState {
             .and_then(|state| state.peers.get(&vip))
             .map(|p| PeerInfo {
                 vip: p.vip,
+                vip_v6: p.vip_v6,
                 endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
                 public_key: p.public_key,
                 nat_type: p.nat_type,
             })
+    }
+
+    /// Lookup a specific peer by IPv6 VIP (O(1))
+    pub fn query_peer_v6(&self, cluster: &str, vip_v6: Ipv6Addr) -> Option<PeerInfo> {
+        self.clusters.get(cluster).and_then(|state| {
+            // First look up IPv4 VIP from IPv6 → IPv4 mapping
+            state.vip_v6_to_v4.get(&vip_v6).and_then(|vip| {
+                state.peers.get(vip).map(|p| PeerInfo {
+                    vip: p.vip,
+                    vip_v6: p.vip_v6,
+                    endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
+                    public_key: p.public_key,
+                    nat_type: p.nat_type,
+                })
+            })
+        })
     }
 
     /// Remove stale peers (no heartbeat for > 60 seconds)
@@ -529,20 +590,25 @@ impl NucleusState {
 
         for (cluster, state) in self.clusters.iter_mut() {
             // Find and remove stale peers
-            let stale: Vec<Ipv4Addr> = state
+            let stale: Vec<(Ipv4Addr, Option<Ipv6Addr>)> = state
                 .peers
                 .iter()
                 .filter(|(_, p)| p.last_seen.elapsed() > timeout)
-                .map(|(vip, _)| *vip)
+                .map(|(vip, p)| (*vip, p.vip_v6))
                 .collect();
 
-            for vip in stale {
+            for (vip, vip_v6) in stale {
                 state.peers.remove(&vip);
+                // Remove from IPv6 → IPv4 mapping
+                if let Some(v6) = vip_v6 {
+                    state.vip_v6_to_v4.remove(&v6);
+                }
                 state.removed.push(RemovedPeer {
                     vip,
+                    vip_v6,
                     removed_at: Instant::now(),
                 });
-                info!("Removed stale peer {} from cluster '{}'", vip, cluster);
+                info!("Removed stale peer {} (v6: {:?}) from cluster '{}'", vip, vip_v6, cluster);
             }
 
             // Cleanup old removal records
@@ -623,6 +689,13 @@ pub fn handle_nucleus_message(
                     warn!("VIP {} is not in private IP range (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)", reg.vip);
                     return None;
                 }
+                // Validate IPv6 VIP if provided
+                if let Some(vip_v6) = reg.vip_v6 {
+                    if !is_private_ip_v6(vip_v6) {
+                        warn!("IPv6 VIP {} is not in ULA range (fd00::/8)", vip_v6);
+                        return None;
+                    }
+                }
                 if let Some(s) = secret {
                     let mut check_reg = reg.clone();
                     check_reg.hmac_tag = None;
@@ -636,6 +709,7 @@ pub fn handle_nucleus_message(
 
                 let peer = RegisteredPeer {
                     vip: reg.vip,
+                    vip_v6: reg.vip_v6,
                     endpoint: src,
                     listen_port: reg.listen_port,
                     public_key: reg.public_key,
@@ -676,6 +750,13 @@ pub fn handle_nucleus_message(
                     warn!("VIP {} is not in private IP range", hb.vip);
                     return None;
                 }
+                // Validate IPv6 VIP if provided
+                if let Some(vip_v6) = hb.vip_v6 {
+                    if !is_private_ip_v6(vip_v6) {
+                        warn!("IPv6 VIP {} is not in ULA range (fd00::/8)", vip_v6);
+                        return None;
+                    }
+                }
 
                 if let Some(s) = secret {
                     let mut check_hb = hb.clone();
@@ -688,11 +769,12 @@ pub fn handle_nucleus_message(
                     }
                 }
 
-                let (new_peers, removed_vips) = state.heartbeat(&hb.cluster, hb.vip, None);
+                let (new_peers, removed_vips, removed_vips_v6) = state.heartbeat(&hb.cluster, hb.vip, None);
 
                 let mut ack = HeartbeatAckMessage {
                     new_peers,
                     removed_vips,
+                    removed_vips_v6,
                     hmac_tag: None,
                 };
 
@@ -858,6 +940,8 @@ pub struct NucleusClient {
     nucleus_addr: SocketAddr,
     cluster: String,
     vip: Ipv4Addr,
+    /// IPv6 virtual IP address (dual-stack support)
+    vip_v6: Option<Ipv6Addr>,
     listen_port: u16,
     public_key: [u8; 32],
     secret: Option<String>,
@@ -887,6 +971,37 @@ impl NucleusClient {
             nucleus_addr,
             cluster,
             vip,
+            vip_v6: None,
+            listen_port,
+            public_key,
+            secret,
+            nat_type: None,
+            runtime_state: RuntimeState::new(),
+        })
+    }
+
+    /// Create a NucleusClient with IPv6 support
+    pub async fn with_ipv6(
+        nucleus: &str,
+        cluster: String,
+        public_key: [u8; 32],
+        vip: Ipv4Addr,
+        vip_v6: Option<Ipv6Addr>,
+        listen_port: u16,
+        secret: Option<String>,
+    ) -> Result<Self> {
+        use tokio::net::lookup_host;
+        let nucleus_addr = lookup_host(nucleus)
+            .await
+            .context("Failed to resolve nucleus address")?
+            .next()
+            .context("No addresses found for nucleus")?;
+
+        Ok(Self {
+            nucleus_addr,
+            cluster,
+            vip,
+            vip_v6,
             listen_port,
             public_key,
             secret,
@@ -918,6 +1033,38 @@ impl NucleusClient {
             nucleus_addr,
             cluster,
             vip,
+            vip_v6: None,
+            listen_port,
+            public_key,
+            secret,
+            nat_type: None,
+            runtime_state,
+        })
+    }
+
+    /// Create a NucleusClient with IPv6 and shared runtime state
+    pub async fn with_ipv6_and_runtime_state(
+        nucleus: &str,
+        cluster: String,
+        public_key: [u8; 32],
+        vip: Ipv4Addr,
+        vip_v6: Option<Ipv6Addr>,
+        listen_port: u16,
+        secret: Option<String>,
+        runtime_state: RuntimeState,
+    ) -> Result<Self> {
+        use tokio::net::lookup_host;
+        let nucleus_addr = lookup_host(nucleus)
+            .await
+            .context("Failed to resolve nucleus address")?
+            .next()
+            .context("No addresses found for nucleus")?;
+
+        Ok(Self {
+            nucleus_addr,
+            cluster,
+            vip,
+            vip_v6,
             listen_port,
             public_key,
             secret,
@@ -946,6 +1093,7 @@ impl NucleusClient {
         let mut msg = RegisterMessage {
             cluster: self.cluster.clone(),
             vip: self.vip,
+            vip_v6: self.vip_v6,
             listen_port: self.listen_port,
             public_key: self.public_key,
             nat_type: self.nat_type,
@@ -960,8 +1108,8 @@ impl NucleusClient {
         let data = encode_message(MSG_REGISTER, &msg)?;
         socket.send_to(&data, self.nucleus_addr).await?;
         info!(
-            "Registered with nucleus {} (cluster: {}, vip: {})",
-            self.nucleus_addr, self.cluster, self.vip
+            "Registered with nucleus {} (cluster: {}, vip: {}, vip_v6: {:?})",
+            self.nucleus_addr, self.cluster, self.vip, self.vip_v6
         );
         Ok(())
     }
@@ -971,6 +1119,7 @@ impl NucleusClient {
         let mut msg = HeartbeatMessage {
             cluster: self.cluster.clone(),
             vip: self.vip,
+            vip_v6: self.vip_v6,
             last_seen_count: known_peer_count,
             hmac_tag: None,
         };
@@ -1020,6 +1169,16 @@ impl NucleusClient {
 
     pub fn vip(&self) -> Ipv4Addr {
         self.vip
+    }
+
+    /// Get the IPv6 virtual IP address
+    pub fn vip_v6(&self) -> Option<Ipv6Addr> {
+        self.vip_v6
+    }
+
+    /// Set the IPv6 virtual IP address
+    pub fn set_vip_v6(&mut self, vip_v6: Option<Ipv6Addr>) {
+        self.vip_v6 = vip_v6;
     }
 
     #[allow(dead_code)]

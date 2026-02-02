@@ -467,6 +467,7 @@ async fn main() -> Result<()> {
             secret: cluster_secret.map(|s| s.as_str()),
             our_public_key: Some(identity.public_key_bytes()),
             our_vip: args.vip,
+            our_vip_v6: None, // TODO: Add IPv6 VIP CLI argument
             pending_pings: std::collections::HashMap::new(),
             disco_config: DiscoConfig::default(),
             relay_server: relay_server.as_mut(),
