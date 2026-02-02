@@ -95,11 +95,13 @@ sudo ./target/release/omninervous \
 | `--nucleus` | Nucleus address (host:port) | Required |
 | `--cluster` | Cluster name | Required |
 | `--vip` | Virtual IP (e.g., 10.200.0.1) | Required |
+| `--vip6` | IPv6 Virtual IP (e.g., fd00::1) | Optional |
 | `--port` | UDP port | 51820 |
 | `--userspace` | Use BoringTun userspace implementation | Disabled (Kernel) |
 | `--stun` | STUN server(s) | Built-in fallback |
 | `--secret` | Cluster PSK | Optional |
 | `--init` | Generate identity | - |
+| `--config` | Path to config file | - |
 
 ---
 
@@ -117,8 +119,9 @@ sudo ./target/release/omninervous \
 
 ## Current Status
 
-- **Version**: v0.2.4 (Userspace WireGuard & Multi-Peer Mesh)
-- **Performance**: 371.35 Mbps throughput, optimized STUN fallback
+- **Version**: v0.4.0 (IPv6 Dual-Stack & Enhanced Signaling)
+- **Performance**: 557.96 Mbps throughput, 127.5% baseline efficiency
+- **Features**: IPv6 dual-stack, Happy Eyeballs (RFC 8305), configurable connection racing
 - **Scalability**: O(1) lookups, delta updates for 1000+ edges
 
 ---
@@ -187,10 +190,14 @@ nucleus = "nucleus.example.com:51820"
 cluster = "my-network"
 stun_servers = ["stun.l.google.com:19302"]
 use_builtin_stun = true
+# IPv6 dual-stack settings (v0.4.0+)
+prefer_ipv6 = true
+happy_eyeballs_delay_ms = 250
 
 [security]
 max_sessions_per_ip = 10
 handshake_timeout_secs = 5
+encrypt_signaling = true
 
 [[peers]]
 public_key = "abc123..."

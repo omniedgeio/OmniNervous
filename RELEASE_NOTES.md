@@ -1,5 +1,53 @@
 # Release Notes
 
+## v0.4.0: IPv6 Dual-Stack & Enhanced Signaling
+
+**Date:** 2026-02-02
+
+This release delivers complete IPv6 dual-stack support with enhanced signaling protocol messages and configurable Happy Eyeballs connection racing. The release builds on v0.3.0's NAT traversal foundation to provide seamless IPv4/IPv6 connectivity.
+
+### New Features
+
+*   **IPv6 Signaling Support**: Extended `QueryPeerMessage` with `target_vip_v6` and `requester_vip_v6` fields for IPv6-first peer lookups.
+*   **DiscoPong IPv6**: Added `responder_vip_v6` field to disco pong responses, enabling IPv6 endpoint discovery.
+*   **Configurable Happy Eyeballs**: The `happy_eyeballs_delay_ms` config option now properly flows through to the connection racing algorithm.
+*   **IPv6 Validation**: Added `is_private_ip_v6()` validation in MSG_QUERY_PEER handler to ensure only valid ULA addresses are used.
+
+### API Changes
+
+| Message | New Fields | Description |
+|:---|:---|:---|
+| `QueryPeerMessage` | `target_vip_v6`, `requester_vip_v6` | IPv6 VIPs for dual-stack peer queries |
+| `DiscoPong` | `responder_vip_v6` | Responder's IPv6 VIP in pong replies |
+
+### Configuration
+
+New config options in `[network]` section:
+
+```toml
+[network]
+prefer_ipv6 = true                # Prefer IPv6 when available
+happy_eyeballs_delay_ms = 250     # Delay before IPv4 fallback (RFC 8305)
+```
+
+### Code Changes
+
+| File | Change |
+|:---|:---|
+| `signaling.rs` | Added IPv6 fields to QueryPeerMessage and DiscoPong structs |
+| `signaling.rs` | Added `query_peer_by_v6()` method to NucleusClient |
+| `signaling.rs` | IPv6 validation in MSG_QUERY_PEER handler |
+| `handler.rs` | Added `happy_eyeballs_delay_ms` to DiscoConfig |
+| `handler.rs` | Use `ConnectionRace::with_delay()` for configurable racing |
+| `main.rs` | Pass config's `happy_eyeballs_delay_ms` to MessageHandler |
+
+### Tests
+
+*   All 71 unit tests passing
+*   Happy Eyeballs tests validate custom delay configuration
+
+---
+
 ## v0.3.0: NAT Traversal Enhancement - Complete Implementation
 
 **Date:** 2026-01-30
