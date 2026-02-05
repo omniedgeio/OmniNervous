@@ -1,6 +1,8 @@
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
-use log::{debug, error, info, warn};
+#[cfg(target_os = "windows")]
+use log::warn;
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
