@@ -557,14 +557,14 @@ impl<'a> MessageHandler<'a> {
                         if let Some(active_race) = self.pending_races.remove(&pending.target_vip) {
                             // Remove other pending pings from this race
                             for tx_id in active_race.tx_ids {
-                                if tx_id != pong.tx_id {
-                                    if self.pending_pings.remove(&tx_id).is_some() {
-                                        debug!(
-                                            "Cancelled racing ping {:02x?} (race won by {})",
-                                            &tx_id[..4],
-                                            if result.ipv6_won { "IPv6" } else { "IPv4" }
-                                        );
-                                    }
+                                if tx_id != pong.tx_id
+                                    && self.pending_pings.remove(&tx_id).is_some()
+                                {
+                                    debug!(
+                                        "Cancelled racing ping {:02x?} (race won by {})",
+                                        &tx_id[..4],
+                                        if result.ipv6_won { "IPv6" } else { "IPv4" }
+                                    );
                                 }
                             }
                         }

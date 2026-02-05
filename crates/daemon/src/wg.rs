@@ -330,7 +330,7 @@ impl UserspaceWgControl {
             let device = self.setup_windows_tun(vip).await?;
             let mut d_lock = self.inner.device.lock().await;
             *d_lock = Some(device);
-            return Ok(());
+            Ok(())
         }
 
         // Non-Windows path

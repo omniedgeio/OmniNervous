@@ -1075,6 +1075,7 @@ impl NucleusClient {
     }
 
     /// Create a NucleusClient with IPv6 and shared runtime state
+    #[allow(clippy::too_many_arguments)]
     pub async fn with_ipv6_and_runtime_state(
         nucleus: &str,
         cluster: String,
