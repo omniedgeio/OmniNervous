@@ -24,12 +24,15 @@ RUN cargo build -p omninervous --release ${CARGO_FEATURES}
 # Runtime stage - minimal image with compatible glibc
 FROM ubuntu:24.04
 
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && apt-get install -y \
     iproute2 \
     iputils-ping \
     iperf3 \
     wireguard-tools \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 
 # Copy binary from builder
 COPY --from=builder /usr/src/omni/target/release/omninervous /usr/local/bin/

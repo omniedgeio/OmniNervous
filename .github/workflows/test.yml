@@ -93,12 +93,17 @@ jobs:
           docker run -d --name nucleus \
             --network omni-test-net \
             --ip 10.88.0.2 \
+            -e RUST_LOG=info \
             omninervous:test \
-            --mode nucleus --port $NUCLEUS_PORT
+            --mode nucleus \
+            --cluster ci-test \
+            --secret "$CLUSTER_SECRET" \
+            --port $NUCLEUS_PORT
           sleep 3
           echo "Nucleus status:"
           docker ps -a --filter name=nucleus --format '{{.Status}}'
           docker logs nucleus --tail 10 || true
+
 
       - name: Start Edge A container
         run: |
@@ -108,12 +113,14 @@ jobs:
             --privileged \
             --cap-add=NET_ADMIN \
             --device /dev/net/tun:/dev/net/tun \
+            -e RUST_LOG=info \
             omninervous:test \
             --nucleus 10.88.0.2:$NUCLEUS_PORT \
             --cluster ci-test \
             --secret "$CLUSTER_SECRET" \
             --vip $VIP_A \
             --port 51820 \
+            --userspace \
             --tun-name omniwg0 \
             --transport-mode l2
           sleep 3
@@ -128,6 +135,7 @@ jobs:
             docker logs edge-a
           fi
 
+
       - name: Start Edge B container
         run: |
           docker run -d --name edge-b \
@@ -136,12 +144,14 @@ jobs:
             --privileged \
             --cap-add=NET_ADMIN \
             --device /dev/net/tun:/dev/net/tun \
+            -e RUST_LOG=info \
             omninervous:test \
             --nucleus 10.88.0.2:$NUCLEUS_PORT \
             --cluster ci-test \
             --secret "$CLUSTER_SECRET" \
             --vip $VIP_B \
             --port 51821 \
+            --userspace \
             --tun-name omniwg0 \
             --transport-mode l2
           sleep 5
@@ -156,34 +166,71 @@ jobs:
             docker logs edge-b
           fi
 
+
       - name: Wait for P2P tunnel
         run: |
           echo "Waiting for tunnel establishment..."
           echo "Note: Edge A learns about Edge B via HEARTBEAT_ACK (30s interval)"
           sleep 35
-          
+
+      - name: Diagnostics before tests
+        run: |
           echo "=== Container Status ==="
           docker ps -a
           echo ""
-          
+
           echo "=== Edge A Logs ==="
-          docker logs edge-a --tail 20 || true
+          docker logs edge-a --tail 50 || true
           echo ""
-          
+
           echo "=== Edge B Logs ==="
-          docker logs edge-b --tail 20 || true
+          docker logs edge-b --tail 50 || true
           echo ""
-          
+
           echo "=== Edge A Interfaces ==="
           docker exec edge-a ip addr show || true
           echo ""
-          
+
           echo "=== Edge B Interfaces ==="
           docker exec edge-b ip addr show || true
+          echo ""
+
+          echo "=== Edge A WireGuard ==="
+          docker exec edge-a wg show || true
+          echo ""
+
+          echo "=== Edge B WireGuard ==="
+          docker exec edge-b wg show || true
+          echo ""
+
+          echo "=== Edge A Peers (logs) ==="
+          docker logs edge-a --tail 100 || true
+          echo ""
+
+          echo "=== Edge B Peers (logs) ==="
+          docker logs edge-b --tail 100 || true
+
+      - name: Wait for WireGuard peers
+        run: |
+          echo "Waiting for WireGuard peers..."
+          WG_READY="no"
+          for attempt in 1 2 3 4 5 6; do
+            if docker exec edge-a wg show 2>/dev/null | grep -q "peer:"; then
+              WG_READY="yes"
+              break
+            fi
+            echo "Waiting for peers (attempt $attempt)..."
+            sleep 5
+          done
+
+          if [ "$WG_READY" != "yes" ]; then
+            echo "WARNING: no WireGuard peers detected before tests"
+          fi
 
       - name: Run VPN Tests
         id: tests
         run: |
+
           PING_RESULT="FAILED"
           PING_LATENCY="N/A"
           TCP_RESULT="SKIPPED"
@@ -199,17 +246,22 @@ jobs:
           echo ""
           echo "🏓 Ping Test ($VIP_A → $VIP_B):"
 
-          PING_OUTPUT=$(docker exec edge-a ping -c 5 -W 3 $VIP_B 2>&1) || true
-          echo "$PING_OUTPUT"
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt..."
+            PING_OUTPUT=$(docker exec edge-a ping -c 5 -W 3 $VIP_B 2>&1) || true
+            echo "$PING_OUTPUT"
 
-          if echo "$PING_OUTPUT" | grep -q "bytes from"; then
-            RECEIVED=$(echo "$PING_OUTPUT" | grep -c "bytes from" || echo "0")
-            PING_LATENCY=$(echo "$PING_OUTPUT" | grep "avg" | awk -F'/' '{print $5}' || echo "N/A")
-            echo "✅ Ping: SUCCESS ($RECEIVED/5 packets, avg ${PING_LATENCY}ms)"
-            PING_RESULT="PASSED"
-          else
-            echo "❌ Ping: FAILED"
-          fi
+            if echo "$PING_OUTPUT" | grep -q "bytes from"; then
+              RECEIVED=$(echo "$PING_OUTPUT" | grep -c "bytes from" || echo "0")
+              PING_LATENCY=$(echo "$PING_OUTPUT" | grep "avg" | awk -F'/' '{print $5}' || echo "N/A")
+              echo "✅ Ping: SUCCESS ($RECEIVED/5 packets, avg ${PING_LATENCY}ms)"
+              PING_RESULT="PASSED"
+              break
+            else
+              echo "❌ Ping: FAILED"
+            fi
+            sleep 2
+          done
 
           # Test 2: iperf3 (if ping succeeded)
           if [ "$PING_RESULT" = "PASSED" ]; then
@@ -257,17 +309,22 @@ jobs:
 
           echo ""
           echo "🔗 L2 Ping Test ($L2_BRIDGE_A → $L2_BRIDGE_B):"
-          L2_PING_OUTPUT=$(docker exec edge-a ping -c 5 -W 3 $L2_BRIDGE_B 2>&1) || true
-          echo "$L2_PING_OUTPUT"
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt..."
+            L2_PING_OUTPUT=$(docker exec edge-a ping -c 5 -W 3 $L2_BRIDGE_B 2>&1) || true
+            echo "$L2_PING_OUTPUT"
 
-          if echo "$L2_PING_OUTPUT" | grep -q "bytes from"; then
-            RECEIVED=$(echo "$L2_PING_OUTPUT" | grep -c "bytes from" || echo "0")
-            L2_PING_LATENCY=$(echo "$L2_PING_OUTPUT" | grep "avg" | awk -F'/' '{print $5}' || echo "N/A")
-            echo "✅ L2 Ping: SUCCESS ($RECEIVED/5 packets, avg ${L2_PING_LATENCY}ms)"
-            L2_PING_RESULT="PASSED"
-          else
-            echo "❌ L2 Ping: FAILED"
-          fi
+            if echo "$L2_PING_OUTPUT" | grep -q "bytes from"; then
+              RECEIVED=$(echo "$L2_PING_OUTPUT" | grep -c "bytes from" || echo "0")
+              L2_PING_LATENCY=$(echo "$L2_PING_OUTPUT" | grep "avg" | awk -F'/' '{print $5}' || echo "N/A")
+              echo "✅ L2 Ping: SUCCESS ($RECEIVED/5 packets, avg ${L2_PING_LATENCY}ms)"
+              L2_PING_RESULT="PASSED"
+              break
+            else
+              echo "❌ L2 Ping: FAILED"
+            fi
+            sleep 2
+          done
 
           # Summary
           echo ""

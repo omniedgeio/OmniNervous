@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use clap::Parser;
-use log::debug;
-use log::{error, info, warn};
+use hex;
+use log::{debug, error, info, warn};
 #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
 use omninervous::l2::{L2Transport, L2_ENVELOPE};
 use omninervous::{
@@ -80,12 +78,9 @@ async fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<WgIn
             vip
         );
 
+        let private_key_hex = hex::encode(identity.private_key_bytes());
         if let Err(e) = wg_control
-            .setup_interface(
-                &vip.to_string(),
-                args.port,
-                &BASE64.encode(identity.private_key_bytes()),
-            )
+            .setup_interface(&vip.to_string(), args.port, &private_key_hex)
             .await
         {
             warn!(
@@ -343,7 +338,13 @@ async fn main() -> Result<()> {
     let mut stun_interval = interval(config.timing.stun_refresh());
 
     // Bind signaling socket first
-    let bind_port = if is_nucleus_mode { args.port } else { 0 };
+    let bind_port = if is_nucleus_mode {
+        args.port
+    } else if args.userspace {
+        args.port
+    } else {
+        0
+    };
     let socket_raw = UdpSocket::bind(format!("0.0.0.0:{}", bind_port))
         .await
         .context("failed to bind UDP socket")?;

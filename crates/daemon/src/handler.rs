@@ -7,6 +7,7 @@ use crate::wg::WgInterface;
 use anyhow::Result;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use hex;
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -104,6 +105,12 @@ pub struct MessageHandler<'a> {
 }
 
 impl<'a> MessageHandler<'a> {
+    fn encode_wg_key(wg_api: &WgInterface, key: [u8; 32]) -> String {
+        match wg_api {
+            WgInterface::Cli(_) => BASE64.encode(key),
+            WgInterface::Userspace(_) => hex::encode(key),
+        }
+    }
     pub async fn handle_packet(&mut self, buf: &[u8], src: SocketAddr) -> Result<()> {
         self.metrics.inc_packets_rx();
 
@@ -400,7 +407,7 @@ impl<'a> MessageHandler<'a> {
 
             // Configure WireGuard peer with both IPv4 and IPv6 allowed IPs
             if let Some(wg_api) = self.wg_api.as_mut() {
-                let pubkey_b64 = BASE64.encode(peer_info.public_key);
+                let pubkey = Self::encode_wg_key(wg_api, peer_info.public_key);
 
                 // Build allowed IPs list (IPv4 /32 + optional IPv6 /128)
                 let mut allowed_ips = vec![format!("{}/32", peer_info.vip)];
@@ -409,7 +416,7 @@ impl<'a> MessageHandler<'a> {
                 }
 
                 if let Err(e) = wg_api
-                    .set_peer(&pubkey_b64, Some(endpoint), &allowed_ips, Some(25))
+                    .set_peer(&pubkey, Some(endpoint), &allowed_ips, Some(25))
                     .await
                 {
                     warn!("Failed to configure WG peer {}: {}", peer_info.vip, e);
@@ -495,14 +502,10 @@ impl<'a> MessageHandler<'a> {
 
                         // Update WireGuard peer endpoint
                         if let Some(wg_api) = self.wg_api.as_mut() {
-                            let pubkey_b64 = BASE64.encode(ping.sender_key);
+                            let pubkey = Self::encode_wg_key(wg_api, ping.sender_key);
+                            let allowed_ips = vec![format!("{}/32", ping.sender_vip)];
                             if let Err(e) = wg_api
-                                .set_peer(
-                                    &pubkey_b64,
-                                    Some(src),
-                                    &[ping.sender_vip.to_string()],
-                                    Some(25),
-                                )
+                                .set_peer(&pubkey, Some(src), &allowed_ips, Some(25))
                                 .await
                             {
                                 warn!("Failed to update WG peer endpoint: {}", e);
@@ -609,14 +612,10 @@ impl<'a> MessageHandler<'a> {
 
                         // Update WireGuard peer endpoint
                         if let Some(wg_api) = self.wg_api.as_mut() {
-                            let pubkey_b64 = BASE64.encode(pong.responder_key);
+                            let pubkey = Self::encode_wg_key(wg_api, pong.responder_key);
+                            let allowed_ips = vec![format!("{}/32", pending.target_vip)];
                             if let Err(e) = wg_api
-                                .set_peer(
-                                    &pubkey_b64,
-                                    Some(src),
-                                    &[pending.target_vip.to_string()],
-                                    Some(25),
-                                )
+                                .set_peer(&pubkey, Some(src), &allowed_ips, Some(25))
                                 .await
                             {
                                 warn!("Failed to update WG peer endpoint: {}", e);
