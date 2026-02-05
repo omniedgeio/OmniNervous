@@ -8,7 +8,6 @@ use crypto_box::{
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -253,59 +252,77 @@ impl L2FrameHandler {
             return None;
         }
 
-        let peer_buffers = self.reassembly.entry(peer_key).or_default();
-        if !peer_buffers.contains_key(&frame_id)
-            && peer_buffers.len() >= self.config.max_frames_per_peer
+        let mut drop_bytes = None;
+        let mut complete = None;
+        let mut drop_now = false;
+        let mut should_enforce = false;
+
         {
-            self.stats.reassembly_drops += 1;
-            self.metrics.add_l2_reassembly_drops(1);
-            return None;
-        }
-        let buffer = peer_buffers
-            .entry(frame_id)
-            .or_insert_with(|| ReassemblyBuffer::new(frag_count));
-
-        if buffer.fragments.len() != frag_count {
-            self.stats.reassembly_drops += 1;
-            self.metrics.add_l2_reassembly_drops(1);
-            peer_buffers.remove(&frame_id);
-            return None;
-        }
-
-        if buffer.fragments[frag_index].is_none() {
-            buffer.fragments[frag_index] = Some(packet.payload.clone());
-            buffer.received += 1;
-            buffer.total_len += packet.payload.len();
-            self.stats.fragments_rx += 1;
-            self.metrics.add_l2_fragments_rx(1);
-            let peer_bytes = self.per_peer_bytes.entry(peer_key).or_insert(0);
-            *peer_bytes += packet.payload.len();
-            self.total_buffer_bytes += packet.payload.len();
-            if self.total_buffer_bytes > self.config.max_total_buffer_bytes
-                || *peer_bytes > self.config.max_buffer_bytes
+            let peer_buffers = self.reassembly.entry(peer_key).or_default();
+            if !peer_buffers.contains_key(&frame_id)
+                && peer_buffers.len() >= self.config.max_frames_per_peer
             {
                 self.stats.reassembly_drops += 1;
                 self.metrics.add_l2_reassembly_drops(1);
-                self.cleanup_frame(peer_key, frame_id, buffer.total_len);
                 return None;
             }
-            self.enforce_limits(peer_key);
-        }
+            let buffer = peer_buffers
+                .entry(frame_id)
+                .or_insert_with(|| ReassemblyBuffer::new(frag_count));
 
-        if buffer.received == frag_count {
-            let mut frame = Vec::with_capacity(buffer.total_len);
-            for frag in buffer.fragments.iter_mut() {
-                if let Some(data) = frag.take() {
-                    frame.extend_from_slice(&data);
+            if buffer.fragments.len() != frag_count {
+                self.stats.reassembly_drops += 1;
+                self.metrics.add_l2_reassembly_drops(1);
+                peer_buffers.remove(&frame_id);
+                return None;
+            }
+
+            if buffer.fragments[frag_index].is_none() {
+                buffer.fragments[frag_index] = Some(packet.payload.clone());
+                buffer.received += 1;
+                buffer.total_len += packet.payload.len();
+                self.stats.fragments_rx += 1;
+                self.metrics.add_l2_fragments_rx(1);
+                let peer_bytes = self.per_peer_bytes.entry(peer_key).or_insert(0);
+                *peer_bytes += packet.payload.len();
+                self.total_buffer_bytes += packet.payload.len();
+                if self.total_buffer_bytes > self.config.max_total_buffer_bytes
+                    || *peer_bytes > self.config.max_buffer_bytes
+                {
+                    self.stats.reassembly_drops += 1;
+                    self.metrics.add_l2_reassembly_drops(1);
+                    drop_bytes = Some(buffer.total_len);
+                    drop_now = true;
+                } else {
+                    should_enforce = true;
                 }
             }
-            self.cleanup_frame(peer_key, frame_id, buffer.total_len);
-            self.stats.frames_rx += 1;
-            self.metrics.add_l2_frames_rx(1);
-            return Some(frame);
+
+            if !drop_now && buffer.received == frag_count {
+                let mut frame = Vec::with_capacity(buffer.total_len);
+                for frag in buffer.fragments.iter_mut() {
+                    if let Some(data) = frag.take() {
+                        frame.extend_from_slice(&data);
+                    }
+                }
+                drop_bytes = Some(buffer.total_len);
+                self.stats.frames_rx += 1;
+                self.metrics.add_l2_frames_rx(1);
+                complete = Some(frame);
+            }
         }
 
-        None
+        if let Some(bytes) = drop_bytes {
+            self.cleanup_frame(peer_key, frame_id, bytes);
+        }
+        if should_enforce {
+            self.enforce_limits(peer_key);
+        }
+        if drop_now {
+            return None;
+        }
+
+        complete
     }
 
     pub fn cleanup_expired(&mut self) {
@@ -352,10 +369,9 @@ impl L2FrameHandler {
 }
 
 pub struct L2Transport {
-    device: tun::AsyncDevice,
+    device: Arc<Mutex<tun::AsyncDevice>>,
     socket: std::sync::Arc<UdpSocket>,
     handler: std::sync::Arc<Mutex<L2FrameHandler>>,
-    writer: Arc<Mutex<tun::AsyncDevice>>,
     local_key: [u8; 32],
 }
 
@@ -380,23 +396,20 @@ impl L2Transport {
 
         info!("L2 TAP device '{}' created (mtu={})", config.tap_name, mtu);
 
-        let writer = Arc::new(Mutex::new(device.clone()));
-
         Ok(Self {
-            device,
+            device: Arc::new(Mutex::new(device)),
             socket,
             handler: std::sync::Arc::new(Mutex::new(L2FrameHandler::new(
                 secret_key,
                 L2ConfigSnapshot::from(config),
                 metrics,
             ))),
-            writer,
             local_key,
         })
     }
 
     pub async fn start(&mut self, peer_table: Arc<Mutex<crate::peers::PeerTable>>) -> Result<()> {
-        let mut reader = self.device.clone();
+        let device = self.device.clone();
         let socket_tx = self.socket.clone();
         let handler_tx = self.handler.clone();
         let local_key = self.local_key;
@@ -404,47 +417,45 @@ impl L2Transport {
         tokio::spawn(async move {
             let mut buf = vec![0u8; TAP_READ_BUFFER];
             loop {
-                match reader.read(&mut buf).await {
-                    Ok(len) => {
-                        let frame = &buf[..len];
-                        let peers = peer_table.lock().await;
-                        for peer in peers.iter() {
-                            if let Some(pubkey) = peer.public_key {
-                                let packets = {
-                                    let mut handler = handler_tx.lock().await;
-                                    handler.fragment_frame(local_key, pubkey, frame)
-                                };
-                                if packets.is_empty() {
-                                    continue;
+                let len = {
+                    let mut device_lock = device.lock().await;
+                    match device_lock.read(&mut buf).await {
+                        Ok(len) => len,
+                        Err(e) => {
+                            warn!("L2 TAP read error: {}", e);
+                            break;
+                        }
+                    }
+                };
+                let frame = &buf[..len];
+                let peers = peer_table.lock().await;
+                for peer in peers.iter() {
+                    if let Some(pubkey) = peer.public_key {
+                        let packets = {
+                            let mut handler = handler_tx.lock().await;
+                            handler.fragment_frame(local_key, pubkey, frame)
+                        };
+                        if packets.is_empty() {
+                            continue;
+                        }
+                        let total_packets = packets.len();
+                        for (idx, packet) in packets.iter().enumerate() {
+                            let encrypted = {
+                                let mut handler = handler_tx.lock().await;
+                                if idx == 0 {
+                                    handler.stats.frames_tx += 1;
+                                    handler.stats.fragments_tx += total_packets as u64;
+                                    handler.metrics.add_l2_frames_tx(1);
+                                    handler.metrics.add_l2_fragments_tx(total_packets as u64);
                                 }
-                                let total_packets = packets.len();
-                                for (idx, packet) in packets.iter().enumerate() {
-                                    let encrypted = {
-                                        let mut handler = handler_tx.lock().await;
-                                        if idx == 0 {
-                                            handler.stats.frames_tx += 1;
-                                            handler.stats.fragments_tx += total_packets as u64;
-                                            handler.metrics.add_l2_frames_tx(1);
-                                            handler
-                                                .metrics
-                                                .add_l2_fragments_tx(total_packets as u64);
-                                        }
-                                        handler.encrypt_packet(packet)
-                                    };
-                                    if let Ok(data) = encrypted {
-                                        if let Err(e) =
-                                            socket_tx.send_to(&data, peer.endpoint).await
-                                        {
-                                            debug!("Failed to send L2 packet: {}", e);
-                                        }
-                                    }
+                                handler.encrypt_packet(packet)
+                            };
+                            if let Ok(data) = encrypted {
+                                if let Err(e) = socket_tx.send_to(&data, peer.endpoint).await {
+                                    debug!("Failed to send L2 packet: {}", e);
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!("L2 TAP read error: {}", e);
-                        break;
                     }
                 }
             }
@@ -457,8 +468,8 @@ impl L2Transport {
         let mut handler = self.handler.lock().await;
         if let Ok(packet) = handler.decrypt_packet(buf) {
             if let Some(frame) = handler.handle_fragment(packet) {
-                let mut writer = self.writer.lock().await;
-                writer.write_all(&frame).await?;
+                let mut device = self.device.lock().await;
+                device.write_all(&frame).await?;
             }
             handler.cleanup_expired();
         }
