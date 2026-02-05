@@ -351,14 +351,16 @@ async fn main() -> Result<()> {
     if !is_nucleus_mode {
         info!("WireGuard data plane will use UDP/{}", args.port);
     }
+    if l2_requested {
+        info!("L2 data plane will share UDP/{}", args.port);
+    }
     let socket = std::sync::Arc::new(socket_raw);
 
     // Create WireGuard interface if VIP is specified
-    let mut wg_api_opt = if l2_requested {
-        None
-    } else {
-        setup_wireguard(&args, &identity).await?
-    };
+    let mut wg_api_opt = setup_wireguard(&args, &identity).await?;
+    if wg_api_opt.is_none() && l2_requested {
+        info!("L2 mode enabled without WireGuard (no VIP configured)");
+    }
 
     if let Some(mut wg) = wg_api_opt.clone() {
         let socket_clone = socket.clone();
