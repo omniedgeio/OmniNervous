@@ -171,6 +171,10 @@ struct Args {
     #[arg(long, default_value = "omni0")]
     tun_name: String,
 
+    /// Transport mode: "l3" (default) or "l2" (Linux-only, requires l2-vpn feature)
+    #[arg(long, default_value = "l3")]
+    transport_mode: String,
+
     /// STUN servers for NAT discovery (repeatable, space-separated, or JSON array)
     #[arg(long, short = 's', action = clap::ArgAction::Append)]
     stun: Vec<String>,
@@ -269,6 +273,29 @@ async fn main() -> Result<()> {
     // Determine mode: Nucleus (signaling server) or Edge (P2P client)
     let is_nucleus_mode = args.mode.as_ref().map(|m| m == "nucleus").unwrap_or(false);
 
+    let l2_requested = args.transport_mode == "l2" || config.l2.mode == "l2";
+    #[cfg(not(all(feature = "l2-vpn", target_os = "linux")))]
+    if l2_requested {
+        anyhow::bail!("L2 mode requires Linux and the l2-vpn feature");
+    }
+
+    #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+    if l2_requested {
+        if !(250..=2000).contains(&config.l2.reassembly_timeout_ms) {
+            anyhow::bail!("l2.reassembly_timeout_ms must be between 250 and 2000");
+        }
+        if !(576..=2000).contains(&config.l2.mtu) {
+            anyhow::bail!("l2.mtu must be between 576 and 2000");
+        }
+        if config.l2.max_frames_per_peer == 0 {
+            anyhow::bail!("l2.max_frames_per_peer must be greater than 0");
+        }
+        if config.l2.max_total_buffer_bytes < config.l2.max_buffer_bytes {
+            anyhow::bail!("l2.max_total_buffer_bytes must be >= l2.max_buffer_bytes");
+        }
+        info!("L2 mode enabled (TAP: {})", config.l2.tap_name);
+    }
+
     let cluster_secret = if let Some(ref s) = args.secret {
         if s.len() < 16 {
             anyhow::bail!("Cluster secret must be at least 16 characters for security");
@@ -301,7 +328,7 @@ async fn main() -> Result<()> {
     }
 
     let _metrics = Metrics::new();
-    let mut peer_table = peers::PeerTable::new();
+    let peer_table = peers::PeerTable::new();
 
     // Cleanup interval - runs every cleanup_interval_secs
     let mut cleanup_interval = interval(config.timing.cleanup_interval());
@@ -327,7 +354,11 @@ async fn main() -> Result<()> {
     let socket = std::sync::Arc::new(socket_raw);
 
     // Create WireGuard interface if VIP is specified
-    let mut wg_api_opt = setup_wireguard(&args, &identity).await?;
+    let mut wg_api_opt = if l2_requested {
+        None
+    } else {
+        setup_wireguard(&args, &identity).await?
+    };
 
     if let Some(mut wg) = wg_api_opt.clone() {
         let socket_clone = socket.clone();
@@ -459,10 +490,31 @@ async fn main() -> Result<()> {
 
     let mut buf = [0u8; 2048];
 
+    let peer_table_mutex = std::sync::Arc::new(tokio::sync::Mutex::new(peer_table));
+
+    #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+    let l2_transport = if l2_requested {
+        let mut transport = crate::l2::L2Transport::new(
+            &config.l2,
+            socket.clone(),
+            identity.public_key_bytes(),
+            identity.private_key_bytes(),
+            _metrics.clone(),
+        )
+        .await?;
+        transport.start(peer_table_mutex.clone()).await?;
+        Some(transport)
+    } else {
+        None
+    };
+
+    #[cfg(not(all(feature = "l2-vpn", target_os = "linux")))]
+    let _l2_transport: Option<()> = None;
+
     loop {
         let mut handler = MessageHandler {
             socket: &socket,
-            peer_table: &mut peer_table,
+            peer_table: &peer_table_mutex,
             wg_api: wg_api_opt.as_mut(),
             metrics: &_metrics,
             nucleus_state: &mut nucleus_state,
@@ -480,6 +532,8 @@ async fn main() -> Result<()> {
             },
             relay_server: relay_server.as_mut(),
             relay_client: relay_client.as_mut(),
+            #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+            l2_transport: l2_transport.as_ref(),
         };
 
         tokio::select! {
@@ -498,7 +552,7 @@ async fn main() -> Result<()> {
             }
             _ = heartbeat_interval.tick() => {
                 if let Some(ref client) = nucleus_client {
-                    let peer_count = peer_table.len() as u32;
+                    let peer_count = peer_table_mutex.lock().await.len() as u32;
                     if let Err(e) = client.heartbeat(&socket, peer_count).await {
                         warn!("Failed to send heartbeat: {}", e);
                     }
@@ -550,7 +604,18 @@ async fn main() -> Result<()> {
                                 }
                             }
                         } else {
-                            debug!("Ignored unknown packet type {} from {}", first_byte, src);
+                            #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+                            if first_byte == crate::l2::L2_ENVELOPE {
+                                if let Err(e) = handler.handle_packet(pkt, src).await {
+                                    error!("Error handling L2 packet from {}: {}", src, e);
+                                }
+                            } else {
+                                debug!("Ignored unknown packet type {} from {}", first_byte, src);
+                            }
+                            #[cfg(not(all(feature = "l2-vpn", target_os = "linux")))]
+                            {
+                                debug!("Ignored unknown packet type {} from {}", first_byte, src);
+                            }
                         }
                     }
                     Err(e) => {

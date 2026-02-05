@@ -19,7 +19,12 @@ path = "src/lib.rs"
 name = "omninervous"
 path = "src/main.rs"
 
+[features]
+default = []
+l2-vpn = []
+
 [dependencies]
+
 tokio = { version = "1", features = ["full"] }
 snow = { version = "0.9.6", default-features = false, features = ["ring-accelerated"] }
 clap = { version = "4.4", features = ["derive"] }

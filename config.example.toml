@@ -16,7 +16,17 @@ use_builtin_stun = true
 max_sessions_per_ip = 10
 handshake_timeout_secs = 5
 
+[l2]
+# mode = "l2" # Enable L2 mode (Linux-only, requires l2-vpn feature)
+# tap_name = "omni0"
+# mtu = 1500
+# reassembly_timeout_ms = 500
+# max_frames_per_peer = 128
+# max_buffer_bytes = 1048576
+# max_total_buffer_bytes = 8388608
+
 # Define trusted peers
+
 [[peers]]
 public_key = "abc123..."
 endpoint = "192.168.1.100:51820"

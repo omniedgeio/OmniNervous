@@ -53,6 +53,9 @@ pub mod signaling;
 pub mod socket;
 pub mod stun;
 pub mod wg;
+#[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+pub mod l2;
+
 
 // ============================================================================
 // Configuration
@@ -126,12 +129,15 @@ pub use relay::{
 pub use signaling::{
     EncryptedEnvelope, NucleusClient, NucleusState, RuntimeState, SignalingEncryption,
 };
+#[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+pub use l2::{L2ConfigSnapshot, L2FrameHandler, L2FrameStats, L2Transport};
 
 // ============================================================================
 // Socket Utilities
 // ============================================================================
 
 pub use socket::{DualStackAddr, DualStackSocket, RecvResult};
+
 
 // ============================================================================
 // IPv6 Utilities

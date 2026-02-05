@@ -76,7 +76,7 @@ impl Default for DiscoConfig {
 
 pub struct MessageHandler<'a> {
     pub socket: &'a UdpSocket,
-    pub peer_table: &'a mut PeerTable,
+    pub peer_table: &'a tokio::sync::Mutex<PeerTable>,
     pub wg_api: Option<&'a mut WgInterface>,
     pub metrics: &'a Metrics,
     pub nucleus_state: &'a mut NucleusState,
@@ -99,6 +99,8 @@ pub struct MessageHandler<'a> {
     pub relay_server: Option<&'a mut RelayServer>,
     /// Relay client (for edge mode)
     pub relay_client: Option<&'a mut RelayClient>,
+    #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+    pub l2_transport: Option<&'a crate::l2::L2Transport>,
 }
 
 impl<'a> MessageHandler<'a> {
@@ -121,6 +123,17 @@ impl<'a> MessageHandler<'a> {
             } else if signaling::is_signaling_message(buf) {
                 self.handle_edge_signaling(buf, src).await?;
             }
+            return Ok(());
+        }
+
+        #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+        if buf[0] == crate::l2::L2_ENVELOPE {
+            if let Some(transport) = self.l2_transport {
+                if let Err(e) = transport.handle_udp_packet(buf).await {
+                    debug!("Failed to handle L2 packet from {}: {}", src, e);
+                }
+            }
+            return Ok(());
         }
 
         Ok(())
@@ -286,14 +299,17 @@ impl<'a> MessageHandler<'a> {
                     self.add_peer(peer_info).await;
                 }
                 // Handle removed peers (IPv4)
-                for vip in ack.removed_vips {
-                    self.peer_table.remove_by_vip(&vip);
-                    info!("Peer left: {}", vip);
-                }
-                // Handle removed peers (IPv6)
-                for vip_v6 in ack.removed_vips_v6 {
-                    self.peer_table.remove_by_vip_v6(&vip_v6);
-                    info!("Peer left (via IPv6): {}", vip_v6);
+                {
+                    let mut table = self.peer_table.lock().await;
+                    for vip in ack.removed_vips {
+                        table.remove_by_vip(&vip);
+                        info!("Peer left: {}", vip);
+                    }
+                    // Handle removed peers (IPv6)
+                    for vip_v6 in ack.removed_vips_v6 {
+                        table.remove_by_vip_v6(&vip_v6);
+                        info!("Peer left (via IPv6): {}", vip_v6);
+                    }
                 }
                 Ok(())
             }
@@ -364,12 +380,16 @@ impl<'a> MessageHandler<'a> {
                 }
             }
 
-            if let Err(e) = self.peer_table.register_with_v6(
-                peer_info.public_key,
-                endpoint,
-                peer_info.vip,
-                peer_info.vip_v6,
-            ) {
+            let register_result = {
+                let mut table = self.peer_table.lock().await;
+                table.register_with_v6(
+                    peer_info.public_key,
+                    endpoint,
+                    peer_info.vip,
+                    peer_info.vip_v6,
+                )
+            };
+            if let Err(e) = register_result {
                 warn!("Security alert for {}: {}", peer_info.vip, e);
                 return;
             }
@@ -453,7 +473,11 @@ impl<'a> MessageHandler<'a> {
 
                 // Update peer endpoint if we know this peer by their public key
                 // This handles endpoint migration (e.g., mobile device changing networks)
-                if let Some(peer) = self.peer_table.find_by_public_key(&ping.sender_key) {
+                let peer_entry = {
+                    let table = self.peer_table.lock().await;
+                    table.find_by_public_key(&ping.sender_key).cloned()
+                };
+                if let Some(peer) = peer_entry {
                     let current_endpoint = peer.endpoint;
                     if current_endpoint != src {
                         info!(
@@ -461,7 +485,11 @@ impl<'a> MessageHandler<'a> {
                             ping.sender_vip, current_endpoint, src
                         );
                         // Update endpoint in peer table
-                        if let Err(e) = self.peer_table.update_endpoint(&ping.sender_key, src) {
+                        let update_result = {
+                            let mut table = self.peer_table.lock().await;
+                            table.update_endpoint(&ping.sender_key, src)
+                        };
+                        if let Err(e) = update_result {
                             warn!("Failed to update peer endpoint: {}", e);
                         }
 
@@ -571,7 +599,11 @@ impl<'a> MessageHandler<'a> {
                         );
 
                         // Update endpoint in peer table
-                        if let Err(e) = self.peer_table.update_endpoint(&pong.responder_key, src) {
+                        let update_result = {
+                            let mut table = self.peer_table.lock().await;
+                            table.update_endpoint(&pong.responder_key, src)
+                        };
+                        if let Err(e) = update_result {
                             debug!("Could not update peer endpoint: {}", e);
                         }
 
@@ -952,8 +984,11 @@ impl<'a> MessageHandler<'a> {
         let mut relay_requested = Vec::new();
 
         for vip in timed_out {
-            // Find the peer info for this VIP
-            if let Some(peer) = self.peer_table.lookup_by_vip(&vip) {
+            let peer_entry = {
+                let table = self.peer_table.lock().await;
+                table.lookup_by_vip(&vip).cloned()
+            };
+            if let Some(peer) = peer_entry {
                 if let Some(pubkey) = peer.public_key {
                     // Check retry count
                     let should_retry = self

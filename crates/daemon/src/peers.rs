@@ -25,6 +25,7 @@ pub struct PeerEntry {
 }
 
 /// Peer routing table
+#[derive(Clone)]
 pub struct PeerTable {
     /// VIP → PeerEntry mapping
     by_vip: HashMap<Ipv4Addr, PeerEntry>,

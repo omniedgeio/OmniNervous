@@ -70,6 +70,14 @@ pub struct Metrics {
     pub peers_relayed: AtomicU64,
     /// Average latency to peers in microseconds
     pub avg_latency_us: AtomicU64,
+
+    // === L2 VPN Metrics ===
+    pub l2_frames_tx_total: AtomicU64,
+    pub l2_frames_rx_total: AtomicU64,
+    pub l2_fragments_tx_total: AtomicU64,
+    pub l2_fragments_rx_total: AtomicU64,
+    pub l2_reassembly_timeouts_total: AtomicU64,
+    pub l2_reassembly_drops_total: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -113,6 +121,13 @@ impl Metrics {
             peers_direct: AtomicU64::new(0),
             peers_relayed: AtomicU64::new(0),
             avg_latency_us: AtomicU64::new(0),
+            // L2 VPN
+            l2_frames_tx_total: AtomicU64::new(0),
+            l2_frames_rx_total: AtomicU64::new(0),
+            l2_fragments_tx_total: AtomicU64::new(0),
+            l2_fragments_rx_total: AtomicU64::new(0),
+            l2_reassembly_timeouts_total: AtomicU64::new(0),
+            l2_reassembly_drops_total: AtomicU64::new(0),
         }
     }
 
@@ -282,6 +297,36 @@ impl Metrics {
         self.avg_latency_us.store(latency, Ordering::Relaxed);
     }
 
+    // === L2 VPN Methods ===
+
+    pub fn add_l2_frames_tx(&self, count: u64) {
+        self.l2_frames_tx_total.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn add_l2_frames_rx(&self, count: u64) {
+        self.l2_frames_rx_total.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn add_l2_fragments_tx(&self, count: u64) {
+        self.l2_fragments_tx_total
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn add_l2_fragments_rx(&self, count: u64) {
+        self.l2_fragments_rx_total
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn add_l2_reassembly_timeouts(&self, count: u64) {
+        self.l2_reassembly_timeouts_total
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn add_l2_reassembly_drops(&self, count: u64) {
+        self.l2_reassembly_drops_total
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
     /// Format metrics in Prometheus exposition format.
     pub fn to_prometheus(&self) -> String {
         let nat_label = self.nat_type_label();
@@ -364,7 +409,25 @@ impl Metrics {
              omni_peers_relayed {}\n\
              # HELP omni_avg_latency_us Average peer latency in microseconds\n\
              # TYPE omni_avg_latency_us gauge\n\
-             omni_avg_latency_us {}\n",
+             omni_avg_latency_us {}\n\
+             # HELP omni_l2_frames_tx_total Total L2 frames transmitted\n\
+             # TYPE omni_l2_frames_tx_total counter\n\
+             omni_l2_frames_tx_total {}\n\
+             # HELP omni_l2_frames_rx_total Total L2 frames received\n\
+             # TYPE omni_l2_frames_rx_total counter\n\
+             omni_l2_frames_rx_total {}\n\
+             # HELP omni_l2_fragments_tx_total Total L2 fragments transmitted\n\
+             # TYPE omni_l2_fragments_tx_total counter\n\
+             omni_l2_fragments_tx_total {}\n\
+             # HELP omni_l2_fragments_rx_total Total L2 fragments received\n\
+             # TYPE omni_l2_fragments_rx_total counter\n\
+             omni_l2_fragments_rx_total {}\n\
+             # HELP omni_l2_reassembly_timeouts_total L2 reassembly timeouts\n\
+             # TYPE omni_l2_reassembly_timeouts_total counter\n\
+             omni_l2_reassembly_timeouts_total {}\n\
+             # HELP omni_l2_reassembly_drops_total L2 reassembly drops\n\
+             # TYPE omni_l2_reassembly_drops_total counter\n\
+             omni_l2_reassembly_drops_total {}\n",
             self.sessions_active.load(Ordering::Relaxed),
             self.packets_rx_total.load(Ordering::Relaxed),
             self.packets_tx_total.load(Ordering::Relaxed),
@@ -392,6 +455,12 @@ impl Metrics {
             self.peers_direct.load(Ordering::Relaxed),
             self.peers_relayed.load(Ordering::Relaxed),
             self.avg_latency_us.load(Ordering::Relaxed),
+            self.l2_frames_tx_total.load(Ordering::Relaxed),
+            self.l2_frames_rx_total.load(Ordering::Relaxed),
+            self.l2_fragments_tx_total.load(Ordering::Relaxed),
+            self.l2_fragments_rx_total.load(Ordering::Relaxed),
+            self.l2_reassembly_timeouts_total.load(Ordering::Relaxed),
+            self.l2_reassembly_drops_total.load(Ordering::Relaxed),
         )
     }
 }
@@ -489,10 +558,14 @@ mod tests {
         metrics.set_nat_type(NatType::PortRestrictedCone);
         metrics.inc_stun_queries();
         metrics.inc_disco_pings();
+        metrics.add_l2_frames_tx(2);
+        metrics.add_l2_fragments_rx(3);
 
         let output = metrics.to_prometheus();
         assert!(output.contains("omni_nat_type{type=\"port_restricted_cone\"}"));
         assert!(output.contains("omni_stun_queries_total 1"));
         assert!(output.contains("omni_disco_pings_sent_total 1"));
+        assert!(output.contains("omni_l2_frames_tx_total 2"));
+        assert!(output.contains("omni_l2_fragments_rx_total 3"));
     }
 }

@@ -15,6 +15,8 @@ pub struct Config {
     #[serde(default)]
     pub timing: TimingConfig,
     #[serde(default)]
+    pub l2: L2Config,
+    #[serde(default)]
     pub peers: Vec<PeerConfig>,
 }
 
@@ -74,6 +76,46 @@ impl Default for NetworkConfig {
             enable_ipv6: true,
             prefer_ipv6: true,
             happy_eyeballs_delay_ms: default_happy_eyeballs_delay(),
+        }
+    }
+}
+
+/// L2 VPN configuration (Linux-only)
+#[derive(Debug, Deserialize, Clone)]
+pub struct L2Config {
+    /// Transport mode: "l3" (default) or "l2"
+    #[serde(default = "default_l2_mode")]
+    pub mode: String,
+    /// TAP interface name for L2 mode (Linux only)
+    #[serde(default = "default_tap_name")]
+    pub tap_name: String,
+    /// TAP MTU in bytes (default: 1500)
+    #[serde(default = "default_l2_mtu")]
+    pub mtu: u16,
+    /// Reassembly timeout in milliseconds (default: 500)
+    #[serde(default = "default_l2_reassembly_timeout_ms")]
+    pub reassembly_timeout_ms: u64,
+    /// Maximum in-flight frames per peer
+    #[serde(default = "default_l2_max_frames_per_peer")]
+    pub max_frames_per_peer: usize,
+    /// Maximum buffered bytes per peer
+    #[serde(default = "default_l2_max_buffer_bytes")]
+    pub max_buffer_bytes: usize,
+    /// Maximum total buffered bytes across all peers
+    #[serde(default = "default_l2_max_total_buffer_bytes")]
+    pub max_total_buffer_bytes: usize,
+}
+
+impl Default for L2Config {
+    fn default() -> Self {
+        Self {
+            mode: default_l2_mode(),
+            tap_name: default_tap_name(),
+            mtu: default_l2_mtu(),
+            reassembly_timeout_ms: default_l2_reassembly_timeout_ms(),
+            max_frames_per_peer: default_l2_max_frames_per_peer(),
+            max_buffer_bytes: default_l2_max_buffer_bytes(),
+            max_total_buffer_bytes: default_l2_max_total_buffer_bytes(),
         }
     }
 }
@@ -233,6 +275,28 @@ fn default_rate_limit() -> u32 {
 }
 fn default_handshake_timeout() -> u64 {
     5
+}
+
+fn default_l2_mode() -> String {
+    "l3".to_string()
+}
+fn default_tap_name() -> String {
+    "omni0".to_string()
+}
+fn default_l2_mtu() -> u16 {
+    1500
+}
+fn default_l2_reassembly_timeout_ms() -> u64 {
+    500
+}
+fn default_l2_max_frames_per_peer() -> usize {
+    128
+}
+fn default_l2_max_buffer_bytes() -> usize {
+    1024 * 1024 // 1 MiB per peer
+}
+fn default_l2_max_total_buffer_bytes() -> usize {
+    8 * 1024 * 1024 // 8 MiB total
 }
 
 // Timing defaults - tuned for optimal NAT traversal
