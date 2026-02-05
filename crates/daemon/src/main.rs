@@ -4,6 +4,8 @@ use base64::Engine;
 use clap::Parser;
 use log::debug;
 use log::{error, info, warn};
+#[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+use omninervous::l2::{L2Transport, L2_ENVELOPE};
 use omninervous::{
     config,
     handler::{DiscoConfig, MessageHandler},
@@ -498,8 +500,8 @@ async fn main() -> Result<()> {
     let peer_table_mutex = std::sync::Arc::new(tokio::sync::Mutex::new(peer_table));
 
     #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
-    let l2_transport = if l2_requested {
-        let mut transport = crate::l2::L2Transport::new(
+    let l2_transport: Option<L2Transport> = if l2_requested {
+        let mut transport = L2Transport::new(
             &config.l2,
             socket.clone(),
             identity.public_key_bytes(),
@@ -610,7 +612,7 @@ async fn main() -> Result<()> {
                             }
                         } else {
                             #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
-                            if first_byte == crate::l2::L2_ENVELOPE {
+                            if first_byte == L2_ENVELOPE {
                                 if let Err(e) = handler.handle_packet(pkt, src).await {
                                     error!("Error handling L2 packet from {}: {}", src, e);
                                 }
