@@ -17,7 +17,9 @@ COPY Cargo.toml ./
 COPY crates/daemon ./crates/daemon/
 
 # Build release binary
-RUN cargo build -p omninervous --release
+ARG CARGO_FEATURES=""
+RUN cargo build -p omninervous --release ${CARGO_FEATURES}
+
 
 # Runtime stage - minimal image with compatible glibc
 FROM ubuntu:24.04

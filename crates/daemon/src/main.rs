@@ -293,6 +293,9 @@ async fn main() -> Result<()> {
         if config.l2.max_total_buffer_bytes < config.l2.max_buffer_bytes {
             anyhow::bail!("l2.max_total_buffer_bytes must be >= l2.max_buffer_bytes");
         }
+        if args.vip.is_some() && config.l2.tap_name == args.tun_name {
+            anyhow::bail!("l2.tap_name must differ from --tun-name when L3 is enabled");
+        }
         info!("L2 mode enabled (TAP: {})", config.l2.tap_name);
     }
 

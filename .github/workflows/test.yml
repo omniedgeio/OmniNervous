@@ -12,6 +12,9 @@ env:
   VIP_B: 10.200.0.20
   NUCLEUS_PORT: 51820
   CLUSTER_SECRET: ci-test-secret-min16
+  L2_BRIDGE_A: 10.210.0.10
+  L2_BRIDGE_B: 10.210.0.20
+
 
 jobs:
   # Code quality checks
@@ -78,7 +81,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Docker image
-        run: docker build -t omninervous:test .
+        run: docker build --build-arg CARGO_FEATURES="--features l2-vpn" -t omninervous:test .
+
 
       - name: Create Docker network
         run: |
@@ -109,7 +113,9 @@ jobs:
             --cluster ci-test \
             --secret "$CLUSTER_SECRET" \
             --vip $VIP_A \
-            --port 51820
+            --port 51820 \
+            --tun-name omniwg0 \
+            --transport-mode l2
           sleep 3
           echo "Edge A status:"
           docker ps -a --filter name=edge-a --format '{{.Status}}'
@@ -135,7 +141,9 @@ jobs:
             --cluster ci-test \
             --secret "$CLUSTER_SECRET" \
             --vip $VIP_B \
-            --port 51821
+            --port 51821 \
+            --tun-name omniwg0 \
+            --transport-mode l2
           sleep 5
           echo "Edge B status:"
           docker ps -a --filter name=edge-b --format '{{.Status}}'
@@ -180,18 +188,20 @@ jobs:
           PING_LATENCY="N/A"
           TCP_RESULT="SKIPPED"
           TCP_THROUGHPUT="N/A"
-          
+          L2_PING_RESULT="FAILED"
+          L2_PING_LATENCY="N/A"
+
           echo "============================================"
           echo "🚀 OmniNervous VPN Tunnel Test"
           echo "============================================"
-          
+
           # Test 1: Ping over VPN tunnel (Edge A → Edge B)
           echo ""
           echo "🏓 Ping Test ($VIP_A → $VIP_B):"
-          
+
           PING_OUTPUT=$(docker exec edge-a ping -c 5 -W 3 $VIP_B 2>&1) || true
           echo "$PING_OUTPUT"
-          
+
           if echo "$PING_OUTPUT" | grep -q "bytes from"; then
             RECEIVED=$(echo "$PING_OUTPUT" | grep -c "bytes from" || echo "0")
             PING_LATENCY=$(echo "$PING_OUTPUT" | grep "avg" | awk -F'/' '{print $5}' || echo "N/A")
@@ -200,20 +210,20 @@ jobs:
           else
             echo "❌ Ping: FAILED"
           fi
-          
+
           # Test 2: iperf3 (if ping succeeded)
           if [ "$PING_RESULT" = "PASSED" ]; then
             echo ""
             echo "📈 iperf3 TCP Test ($VIP_A → $VIP_B):"
-            
+
             # Start iperf3 server on Edge B
             docker exec -d edge-b iperf3 -s -p 5201
             sleep 2
-            
+
             # Run iperf3 client on Edge A
             TCP_OUTPUT=$(docker exec edge-a iperf3 -c $VIP_B -p 5201 -t 5 2>&1) || true
             echo "$TCP_OUTPUT"
-            
+
             if echo "$TCP_OUTPUT" | grep -q "bits/sec"; then
               TCP_THROUGHPUT=$(echo "$TCP_OUTPUT" | grep "sender" | tail -1 | grep -oE "[0-9.]+ [MG]bits/sec" | head -1 || echo "N/A")
               echo "✅ TCP: $TCP_THROUGHPUT"
@@ -223,7 +233,42 @@ jobs:
               TCP_RESULT="FAILED"
             fi
           fi
-          
+
+          echo ""
+          echo "Setting up L2 bridge on Edge A"
+          docker exec edge-a ip link add br0 type bridge
+          docker exec edge-a ip link set br0 up
+          docker exec edge-a ip link set omni0 master br0
+          docker exec edge-a ip link set omni0 up
+          docker exec edge-a ip link add dummy0 type dummy
+          docker exec edge-a ip link set dummy0 master br0
+          docker exec edge-a ip link set dummy0 up
+          docker exec edge-a ip addr add $L2_BRIDGE_A/24 dev dummy0
+
+          echo "Setting up L2 bridge on Edge B"
+          docker exec edge-b ip link add br0 type bridge
+          docker exec edge-b ip link set br0 up
+          docker exec edge-b ip link set omni0 master br0
+          docker exec edge-b ip link set omni0 up
+          docker exec edge-b ip link add dummy0 type dummy
+          docker exec edge-b ip link set dummy0 master br0
+          docker exec edge-b ip link set dummy0 up
+          docker exec edge-b ip addr add $L2_BRIDGE_B/24 dev dummy0
+
+          echo ""
+          echo "🔗 L2 Ping Test ($L2_BRIDGE_A → $L2_BRIDGE_B):"
+          L2_PING_OUTPUT=$(docker exec edge-a ping -c 5 -W 3 $L2_BRIDGE_B 2>&1) || true
+          echo "$L2_PING_OUTPUT"
+
+          if echo "$L2_PING_OUTPUT" | grep -q "bytes from"; then
+            RECEIVED=$(echo "$L2_PING_OUTPUT" | grep -c "bytes from" || echo "0")
+            L2_PING_LATENCY=$(echo "$L2_PING_OUTPUT" | grep "avg" | awk -F'/' '{print $5}' || echo "N/A")
+            echo "✅ L2 Ping: SUCCESS ($RECEIVED/5 packets, avg ${L2_PING_LATENCY}ms)"
+            L2_PING_RESULT="PASSED"
+          else
+            echo "❌ L2 Ping: FAILED"
+          fi
+
           # Summary
           echo ""
           echo "============================================"
@@ -231,18 +276,26 @@ jobs:
           echo "============================================"
           echo "🏓 VPN Ping:  $PING_RESULT ($PING_LATENCY ms)"
           echo "📈 VPN TCP:   $TCP_RESULT ($TCP_THROUGHPUT)"
+          echo "🔗 L2 Ping:   $L2_PING_RESULT ($L2_PING_LATENCY ms)"
           echo "============================================"
-          
+
           # Set outputs
           echo "PING_RESULT=$PING_RESULT" >> $GITHUB_OUTPUT
           echo "PING_LATENCY=$PING_LATENCY" >> $GITHUB_OUTPUT
           echo "TCP_RESULT=$TCP_RESULT" >> $GITHUB_OUTPUT
           echo "TCP_THROUGHPUT=$TCP_THROUGHPUT" >> $GITHUB_OUTPUT
-          
+          echo "L2_PING_RESULT=$L2_PING_RESULT" >> $GITHUB_OUTPUT
+          echo "L2_PING_LATENCY=$L2_PING_LATENCY" >> $GITHUB_OUTPUT
+
           # Fail if ping failed
           if [ "$PING_RESULT" != "PASSED" ]; then
             echo "::warning::VPN ping test failed - tunnel may not be established"
           fi
+
+          if [ "$L2_PING_RESULT" != "PASSED" ]; then
+            echo "::warning::L2 ping test failed - L2 tunnel may not be established"
+          fi
+
 
       - name: Collect logs on failure
         if: failure()
@@ -273,6 +326,8 @@ jobs:
           echo "|:---|:---|:---|" >> $GITHUB_STEP_SUMMARY
           echo "| 🏓 VPN Ping | ${{ steps.tests.outputs.PING_RESULT || 'N/A' }} | ${{ steps.tests.outputs.PING_LATENCY || 'N/A' }} ms |" >> $GITHUB_STEP_SUMMARY
           echo "| 📈 VPN TCP | ${{ steps.tests.outputs.TCP_RESULT || 'N/A' }} | ${{ steps.tests.outputs.TCP_THROUGHPUT || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔗 L2 Ping | ${{ steps.tests.outputs.L2_PING_RESULT || 'N/A' }} | ${{ steps.tests.outputs.L2_PING_LATENCY || 'N/A' }} ms |" >> $GITHUB_STEP_SUMMARY
+
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Security & NAT Traversal Features" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ HMAC-SHA256 Signaling Authentication" >> $GITHUB_STEP_SUMMARY
@@ -292,3 +347,5 @@ jobs:
           docker stop nucleus edge-a edge-b 2>/dev/null || true
           docker rm nucleus edge-a edge-b 2>/dev/null || true
           docker network rm omni-test-net 2>/dev/null || true
+
+
