@@ -210,21 +210,31 @@ jobs:
           echo "=== Edge B Peers (logs) ==="
           docker logs edge-b --tail 100 || true
 
-      - name: Wait for WireGuard peers
+      - name: Wait for peers (userspace-safe)
         run: |
-          echo "Waiting for WireGuard peers..."
-          WG_READY="no"
+          echo "Waiting for peers via logs..."
+          READY="no"
           for attempt in 1 2 3 4 5 6; do
-            if docker exec edge-a wg show 2>/dev/null | grep -q "peer:"; then
-              WG_READY="yes"
+            EDGE_A_LOGS=$(docker logs edge-a --since 2m 2>/dev/null || true)
+            EDGE_B_LOGS=$(docker logs edge-b --since 2m 2>/dev/null || true)
+
+            if echo "$EDGE_A_LOGS" | grep -q "Successfully configured WG peer" \
+              || echo "$EDGE_A_LOGS" | grep -q "Added userspace peer"; then
+              READY="yes"
               break
             fi
+            if echo "$EDGE_B_LOGS" | grep -q "Successfully configured WG peer" \
+              || echo "$EDGE_B_LOGS" | grep -q "Added userspace peer"; then
+              READY="yes"
+              break
+            fi
+
             echo "Waiting for peers (attempt $attempt)..."
             sleep 5
           done
 
-          if [ "$WG_READY" != "yes" ]; then
-            echo "WARNING: no WireGuard peers detected before tests"
+          if [ "$READY" != "yes" ]; then
+            echo "WARNING: no peer-setup logs detected before tests"
           fi
 
       - name: Run VPN Tests
