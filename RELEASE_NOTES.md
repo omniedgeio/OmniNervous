@@ -1,5 +1,41 @@
 # Release Notes
 
+## v0.5.0: L2 VPN & Userspace Improvements
+
+**Date:** 2026-02-04
+
+This release introduces a Linux-only L2 VPN transport mode with TAP-based bridging, fragmentation/reassembly, and Prometheus metrics. It also improves userspace WireGuard integration and CI test coverage for L2/L3 modes.
+
+### New Features
+
+*   **L2 VPN Transport (Linux)**: New `--transport-mode l2` with TAP-based Layer 2 bridging (feature flag `l2-vpn`).
+*   **L2 Fragmentation/Reassembly**: Robust L2 frame splitting and reassembly for MTU-safe transport.
+*   **L2 Metrics**: New Prometheus counters for L2 TX/RX, fragments, and reassembly drops.
+*   **Userspace WG Improvements**: Userspace key encoding fixes and socket binding updates.
+
+### Configuration / CLI
+
+*   `--transport-mode l2` enables L2 transport on Linux.
+*   `--l2-mtu` sets the TAP MTU when L2 mode is enabled.
+
+### CI / Testing
+
+*   Added a dual-mode L3 + L2 Docker integration test flow in GitHub Actions.
+*   Local script `scripts/local_l2_l3_docker_test.sh` mirrors CI behavior.
+
+### Code Changes
+
+| File | Change |
+|:---|:---|
+| `crates/daemon/src/l2.rs` | L2 TAP, encryption, fragmentation/reassembly, metrics |
+| `crates/daemon/src/metrics.rs` | L2 counters exported to Prometheus |
+| `crates/daemon/src/main.rs` | L2 transport wiring, userspace key handling |
+| `crates/daemon/src/handler.rs` | Userspace WG peer key encoding |
+| `.github/workflows/test.yml` | L2/L3 integration flow |
+| `scripts/local_l2_l3_docker_test.sh` | Local Docker test harness |
+
+---
+
 ## v0.4.0: IPv6 Dual-Stack & Enhanced Signaling
 
 **Date:** 2026-02-02

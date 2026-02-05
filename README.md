@@ -5,9 +5,10 @@
 
 ## Architecture
 
-OmniNervous uses a dual-plane design: control plane for signaling and peer management, data plane using WireGuard for encrypted tunnels.
+OmniNervous uses a dual-plane design: control plane for signaling and peer management, data plane using WireGuard for encrypted tunnels. Linux builds can enable an L2 data plane for TAP-based bridging and L2 VPNs.
 
 ---
+
 
 ## Performance Results (Jan 23, 2026)
 
@@ -54,6 +55,9 @@ Validated on a **$5 AWS Lightsail** (1 vCPU, 1 GB RAM):
 # Native build
 cargo build --release
 
+# Enable L2 VPN (Linux only)
+cargo build --release --features l2-vpn
+
 # Docker-based build (Linux AMD64)
 # This handles local dependencies (e.g. patched boringtun)
 ./scripts/build_local_docker.ps1  # Windows
@@ -61,6 +65,7 @@ cargo build --release
 ```
 
 The build script will produce a binary at: `scripts/omninervous-linux-amd64`
+
 
 ### Usage
 
@@ -83,11 +88,22 @@ sudo ./target/release/omninervous \
   --userspace  # Recommended for non-root/non-kernel setups
 ```
 
+**Run Edge Node (L2, Linux only):**
+```bash
+sudo ./target/release/omninervous \
+  --nucleus <nucleus-host>:51820 \
+  --cluster <cluster-name> \
+  --vip 10.200.0.1 \
+  --transport-mode l2
+```
+
 **Advanced Options:**
 - STUN servers: `--stun stun.l.google.com:19302`
 - Multiple STUN: `--stun "server1 server2"` or `--stun '["server1", "server2"]'`
 - Cluster secret: `--secret <16-char-min>`
 - Config file: `--config config.toml`
+- Transport mode: `--transport-mode l2` (Linux only, requires `l2-vpn` feature)
+
 
 | Flag | Description | Default |
 |:---|:---|:---|
@@ -102,10 +118,22 @@ sudo ./target/release/omninervous \
 | `--secret` | Cluster PSK | Optional |
 | `--init` | Generate identity | - |
 | `--config` | Path to config file | - |
+| `--transport-mode` | Transport mode: "l3" (default) or "l2" (Linux-only, requires l2-vpn feature) | l3 |
+| `--l2-mtu` | Override L2 TAP MTU (Linux only, l2-vpn) | 1400 |
+
+---
+
+## L2 VPN (Linux, l2-vpn feature)
+
+- **Mode**: `--transport-mode l2` uses a TAP device for Layer 2 bridging.
+- **Encapsulation**: L2 frames are encrypted and sent over the existing UDP/WireGuard path.
+- **Fragmentation**: Large frames are fragmented and reassembled (default MTU 1400).
+- **Observability**: L2 metrics are exposed via Prometheus `/metrics`.
 
 ---
 
 ## Security Features
+
 
 | Feature | Implementation |
 |:---|:---|
@@ -119,9 +147,9 @@ sudo ./target/release/omninervous \
 
 ## Current Status
 
-- **Version**: v0.4.0 (IPv6 Dual-Stack & Enhanced Signaling)
+- **Version**: v0.5.0 (L2 VPN & Userspace Improvements)
 - **Performance**: 557.96 Mbps throughput, 127.5% baseline efficiency
-- **Features**: IPv6 dual-stack, Happy Eyeballs (RFC 8305), configurable connection racing
+- **Features**: L2 transport mode (Linux), fragmentation/reassembly, dual-stack signaling, Happy Eyeballs
 - **Scalability**: O(1) lookups, delta updates for 1000+ edges
 
 ---
