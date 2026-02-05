@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use hex;
 use log::{debug, error, info, warn};
 #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
 use omninervous::l2::{L2Transport, L2_ENVELOPE};
@@ -338,9 +337,7 @@ async fn main() -> Result<()> {
     let mut stun_interval = interval(config.timing.stun_refresh());
 
     // Bind signaling socket first
-    let bind_port = if is_nucleus_mode {
-        args.port
-    } else if args.userspace {
+    let bind_port = if is_nucleus_mode || args.userspace {
         args.port
     } else {
         0
