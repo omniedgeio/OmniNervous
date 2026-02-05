@@ -44,6 +44,8 @@ pub mod happy_eyeballs;
 pub mod http;
 pub mod identity;
 pub mod ipv6_utils;
+#[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+pub mod l2;
 pub mod metrics;
 pub mod netcheck;
 pub mod peers;
@@ -53,9 +55,6 @@ pub mod signaling;
 pub mod socket;
 pub mod stun;
 pub mod wg;
-#[cfg(all(feature = "l2-vpn", target_os = "linux"))]
-pub mod l2;
-
 
 // ============================================================================
 // Configuration
@@ -126,18 +125,17 @@ pub use relay::{
 // Signaling
 // ============================================================================
 
+#[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+pub use l2::{L2ConfigSnapshot, L2FrameHandler, L2FrameStats, L2Transport};
 pub use signaling::{
     EncryptedEnvelope, NucleusClient, NucleusState, RuntimeState, SignalingEncryption,
 };
-#[cfg(all(feature = "l2-vpn", target_os = "linux"))]
-pub use l2::{L2ConfigSnapshot, L2FrameHandler, L2FrameStats, L2Transport};
 
 // ============================================================================
 // Socket Utilities
 // ============================================================================
 
 pub use socket::{DualStackAddr, DualStackSocket, RecvResult};
-
 
 // ============================================================================
 // IPv6 Utilities
