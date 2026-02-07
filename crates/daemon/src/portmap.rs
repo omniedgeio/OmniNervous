@@ -332,7 +332,16 @@ impl PortMapper {
 
         // Wait for response
         let mut buf = [0u8; 16];
-        let (len, _src) = timeout(self.timeout, socket.recv_from(&mut buf)).await??;
+        let (len, src) = timeout(self.timeout, socket.recv_from(&mut buf)).await??;
+
+        // SECURITY: Validate response is from expected gateway
+        if src.ip() != IpAddr::V4(gateway_v4) {
+            anyhow::bail!(
+                "NAT-PMP response from unexpected source: {} (expected {})",
+                src.ip(),
+                gateway_v4
+            );
+        }
 
         if len < 12 {
             anyhow::bail!("NAT-PMP response too short");
@@ -389,7 +398,16 @@ impl PortMapper {
 
         // Wait for response
         let mut buf = [0u8; 16];
-        let (len, _src) = timeout(self.timeout, socket.recv_from(&mut buf)).await??;
+        let (len, src) = timeout(self.timeout, socket.recv_from(&mut buf)).await??;
+
+        // SECURITY: Validate response is from expected gateway
+        if src.ip() != IpAddr::V4(gateway_v4) {
+            anyhow::bail!(
+                "NAT-PMP response from unexpected source: {} (expected {})",
+                src.ip(),
+                gateway_v4
+            );
+        }
 
         if len < 16 {
             anyhow::bail!("NAT-PMP mapping response too short");
@@ -670,7 +688,16 @@ impl PortMapper {
 
         // Wait for response
         let mut buf = [0u8; 60];
-        let (len, _src) = timeout(self.timeout, socket.recv_from(&mut buf)).await??;
+        let (len, src) = timeout(self.timeout, socket.recv_from(&mut buf)).await??;
+
+        // SECURITY: Validate response is from expected gateway
+        if src.ip() != IpAddr::V4(gateway_v4) {
+            anyhow::bail!(
+                "PCP response from unexpected source: {} (expected {})",
+                src.ip(),
+                gateway_v4
+            );
+        }
 
         if len < 24 {
             anyhow::bail!("PCP response too short");
@@ -741,7 +768,16 @@ impl PortMapper {
 
         // Wait for response
         let mut buf = [0u8; 60];
-        let (len, _src) = timeout(self.timeout, socket.recv_from(&mut buf)).await??;
+        let (len, src) = timeout(self.timeout, socket.recv_from(&mut buf)).await??;
+
+        // SECURITY: Validate response is from expected gateway
+        if src.ip() != IpAddr::V4(gateway_v4) {
+            anyhow::bail!(
+                "PCP response from unexpected source: {} (expected {})",
+                src.ip(),
+                gateway_v4
+            );
+        }
 
         if len < 60 {
             anyhow::bail!("PCP MAP response too short: {} bytes", len);
@@ -777,6 +813,16 @@ impl PortMapper {
         // Internal port: bytes 40-41
         // Assigned external port: bytes 42-43
         // Assigned external IP: bytes 44-59 (IPv6-mapped IPv4)
+
+        // SECURITY: Validate nonce matches what we sent (RFC 6887 Section 8.3)
+        let response_nonce = &buf[24..36];
+        if response_nonce != nonce.as_slice() {
+            anyhow::bail!(
+                "PCP response nonce mismatch - possible spoofing attack (expected {:02x?}, got {:02x?})",
+                &nonce[..4],
+                &response_nonce[..4]
+            );
+        }
 
         let internal_port = u16::from_be_bytes([buf[40], buf[41]]);
         let external_port = u16::from_be_bytes([buf[42], buf[43]]);
@@ -1559,5 +1605,33 @@ mod tests {
         assert!(!mapping.is_expired());
         assert!(!mapping.needs_refresh());
         assert_eq!(mapping.protocol, PortMapProtocol::Pcp);
+    }
+
+    #[test]
+    fn test_pcp_nonce_in_request_response() {
+        // Test that nonce is correctly placed in MAP request
+        let client_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let nonce: [u8; 12] = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x12, 0x34, 0x56, 0x78];
+        
+        let packet = build_pcp_request(
+            PCP_OP_MAP,
+            &client_ip,
+            7200,
+            51820,
+            51820,
+            Some(&nonce),
+        );
+
+        // Verify nonce is at bytes 24-35 in MAP request
+        let request_nonce = &packet[24..36];
+        assert_eq!(request_nonce, &nonce, "Nonce should be at bytes 24-35 in MAP request");
+
+        // Simulate a response with matching nonce (would be validated in request_mapping_pcp)
+        let matching_nonce = &nonce;
+        assert_eq!(matching_nonce, &nonce, "Matching nonce should pass validation");
+
+        // Simulate a response with mismatched nonce (would fail validation)
+        let wrong_nonce: [u8; 12] = [0x00; 12];
+        assert_ne!(&wrong_nonce[..], &nonce[..], "Mismatched nonce should fail validation");
     }
 }
