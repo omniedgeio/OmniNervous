@@ -85,6 +85,46 @@ const UPNP_SERVICE_WAN_IP: &str = "urn:schemas-upnp-org:service:WANIPConnection:
 const UPNP_SERVICE_WAN_PPP: &str = "urn:schemas-upnp-org:service:WANPPPConnection:1";
 
 // ============================================================================
+// PCP Constants (RFC 6887)
+// ============================================================================
+
+/// PCP server port (same as NAT-PMP for backward compatibility)
+const PCP_PORT: u16 = 5351;
+
+/// PCP protocol version
+const PCP_VERSION: u8 = 2;
+
+/// PCP opcodes
+const PCP_OP_ANNOUNCE: u8 = 0;
+const PCP_OP_MAP: u8 = 1;
+#[allow(dead_code)]
+const PCP_OP_PEER: u8 = 2;
+
+/// PCP result codes
+const PCP_RESULT_SUCCESS: u8 = 0;
+const PCP_RESULT_UNSUPP_VERSION: u8 = 1;
+const PCP_RESULT_NOT_AUTHORIZED: u8 = 2;
+const PCP_RESULT_MALFORMED_REQUEST: u8 = 3;
+const PCP_RESULT_UNSUPP_OPCODE: u8 = 4;
+const PCP_RESULT_UNSUPP_OPTION: u8 = 5;
+const PCP_RESULT_MALFORMED_OPTION: u8 = 6;
+const PCP_RESULT_NETWORK_FAILURE: u8 = 7;
+const PCP_RESULT_NO_RESOURCES: u8 = 8;
+const PCP_RESULT_UNSUPP_PROTOCOL: u8 = 9;
+#[allow(dead_code)]
+const PCP_RESULT_USER_EX_QUOTA: u8 = 10;
+#[allow(dead_code)]
+const PCP_RESULT_CANNOT_PROVIDE_EXTERNAL: u8 = 11;
+const PCP_RESULT_ADDRESS_MISMATCH: u8 = 12;
+#[allow(dead_code)]
+const PCP_RESULT_EXCESSIVE_REMOTE_PEERS: u8 = 13;
+
+/// PCP protocol numbers (IANA)
+const PCP_PROTO_UDP: u8 = 17;
+#[allow(dead_code)]
+const PCP_PROTO_TCP: u8 = 6;
+
+// ============================================================================
 // Data Structures
 // ============================================================================
 
@@ -258,7 +298,19 @@ impl PortMapper {
             }
         }
 
-        // TODO: Probe PCP (RFC 6887)
+        // Probe PCP (RFC 6887)
+        match self.probe_pcp(gateway).await {
+            Ok(external_addr) => {
+                self.capabilities.pcp = true;
+                if self.capabilities.external_addr.is_none() {
+                    self.capabilities.external_addr = Some(external_addr);
+                }
+                info!("PCP supported on {}, external IP: {}", gateway, external_addr);
+            }
+            Err(e) => {
+                debug!("PCP not available: {}", e);
+            }
+        }
 
         Ok(self.capabilities.clone())
     }
@@ -413,7 +465,15 @@ impl PortMapper {
             }
         }
 
-        // TODO: Try PCP
+        // Try PCP
+        if self.capabilities.pcp {
+            match self.request_mapping_pcp(lifetime_secs).await {
+                Ok(port) => return Ok(port),
+                Err(e) => {
+                    warn!("PCP mapping failed: {}", e);
+                }
+            }
+        }
 
         anyhow::bail!("No port mapping protocol available")
     }
@@ -434,8 +494,9 @@ impl PortMapper {
                 self.request_mapping_pmp(lifetime).await?;
             }
             PortMapProtocol::Pcp => {
-                // TODO: Implement PCP refresh
-                warn!("PCP refresh not implemented");
+                // PCP refresh is the same as creating a new mapping
+                let lifetime = mapping.lifetime.as_secs() as u32;
+                self.request_mapping_pcp(lifetime).await?;
             }
             PortMapProtocol::Upnp => {
                 // UPnP refresh is the same as creating a new mapping
@@ -482,7 +543,9 @@ impl PortMapper {
                 );
             }
             PortMapProtocol::Pcp => {
-                // TODO: Implement PCP release
+                if let Err(e) = self.release_pcp(&mapping).await {
+                    warn!("Failed to release PCP mapping: {}", e);
+                }
             }
             PortMapProtocol::Upnp => {
                 if let Err(e) = self.release_upnp(&mapping).await {
@@ -579,11 +642,284 @@ impl PortMapper {
 
         Ok(())
     }
+
+    // ========================================================================
+    // PCP Methods (RFC 6887)
+    // ========================================================================
+
+    /// Probe for PCP support using ANNOUNCE opcode
+    async fn probe_pcp(&self, gateway: IpAddr) -> Result<IpAddr> {
+        let gateway_v4 = match gateway {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(_) => anyhow::bail!("PCP IPv6 not yet supported"),
+        };
+
+        let local_ip = get_local_ip().await?;
+        let local_v4 = match local_ip {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(_) => anyhow::bail!("PCP requires IPv4 local address"),
+        };
+
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        let gateway_addr = SocketAddrV4::new(gateway_v4, PCP_PORT);
+
+        // Build PCP ANNOUNCE request (24 bytes header only)
+        let request = build_pcp_request(PCP_OP_ANNOUNCE, &local_v4, 0, 0, 0, None);
+
+        socket.send_to(&request, gateway_addr).await?;
+
+        // Wait for response
+        let mut buf = [0u8; 60];
+        let (len, _src) = timeout(self.timeout, socket.recv_from(&mut buf)).await??;
+
+        if len < 24 {
+            anyhow::bail!("PCP response too short");
+        }
+
+        // Parse response header
+        let version = buf[0];
+        let r_opcode = buf[1];
+        let result_code = buf[3];
+
+        if version != PCP_VERSION {
+            // Check if server responded with NAT-PMP (version 0)
+            if version == 0 {
+                anyhow::bail!("Server responded with NAT-PMP, not PCP");
+            }
+            anyhow::bail!("Unexpected PCP version: {}", version);
+        }
+
+        // Check R bit (response flag) is set
+        if r_opcode & 0x80 == 0 {
+            anyhow::bail!("PCP response missing R bit");
+        }
+
+        if result_code != PCP_RESULT_SUCCESS {
+            anyhow::bail!("PCP error: {}", pcp_error_string(result_code));
+        }
+
+        // For ANNOUNCE, we don't get external IP directly
+        // We'll get it from the MAP response
+        // Return gateway as placeholder
+        Ok(gateway)
+    }
+
+    /// Request a port mapping via PCP
+    pub async fn request_mapping_pcp(&mut self, lifetime_secs: u32) -> Result<u16> {
+        let gateway = self
+            .gateway
+            .ok_or_else(|| anyhow::anyhow!("No gateway configured"))?;
+
+        let gateway_v4 = match gateway {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(_) => anyhow::bail!("PCP IPv6 not yet supported"),
+        };
+
+        let local_ip = get_local_ip().await?;
+        let local_v4 = match local_ip {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(_) => anyhow::bail!("PCP requires IPv4 local address"),
+        };
+
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        let gateway_addr = SocketAddrV4::new(gateway_v4, PCP_PORT);
+
+        // Generate a random nonce for this mapping
+        let nonce: [u8; 12] = rand::random();
+
+        // Build PCP MAP request
+        let request = build_pcp_request(
+            PCP_OP_MAP,
+            &local_v4,
+            lifetime_secs,
+            self.internal_port,
+            self.internal_port, // Suggest same external port
+            Some(&nonce),
+        );
+
+        socket.send_to(&request, gateway_addr).await?;
+
+        // Wait for response
+        let mut buf = [0u8; 60];
+        let (len, _src) = timeout(self.timeout, socket.recv_from(&mut buf)).await??;
+
+        if len < 60 {
+            anyhow::bail!("PCP MAP response too short: {} bytes", len);
+        }
+
+        // Parse response header
+        let version = buf[0];
+        let r_opcode = buf[1];
+        let result_code = buf[3];
+        let lifetime = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+
+        if version != PCP_VERSION {
+            anyhow::bail!("Unexpected PCP version: {}", version);
+        }
+
+        if r_opcode & 0x80 == 0 {
+            anyhow::bail!("PCP response missing R bit");
+        }
+
+        let opcode = r_opcode & 0x7F;
+        if opcode != PCP_OP_MAP {
+            anyhow::bail!("Unexpected PCP opcode in response: {}", opcode);
+        }
+
+        if result_code != PCP_RESULT_SUCCESS {
+            anyhow::bail!("PCP MAP error: {}", pcp_error_string(result_code));
+        }
+
+        // Parse MAP-specific response (starts at byte 24)
+        // Nonce: bytes 24-35
+        // Protocol: byte 36
+        // Reserved: bytes 37-39
+        // Internal port: bytes 40-41
+        // Assigned external port: bytes 42-43
+        // Assigned external IP: bytes 44-59 (IPv6-mapped IPv4)
+
+        let internal_port = u16::from_be_bytes([buf[40], buf[41]]);
+        let external_port = u16::from_be_bytes([buf[42], buf[43]]);
+
+        // External IP is IPv6-mapped IPv4 in bytes 44-59
+        // For IPv4, it's ::ffff:a.b.c.d, so the IPv4 is in last 4 bytes
+        let external_ip = Ipv4Addr::new(buf[56], buf[57], buf[58], buf[59]);
+
+        info!(
+            "PCP mapping created: internal {} -> external {}:{}, lifetime {}s",
+            internal_port, external_ip, external_port, lifetime
+        );
+
+        // Update external address if we got one
+        if !external_ip.is_unspecified() {
+            self.capabilities.external_addr = Some(IpAddr::V4(external_ip));
+        }
+
+        // Store the mapping
+        self.current_mapping = Some(PortMapping {
+            protocol: PortMapProtocol::Pcp,
+            internal_port,
+            external_port,
+            created_at: Instant::now(),
+            lifetime: Duration::from_secs(lifetime as u64),
+            gateway,
+        });
+
+        Ok(external_port)
+    }
+
+    /// Release a PCP port mapping
+    async fn release_pcp(&self, mapping: &PortMapping) -> Result<()> {
+        let gateway = mapping.gateway;
+        let gateway_v4 = match gateway {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(_) => return Ok(()), // Can't release IPv6 via this implementation
+        };
+
+        let local_ip = get_local_ip().await?;
+        let local_v4 = match local_ip {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(_) => return Ok(()),
+        };
+
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        let gateway_addr = SocketAddrV4::new(gateway_v4, PCP_PORT);
+
+        // Generate a random nonce
+        let nonce: [u8; 12] = rand::random();
+
+        // Build PCP MAP request with lifetime=0 to delete
+        let request = build_pcp_request(
+            PCP_OP_MAP,
+            &local_v4,
+            0, // lifetime=0 means delete
+            mapping.internal_port,
+            mapping.external_port,
+            Some(&nonce),
+        );
+
+        socket.send_to(&request, gateway_addr).await?;
+
+        info!(
+            "Released PCP mapping: {} -> {}",
+            mapping.internal_port, mapping.external_port
+        );
+
+        Ok(())
+    }
 }
 
 // ============================================================================
-// UPnP Implementation
+// PCP Implementation (RFC 6887)
 // ============================================================================
+
+/// Build a PCP request packet
+fn build_pcp_request(
+    opcode: u8,
+    client_ip: &Ipv4Addr,
+    lifetime: u32,
+    internal_port: u16,
+    suggested_external_port: u16,
+    nonce: Option<&[u8; 12]>,
+) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(60);
+
+    // PCP Header (24 bytes)
+    packet.push(PCP_VERSION);           // Version
+    packet.push(opcode);                // Opcode (R=0 for request)
+    packet.extend_from_slice(&[0, 0]);  // Reserved
+    packet.extend_from_slice(&lifetime.to_be_bytes()); // Requested lifetime
+
+    // Client IP address (16 bytes, IPv4-mapped IPv6)
+    // ::ffff:a.b.c.d format
+    packet.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff]);
+    packet.extend_from_slice(&client_ip.octets());
+
+    // For MAP opcode, add MAP-specific payload (36 bytes)
+    if opcode == PCP_OP_MAP {
+        // Nonce (12 bytes)
+        if let Some(n) = nonce {
+            packet.extend_from_slice(n);
+        } else {
+            packet.extend_from_slice(&[0u8; 12]);
+        }
+
+        // Protocol (1 byte) - UDP = 17
+        packet.push(PCP_PROTO_UDP);
+
+        // Reserved (3 bytes)
+        packet.extend_from_slice(&[0, 0, 0]);
+
+        // Internal port (2 bytes)
+        packet.extend_from_slice(&internal_port.to_be_bytes());
+
+        // Suggested external port (2 bytes)
+        packet.extend_from_slice(&suggested_external_port.to_be_bytes());
+
+        // Suggested external IP (16 bytes) - all zeros means "any"
+        packet.extend_from_slice(&[0u8; 16]);
+    }
+
+    packet
+}
+
+/// Get PCP error string
+fn pcp_error_string(code: u8) -> &'static str {
+    match code {
+        PCP_RESULT_SUCCESS => "Success",
+        PCP_RESULT_UNSUPP_VERSION => "Unsupported version",
+        PCP_RESULT_NOT_AUTHORIZED => "Not authorized",
+        PCP_RESULT_MALFORMED_REQUEST => "Malformed request",
+        PCP_RESULT_UNSUPP_OPCODE => "Unsupported opcode",
+        PCP_RESULT_UNSUPP_OPTION => "Unsupported option",
+        PCP_RESULT_MALFORMED_OPTION => "Malformed option",
+        PCP_RESULT_NETWORK_FAILURE => "Network failure",
+        PCP_RESULT_NO_RESOURCES => "No resources",
+        PCP_RESULT_UNSUPP_PROTOCOL => "Unsupported protocol",
+        PCP_RESULT_ADDRESS_MISMATCH => "Address mismatch",
+        _ => "Unknown error",
+    }
+}
 
 /// Discover UPnP IGD devices via SSDP
 async fn upnp_discover(search_target: &str, timeout_duration: Duration) -> Result<UpnpDevice> {
@@ -1135,5 +1471,93 @@ mod tests {
         assert!(caps.gateway_addr.is_none());
         assert!(caps.external_addr.is_none());
         assert!(caps.upnp_device.is_none());
+    }
+
+    #[test]
+    fn test_pcp_error_strings() {
+        assert_eq!(pcp_error_string(PCP_RESULT_SUCCESS), "Success");
+        assert_eq!(pcp_error_string(PCP_RESULT_UNSUPP_VERSION), "Unsupported version");
+        assert_eq!(pcp_error_string(PCP_RESULT_NOT_AUTHORIZED), "Not authorized");
+        assert_eq!(pcp_error_string(PCP_RESULT_MALFORMED_REQUEST), "Malformed request");
+        assert_eq!(pcp_error_string(PCP_RESULT_UNSUPP_OPCODE), "Unsupported opcode");
+        assert_eq!(pcp_error_string(PCP_RESULT_NETWORK_FAILURE), "Network failure");
+        assert_eq!(pcp_error_string(PCP_RESULT_NO_RESOURCES), "No resources");
+        assert_eq!(pcp_error_string(PCP_RESULT_ADDRESS_MISMATCH), "Address mismatch");
+        assert_eq!(pcp_error_string(99), "Unknown error");
+    }
+
+    #[test]
+    fn test_build_pcp_announce_request() {
+        let client_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let packet = build_pcp_request(PCP_OP_ANNOUNCE, &client_ip, 0, 0, 0, None);
+
+        // ANNOUNCE request should be exactly 24 bytes (header only)
+        assert_eq!(packet.len(), 24);
+
+        // Check header fields
+        assert_eq!(packet[0], PCP_VERSION);  // Version
+        assert_eq!(packet[1], PCP_OP_ANNOUNCE);  // Opcode
+
+        // Client IP starts at byte 8 (16 bytes for IPv6-mapped IPv4)
+        // Structure: bytes 0-1: version/opcode, 2-3: reserved, 4-7: lifetime, 8-23: client IP
+        // IPv4-mapped IPv6 format: 10 zero bytes + 0xff 0xff + 4 IPv4 bytes
+        assert_eq!(&packet[8..18], &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);  // 10 zero bytes
+        assert_eq!(&packet[18..20], &[0xff, 0xff]);  // ::ffff: marker
+        assert_eq!(&packet[20..24], &[192, 168, 1, 100]);  // IPv4 address
+    }
+
+    #[test]
+    fn test_build_pcp_map_request() {
+        let client_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let nonce: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let packet = build_pcp_request(
+            PCP_OP_MAP,
+            &client_ip,
+            7200,   // lifetime
+            51820,  // internal port
+            51820,  // suggested external port
+            Some(&nonce),
+        );
+
+        // MAP request should be 60 bytes (24 header + 36 MAP payload)
+        assert_eq!(packet.len(), 60);
+
+        // Check header fields
+        assert_eq!(packet[0], PCP_VERSION);
+        assert_eq!(packet[1], PCP_OP_MAP);
+
+        // Check lifetime (bytes 4-7)
+        let lifetime = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+        assert_eq!(lifetime, 7200);
+
+        // Check nonce (bytes 24-35)
+        assert_eq!(&packet[24..36], &nonce);
+
+        // Check protocol (byte 36)
+        assert_eq!(packet[36], PCP_PROTO_UDP);
+
+        // Check internal port (bytes 40-41)
+        let internal_port = u16::from_be_bytes([packet[40], packet[41]]);
+        assert_eq!(internal_port, 51820);
+
+        // Check suggested external port (bytes 42-43)
+        let external_port = u16::from_be_bytes([packet[42], packet[43]]);
+        assert_eq!(external_port, 51820);
+    }
+
+    #[test]
+    fn test_pcp_mapping_expiry() {
+        let mapping = PortMapping {
+            protocol: PortMapProtocol::Pcp,
+            internal_port: 51820,
+            external_port: 51820,
+            created_at: Instant::now(),
+            lifetime: Duration::from_secs(7200),
+            gateway: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+        };
+
+        assert!(!mapping.is_expired());
+        assert!(!mapping.needs_refresh());
+        assert_eq!(mapping.protocol, PortMapProtocol::Pcp);
     }
 }
