@@ -150,6 +150,11 @@ pub struct RelayBindAck {
     pub success: bool,
     /// Session ID (if successful)
     pub session_id: Option<SessionId>,
+    /// Target peer's public key (for correlation)
+    /// SECURITY: This allows the client to properly associate the session
+    /// with the correct peer, preventing session hijacking
+    #[serde(default)]
+    pub target_key: Option<[u8; 32]>,
     /// Relay endpoint to use
     pub relay_endpoint: Option<String>,
     /// Error message (if failed)
@@ -237,6 +242,7 @@ impl RelayServer {
             return Ok(RelayBindAck {
                 success: false,
                 session_id: None,
+                target_key: Some(request.target_key),
                 relay_endpoint: None,
                 error: Some("Relay is disabled".to_string()),
             });
@@ -247,6 +253,7 @@ impl RelayServer {
             return Ok(RelayBindAck {
                 success: false,
                 session_id: None,
+                target_key: Some(request.target_key),
                 relay_endpoint: None,
                 error: Some("Maximum sessions reached".to_string()),
             });
@@ -279,6 +286,7 @@ impl RelayServer {
                 return Ok(RelayBindAck {
                     success: true,
                     session_id: Some(*session_id),
+                    target_key: Some(request.target_key),
                     relay_endpoint: None, // Will be filled by caller with actual endpoint
                     error: None,
                 });
@@ -313,6 +321,7 @@ impl RelayServer {
         Ok(RelayBindAck {
             success: true,
             session_id: Some(session_id),
+            target_key: Some(request.target_key),
             relay_endpoint: None,
             error: None,
         })

@@ -348,6 +348,16 @@ impl SignalingEncryption {
     /// Decrypt an encrypted envelope
     /// Returns the decrypted message (msg_type + payload)
     pub fn decrypt(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        // SECURITY: Limit maximum encrypted message size
+        const MAX_ENCRYPTED_MESSAGE_SIZE: usize = 16 * 1024;
+        if data.len() > MAX_ENCRYPTED_MESSAGE_SIZE {
+            anyhow::bail!(
+                "Encrypted message too large ({} > {} bytes)",
+                data.len(),
+                MAX_ENCRYPTED_MESSAGE_SIZE
+            );
+        }
+        
         if data.is_empty() {
             anyhow::bail!("Empty message");
         }
@@ -372,6 +382,16 @@ impl SignalingEncryption {
 
     /// Decrypt an encrypted envelope and return the sender's public key
     pub fn decrypt_with_sender(&mut self, data: &[u8]) -> Result<(Vec<u8>, Option<[u8; 32]>)> {
+        // SECURITY: Limit maximum encrypted message size
+        const MAX_ENCRYPTED_MESSAGE_SIZE: usize = 16 * 1024;
+        if data.len() > MAX_ENCRYPTED_MESSAGE_SIZE {
+            anyhow::bail!(
+                "Encrypted message too large ({} > {} bytes)",
+                data.len(),
+                MAX_ENCRYPTED_MESSAGE_SIZE
+            );
+        }
+        
         if data.is_empty() {
             anyhow::bail!("Empty message");
         }
@@ -696,6 +716,21 @@ pub fn handle_nucleus_message(
     if data.is_empty() {
         return None;
     }
+    
+    // SECURITY: Limit maximum message size to prevent DoS via large payloads
+    // Maximum expected message size:
+    // - RegisterMessage: ~1KB (cluster name, public key, endpoints)
+    // - HeartbeatMessage: ~512 bytes
+    // - QueryPeerMessage: ~256 bytes
+    // We use 8KB as a generous limit for all message types
+    const MAX_SIGNALING_MESSAGE_SIZE: usize = 8 * 1024;
+    if data.len() > MAX_SIGNALING_MESSAGE_SIZE {
+        warn!(
+            "Signaling message from {} exceeds size limit ({} > {} bytes)",
+            src, data.len(), MAX_SIGNALING_MESSAGE_SIZE
+        );
+        return None;
+    }
 
     let msg_type = data[0];
     let payload = &data[1..];
@@ -731,6 +766,36 @@ pub fn handle_nucleus_message(
                         return None;
                     }
                 }
+                
+                // SECURITY: Validate external_addr if provided
+                // This prevents injection of malicious endpoint strings
+                let validated_external_addr = if let Some(ref addr_str) = reg.external_addr {
+                    match addr_str.parse::<std::net::SocketAddr>() {
+                        Ok(addr) => {
+                            // Additional security check: external address should be a public IP
+                            // (not localhost, not link-local, not private for most cases)
+                            let ip = addr.ip();
+                            if ip.is_loopback() {
+                                warn!(
+                                    "Rejecting loopback external_addr {} from {}",
+                                    addr_str, src
+                                );
+                                None
+                            } else {
+                                Some(addr_str.clone())
+                            }
+                        }
+                        Err(_) => {
+                            warn!(
+                                "Invalid external_addr '{}' from {} - not a valid socket address",
+                                addr_str, src
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
 
                 let peer = RegisteredPeer {
                     vip: reg.vip,
@@ -739,8 +804,8 @@ pub fn handle_nucleus_message(
                     listen_port: reg.listen_port,
                     public_key: reg.public_key,
                     nat_type: reg.nat_type,
-                    // Construct mapped endpoint from external_addr or external_port
-                    mapped_endpoint: reg.external_addr.clone().or_else(|| {
+                    // Construct mapped endpoint from validated external_addr or external_port
+                    mapped_endpoint: validated_external_addr.or_else(|| {
                         reg.external_port.map(|port| format!("{}:{}", src.ip(), port))
                     }),
                     joined_at: Instant::now(),

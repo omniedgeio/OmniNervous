@@ -128,6 +128,23 @@ const PCP_PROTO_TCP: u8 = 6;
 // Data Structures
 // ============================================================================
 
+/// Escape special characters for XML content
+/// SECURITY: Prevents XML/SOAP injection attacks in UPnP requests
+fn xml_escape(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '&' => escaped.push_str("&amp;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 /// Port mapping capabilities detected on the network
 #[derive(Debug, Clone, Default)]
 pub struct PortMapCapabilities {
@@ -1115,6 +1132,10 @@ async fn upnp_add_port_mapping(
         UPNP_SERVICE_WAN_IP
     };
 
+    // SECURITY: Escape internal_client to prevent XML/SOAP injection
+    // An attacker-controlled IP string could otherwise inject malicious XML
+    let internal_client_escaped = xml_escape(internal_client);
+
     let soap_body = format!(
         r#"<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
@@ -1131,7 +1152,7 @@ async fn upnp_add_port_mapping(
 </u:AddPortMapping>
 </s:Body>
 </s:Envelope>"#,
-        service_urn, external_port, internal_port, internal_client, lifetime_secs
+        service_urn, external_port, internal_port, internal_client_escaped, lifetime_secs
     );
 
     let soap_action = format!("\"{}#AddPortMapping\"", service_urn);
@@ -1245,6 +1266,9 @@ pub async fn upnp_get_external_ip(device: &UpnpDevice, timeout_duration: Duratio
 // HTTP Helpers (minimal implementation for UPnP SOAP)
 // ============================================================================
 
+/// Maximum HTTP response size to prevent DoS (64KB should be plenty for UPnP responses)
+const MAX_HTTP_RESPONSE_SIZE: usize = 64 * 1024;
+
 /// Simple HTTP GET request
 async fn http_get(host: &SocketAddr, path: &str, timeout_duration: Duration) -> Result<String> {
     let mut stream = timeout(timeout_duration, TcpStream::connect(host)).await??;
@@ -1257,9 +1281,16 @@ async fn http_get(host: &SocketAddr, path: &str, timeout_duration: Duration) -> 
     stream.write_all(request.as_bytes()).await?;
 
     let mut reader = BufReader::new(stream);
-    let mut response = String::new();
+    
+    // SECURITY: Parse and validate HTTP status line
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line).await?;
+    let status_code = parse_http_status(&status_line)?;
+    if status_code < 200 || status_code >= 300 {
+        anyhow::bail!("HTTP GET failed with status {}", status_code);
+    }
 
-    // Skip headers
+    // Skip remaining headers
     let mut line = String::new();
     loop {
         line.clear();
@@ -1269,10 +1300,24 @@ async fn http_get(host: &SocketAddr, path: &str, timeout_duration: Duration) -> 
         }
     }
 
-    // Read body
-    reader.read_to_string(&mut response).await?;
+    // SECURITY: Read body with size limit to prevent DoS
+    let mut response = vec![0u8; MAX_HTTP_RESPONSE_SIZE];
+    let mut total_read = 0;
+    loop {
+        if total_read >= MAX_HTTP_RESPONSE_SIZE {
+            warn!("HTTP response exceeded {} bytes, truncating", MAX_HTTP_RESPONSE_SIZE);
+            break;
+        }
+        let n = reader.read(&mut response[total_read..]).await?;
+        if n == 0 {
+            break;
+        }
+        total_read += n;
+    }
+    response.truncate(total_read);
 
-    Ok(response)
+    String::from_utf8(response)
+        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in HTTP response: {}", e))
 }
 
 /// HTTP POST request with SOAP headers
@@ -1304,9 +1349,18 @@ Connection: close\r\n\
     stream.write_all(request.as_bytes()).await?;
 
     let mut reader = BufReader::new(stream);
-    let mut response = String::new();
+    
+    // SECURITY: Parse and validate HTTP status line
+    // Note: UPnP SOAP may return 500 for SOAP faults, which we handle in the caller
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line).await?;
+    let status_code = parse_http_status(&status_line)?;
+    // Allow 200-599 range (success and server errors with SOAP fault details)
+    if status_code < 200 || status_code >= 600 {
+        anyhow::bail!("HTTP POST failed with status {}", status_code);
+    }
 
-    // Skip HTTP status line and headers
+    // Skip remaining headers
     let mut line = String::new();
     loop {
         line.clear();
@@ -1316,10 +1370,40 @@ Connection: close\r\n\
         }
     }
 
-    // Read body
-    reader.read_to_string(&mut response).await?;
+    // SECURITY: Read body with size limit to prevent DoS
+    let mut response = vec![0u8; MAX_HTTP_RESPONSE_SIZE];
+    let mut total_read = 0;
+    loop {
+        if total_read >= MAX_HTTP_RESPONSE_SIZE {
+            warn!("SOAP response exceeded {} bytes, truncating", MAX_HTTP_RESPONSE_SIZE);
+            break;
+        }
+        let n = reader.read(&mut response[total_read..]).await?;
+        if n == 0 {
+            break;
+        }
+        total_read += n;
+    }
+    response.truncate(total_read);
 
-    Ok(response)
+    String::from_utf8(response)
+        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in SOAP response: {}", e))
+}
+
+/// Parse HTTP status code from status line
+/// SECURITY: Validates the status line format
+fn parse_http_status(status_line: &str) -> Result<u16> {
+    // HTTP/1.x 200 OK
+    let parts: Vec<&str> = status_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        anyhow::bail!("Invalid HTTP status line: {}", status_line.trim());
+    }
+    if !parts[0].starts_with("HTTP/") {
+        anyhow::bail!("Invalid HTTP version in status line: {}", parts[0]);
+    }
+    parts[1]
+        .parse::<u16>()
+        .map_err(|_| anyhow::anyhow!("Invalid HTTP status code: {}", parts[1]))
 }
 
 /// Get the local IP address
