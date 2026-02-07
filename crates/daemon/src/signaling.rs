@@ -117,6 +117,12 @@ pub struct RegisterMessage {
     /// NAT type detected by the edge (for peer selection optimization)
     #[serde(default)]
     pub nat_type: Option<NatType>,
+    /// External port from NAT-PMP/UPnP/PCP port mapping (if available)
+    #[serde(default)]
+    pub external_port: Option<u16>,
+    /// External address from port mapping (if different from observed src)
+    #[serde(default)]
+    pub external_addr: Option<String>,
     pub hmac_tag: Option<[u8; 32]>,
 }
 
@@ -178,6 +184,9 @@ pub struct PeerInfo {
     /// NAT type of this peer (helps with connection strategy)
     #[serde(default)]
     pub nat_type: Option<NatType>,
+    /// Port-mapped endpoint (if available, may be more reachable)
+    #[serde(default)]
+    pub mapped_endpoint: Option<String>,
 }
 
 /// Response to QUERY_PEER
@@ -407,6 +416,8 @@ pub struct RegisteredPeer {
     pub public_key: [u8; 32],
     /// NAT type reported by this peer
     pub nat_type: Option<NatType>,
+    /// Port-mapped endpoint (from NAT-PMP/UPnP/PCP)
+    pub mapped_endpoint: Option<String>,
     pub joined_at: Instant, // For "recent peers" calculation
     pub last_seen: Instant,
 }
@@ -501,6 +512,7 @@ impl NucleusState {
                         endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
                         public_key: p.public_key,
                         nat_type: p.nat_type,
+                        mapped_endpoint: p.mapped_endpoint.clone(),
                     })
                     .collect()
             })
@@ -538,6 +550,7 @@ impl NucleusState {
                 endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
                 public_key: p.public_key,
                 nat_type: p.nat_type,
+                mapped_endpoint: p.mapped_endpoint.clone(),
             })
             .collect();
 
@@ -571,6 +584,7 @@ impl NucleusState {
                 endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
                 public_key: p.public_key,
                 nat_type: p.nat_type,
+                mapped_endpoint: p.mapped_endpoint.clone(),
             })
     }
 
@@ -585,6 +599,7 @@ impl NucleusState {
                     endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
                     public_key: p.public_key,
                     nat_type: p.nat_type,
+                    mapped_endpoint: p.mapped_endpoint.clone(),
                 })
             })
         })
@@ -724,6 +739,10 @@ pub fn handle_nucleus_message(
                     listen_port: reg.listen_port,
                     public_key: reg.public_key,
                     nat_type: reg.nat_type,
+                    // Construct mapped endpoint from external_addr or external_port
+                    mapped_endpoint: reg.external_addr.clone().or_else(|| {
+                        reg.external_port.map(|port| format!("{}:{}", src.ip(), port))
+                    }),
                     joined_at: Instant::now(),
                     last_seen: Instant::now(),
                 };
@@ -979,6 +998,10 @@ pub struct NucleusClient {
     secret: Option<String>,
     /// NAT type detected for this client
     nat_type: Option<NatType>,
+    /// External port from port mapping (NAT-PMP/UPnP/PCP)
+    external_port: Option<u16>,
+    /// External address from port mapping
+    external_addr: Option<String>,
     /// Shared runtime state for status queries
     runtime_state: RuntimeState,
 }
@@ -1008,6 +1031,8 @@ impl NucleusClient {
             public_key,
             secret,
             nat_type: None,
+            external_port: None,
+            external_addr: None,
             runtime_state: RuntimeState::new(),
         })
     }
@@ -1038,6 +1063,8 @@ impl NucleusClient {
             public_key,
             secret,
             nat_type: None,
+            external_port: None,
+            external_addr: None,
             runtime_state: RuntimeState::new(),
         })
     }
@@ -1070,6 +1097,8 @@ impl NucleusClient {
             public_key,
             secret,
             nat_type: None,
+            external_port: None,
+            external_addr: None,
             runtime_state,
         })
     }
@@ -1102,6 +1131,8 @@ impl NucleusClient {
             public_key,
             secret,
             nat_type: None,
+            external_port: None,
+            external_addr: None,
             runtime_state,
         })
     }
@@ -1121,6 +1152,26 @@ impl NucleusClient {
         self.nat_type
     }
 
+    /// Set the external port from port mapping (NAT-PMP/UPnP/PCP)
+    pub fn set_external_port(&mut self, port: u16) {
+        self.external_port = Some(port);
+    }
+
+    /// Set the external address from port mapping
+    pub fn set_external_addr(&mut self, addr: String) {
+        self.external_addr = Some(addr);
+    }
+
+    /// Get the external port (if port mapping is active)
+    pub fn external_port(&self) -> Option<u16> {
+        self.external_port
+    }
+
+    /// Get the external address (if port mapping is active)
+    pub fn external_addr(&self) -> Option<&str> {
+        self.external_addr.as_deref()
+    }
+
     /// Send registration to nucleus
     pub async fn register(&self, socket: &UdpSocket) -> Result<()> {
         let mut msg = RegisterMessage {
@@ -1130,6 +1181,8 @@ impl NucleusClient {
             listen_port: self.listen_port,
             public_key: self.public_key,
             nat_type: self.nat_type,
+            external_port: self.external_port,
+            external_addr: self.external_addr.clone(),
             hmac_tag: None,
         };
 
