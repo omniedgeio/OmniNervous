@@ -1,5 +1,104 @@
 # Release Notes
 
+## v0.6.0: NAT Traversal Enhancement & Security Hardening
+
+**Date:** 2026-02-06
+
+This major release delivers comprehensive NAT traversal capabilities with port mapping support (NAT-PMP, UPnP IGD, PCP) and extensive security hardening. The release addresses all critical and high-severity security issues identified during code review.
+
+### 🚀 New Features
+
+#### Port Mapping Support
+*   **NAT-PMP (RFC 6886)**: Automatic port mapping for Apple/compatible routers.
+*   **UPnP IGD**: SSDP discovery + SOAP control for consumer routers.
+*   **PCP (RFC 6887)**: Port Control Protocol for modern NAT gateways.
+*   **Auto-Discovery**: Automatic protocol detection and fallback chain.
+*   **Mapping Advertisement**: External port/address advertised via signaling.
+
+#### Relay Infrastructure
+*   **Relay Server**: Production-ready relay for symmetric NAT scenarios.
+*   **Relay Client**: Automatic fallback when direct P2P fails.
+*   **Session Correlation**: Secure session association using `target_key`.
+
+### 🛡️ Security Hardening
+
+#### Critical Fixes
+| Issue | Fix | Impact |
+|:---|:---|:---|
+| XML/SOAP Injection | Added `xml_escape()` for UPnP requests | Prevents router command injection |
+| PCP Nonce Validation | RFC 6887 Section 8.3 compliance | Prevents replay attacks |
+| External Address Validation | Socket address parsing + loopback rejection | Prevents endpoint spoofing |
+
+#### High-Severity Fixes
+| Issue | Fix | Impact |
+|:---|:---|:---|
+| UDP Source Validation | Verify NAT-PMP/PCP response sources | Prevents response spoofing |
+| HTTP Status Validation | Parse and validate HTTP status codes | Prevents malformed response attacks |
+| Bounded HTTP Response | 64KB limit on UPnP responses | Prevents memory exhaustion DoS |
+| Relay Session Association | `target_key` in RelayBindAck | Prevents session hijacking |
+
+#### Medium-Severity Fixes
+| Issue | Fix | Impact |
+|:---|:---|:---|
+| CBOR Size Limits | 8KB signaling, 16KB encrypted messages | Prevents oversized payload DoS |
+
+### 📊 New Modules
+
+| Module | Description |
+|:---|:---|
+| `portmap.rs` | NAT-PMP, UPnP IGD, and PCP port mapping client |
+| `relay.rs` | Relay server and client for symmetric NAT fallback |
+
+### 🛠️ API Changes
+
+#### RelayBindAck (relay.rs)
+```rust
+pub struct RelayBindAck {
+    pub success: bool,
+    pub session_id: Option<SessionId>,
+    pub target_key: Option<[u8; 32]>,  // NEW: For secure session correlation
+    pub relay_endpoint: Option<String>,
+    pub error: Option<String>,
+}
+```
+
+#### RegisterMessage (signaling.rs)
+```rust
+pub struct RegisterMessage {
+    // ... existing fields ...
+    pub external_port: Option<u16>,    // NEW: Port mapping external port
+    pub external_addr: Option<String>, // NEW: Port mapping external address
+}
+```
+
+### 📈 Code Changes
+
+| File | Change |
+|:---|:---|
+| `portmap.rs` | Added `xml_escape()` for SOAP XML content |
+| `portmap.rs` | Added `MAX_HTTP_RESPONSE_SIZE` (64KB) constant |
+| `portmap.rs` | Added `parse_http_status()` for HTTP validation |
+| `portmap.rs` | PCP nonce validation (RFC 6887 Section 8.3) |
+| `portmap.rs` | UDP source address validation for NAT-PMP/PCP |
+| `relay.rs` | Added `target_key` field to `RelayBindAck` |
+| `signaling.rs` | Added `external_addr` validation (socket address format) |
+| `signaling.rs` | Added `MAX_SIGNALING_MESSAGE_SIZE` (8KB) limit |
+| `signaling.rs` | Added `MAX_ENCRYPTED_MESSAGE_SIZE` (16KB) limit |
+
+### 🧪 Tests
+
+*   All 81 unit tests passing
+*   15 portmap-specific tests covering NAT-PMP, UPnP, and PCP
+*   Security validation tests for nonce and source address checks
+
+### ⬆️ Upgrade Notes
+
+*   **Backward Compatible**: New `target_key` field in `RelayBindAck` is optional with `#[serde(default)]`
+*   **No Breaking Changes**: Existing configurations continue to work unchanged
+*   **Recommended**: Update relay servers first, then clients
+
+---
+
 ## v0.5.0: L2 VPN & Userspace Improvements
 
 **Date:** 2026-02-04
