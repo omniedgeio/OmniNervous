@@ -4,16 +4,17 @@
 //! Supports multiple protocols in order of preference:
 //! 1. PCP (Port Control Protocol) - RFC 6887
 //! 2. NAT-PMP (NAT Port Mapping Protocol) - RFC 6886
-//! 3. UPnP IGD (Internet Gateway Device) - Basic SSDP + SOAP
+//! 3. UPnP IGD (Internet Gateway Device) - SSDP discovery + SOAP control
 //!
 //! Port mappings allow the router to forward incoming traffic on a specific
 //! external port to our internal port, effectively creating an "open" NAT type.
 
 use anyhow::Result;
 use log::{debug, info, warn};
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::timeout;
 
 // ============================================================================
@@ -54,6 +55,36 @@ const DEFAULT_MAPPING_LIFETIME_SECS: u32 = 7200;
 const MAPPING_REFRESH_RATIO: f32 = 0.5;
 
 // ============================================================================
+// UPnP Constants
+// ============================================================================
+
+/// SSDP multicast address for UPnP discovery
+const SSDP_MULTICAST_ADDR: &str = "239.255.255.250:1900";
+
+/// SSDP search target for Internet Gateway Device (WANIPConnection)
+const SSDP_ST_WAN_IP: &str = "urn:schemas-upnp-org:service:WANIPConnection:1";
+
+/// Alternative SSDP search target (WANIPConnection v2)
+const SSDP_ST_WAN_IP_V2: &str = "urn:schemas-upnp-org:service:WANIPConnection:2";
+
+/// Alternative SSDP search target (WANPPPConnection for DSL routers)
+const SSDP_ST_WAN_PPP: &str = "urn:schemas-upnp-org:service:WANPPPConnection:1";
+
+/// SSDP M-SEARCH request template
+const SSDP_MSEARCH_TEMPLATE: &str = "M-SEARCH * HTTP/1.1\r\n\
+Host: 239.255.255.250:1900\r\n\
+Man: \"ssdp:discover\"\r\n\
+ST: {}\r\n\
+MX: 2\r\n\
+\r\n";
+
+/// UPnP SOAP action namespace for WANIPConnection
+const UPNP_SERVICE_WAN_IP: &str = "urn:schemas-upnp-org:service:WANIPConnection:1";
+
+/// UPnP SOAP action namespace for WANPPPConnection
+const UPNP_SERVICE_WAN_PPP: &str = "urn:schemas-upnp-org:service:WANPPPConnection:1";
+
+// ============================================================================
 // Data Structures
 // ============================================================================
 
@@ -70,6 +101,21 @@ pub struct PortMapCapabilities {
     pub gateway_addr: Option<IpAddr>,
     /// External IP address reported by gateway
     pub external_addr: Option<IpAddr>,
+    /// UPnP device info (if discovered)
+    pub upnp_device: Option<UpnpDevice>,
+}
+
+/// UPnP Internet Gateway Device information
+#[derive(Debug, Clone)]
+pub struct UpnpDevice {
+    /// Control URL for SOAP requests
+    pub control_url: String,
+    /// Service type (WANIPConnection or WANPPPConnection)
+    pub service_type: String,
+    /// Device location (base URL)
+    pub location: String,
+    /// Host address
+    pub host: SocketAddr,
 }
 
 /// Result of a port mapping request
@@ -194,8 +240,25 @@ impl PortMapper {
             }
         }
 
+        // Probe UPnP IGD (SSDP discovery)
+        match self.probe_upnp().await {
+            Ok(device) => {
+                // Try to get external IP via UPnP
+                if let Ok(external_ip) = upnp_get_external_ip(&device, self.timeout).await {
+                    if self.capabilities.external_addr.is_none() {
+                        self.capabilities.external_addr = Some(external_ip);
+                    }
+                    info!("UPnP IGD external IP: {}", external_ip);
+                }
+                self.capabilities.upnp = true;
+                self.capabilities.upnp_device = Some(device);
+            }
+            Err(e) => {
+                debug!("UPnP not available: {}", e);
+            }
+        }
+
         // TODO: Probe PCP (RFC 6887)
-        // TODO: Probe UPnP (SSDP discovery)
 
         Ok(self.capabilities.clone())
     }
@@ -340,8 +403,17 @@ impl PortMapper {
             }
         }
 
+        // Try UPnP
+        if self.capabilities.upnp {
+            match self.request_mapping_upnp(lifetime_secs).await {
+                Ok(port) => return Ok(port),
+                Err(e) => {
+                    warn!("UPnP mapping failed: {}", e);
+                }
+            }
+        }
+
         // TODO: Try PCP
-        // TODO: Try UPnP
 
         anyhow::bail!("No port mapping protocol available")
     }
@@ -366,8 +438,9 @@ impl PortMapper {
                 warn!("PCP refresh not implemented");
             }
             PortMapProtocol::Upnp => {
-                // TODO: Implement UPnP refresh
-                warn!("UPnP refresh not implemented");
+                // UPnP refresh is the same as creating a new mapping
+                let lifetime = mapping.lifetime.as_secs() as u32;
+                self.request_mapping_upnp(lifetime).await?;
             }
         }
 
@@ -412,7 +485,9 @@ impl PortMapper {
                 // TODO: Implement PCP release
             }
             PortMapProtocol::Upnp => {
-                // TODO: Implement UPnP release
+                if let Err(e) = self.release_upnp(&mapping).await {
+                    warn!("Failed to release UPnP mapping: {}", e);
+                }
             }
         }
 
@@ -429,6 +504,448 @@ impl PortMapper {
         }
         Ok(false)
     }
+
+    // ========================================================================
+    // UPnP Methods
+    // ========================================================================
+
+    /// Probe for UPnP IGD support via SSDP discovery
+    async fn probe_upnp(&mut self) -> Result<UpnpDevice> {
+        // Try multiple service types
+        let search_targets = [SSDP_ST_WAN_IP, SSDP_ST_WAN_IP_V2, SSDP_ST_WAN_PPP];
+
+        for st in &search_targets {
+            match upnp_discover(st, self.timeout).await {
+                Ok(device) => {
+                    info!("UPnP device discovered: {} at {}", device.service_type, device.host);
+                    return Ok(device);
+                }
+                Err(e) => {
+                    debug!("SSDP discovery for {} failed: {}", st, e);
+                }
+            }
+        }
+
+        anyhow::bail!("No UPnP IGD device found")
+    }
+
+    /// Request a port mapping via UPnP
+    pub async fn request_mapping_upnp(&mut self, lifetime_secs: u32) -> Result<u16> {
+        let device = self.capabilities.upnp_device.clone()
+            .ok_or_else(|| anyhow::anyhow!("No UPnP device discovered"))?;
+
+        // Get our local IP address
+        let local_ip = get_local_ip().await?;
+
+        // Try to map the same port first, then fall back to router-assigned
+        let external_port = upnp_add_port_mapping(
+            &device,
+            self.internal_port,
+            self.internal_port, // Try same port
+            &local_ip.to_string(),
+            lifetime_secs,
+            self.timeout,
+        ).await?;
+
+        info!(
+            "UPnP mapping created: internal {} -> external {}, lifetime {}s",
+            self.internal_port, external_port, lifetime_secs
+        );
+
+        // Store the mapping
+        self.current_mapping = Some(PortMapping {
+            protocol: PortMapProtocol::Upnp,
+            internal_port: self.internal_port,
+            external_port,
+            created_at: Instant::now(),
+            lifetime: Duration::from_secs(lifetime_secs as u64),
+            gateway: device.host.ip(),
+        });
+
+        Ok(external_port)
+    }
+
+    /// Release a UPnP port mapping
+    async fn release_upnp(&self, mapping: &PortMapping) -> Result<()> {
+        let device = self.capabilities.upnp_device.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No UPnP device for release"))?;
+
+        upnp_delete_port_mapping(device, mapping.external_port, self.timeout).await?;
+
+        info!(
+            "Released UPnP mapping: {} -> {}",
+            mapping.internal_port, mapping.external_port
+        );
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// UPnP Implementation
+// ============================================================================
+
+/// Discover UPnP IGD devices via SSDP
+async fn upnp_discover(search_target: &str, timeout_duration: Duration) -> Result<UpnpDevice> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    socket.set_broadcast(true)?;
+
+    // Build M-SEARCH request
+    let request = SSDP_MSEARCH_TEMPLATE.replace("{}", search_target);
+
+    // Send to SSDP multicast address
+    let multicast_addr: SocketAddr = SSDP_MULTICAST_ADDR.parse()?;
+    socket.send_to(request.as_bytes(), multicast_addr).await?;
+
+    // Wait for response
+    let mut buf = [0u8; 2048];
+    let (len, src) = timeout(timeout_duration, socket.recv_from(&mut buf)).await??;
+
+    let response = String::from_utf8_lossy(&buf[..len]);
+    debug!("SSDP response from {}: {}", src, response);
+
+    // Parse LOCATION header from response
+    let location = parse_ssdp_header(&response, "LOCATION")
+        .ok_or_else(|| anyhow::anyhow!("No LOCATION in SSDP response"))?;
+
+    // Parse ST (Service Type) header
+    let service_type = parse_ssdp_header(&response, "ST")
+        .unwrap_or_else(|| search_target.to_string());
+
+    // Parse location URL to get host
+    let host = parse_url_host(&location)?;
+
+    // Fetch device description to get control URL
+    let control_url = upnp_get_control_url(&location, &service_type, timeout_duration).await?;
+
+    Ok(UpnpDevice {
+        control_url,
+        service_type,
+        location,
+        host,
+    })
+}
+
+/// Parse a header value from SSDP response
+fn parse_ssdp_header(response: &str, header: &str) -> Option<String> {
+    for line in response.lines() {
+        let line_upper = line.to_uppercase();
+        let header_upper = header.to_uppercase();
+        if line_upper.starts_with(&format!("{}:", header_upper)) {
+            let value = line[header.len() + 1..].trim();
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Parse host:port from a URL
+fn parse_url_host(url: &str) -> Result<SocketAddr> {
+    // URL format: http://host:port/path
+    let url = url.trim_start_matches("http://").trim_start_matches("https://");
+    let host_port = url.split('/').next().unwrap_or(url);
+
+    // Parse host:port
+    if let Ok(addr) = host_port.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+
+    // Try adding default port 80
+    if !host_port.contains(':') {
+        if let Ok(addr) = format!("{}:80", host_port).parse::<SocketAddr>() {
+            return Ok(addr);
+        }
+    }
+
+    anyhow::bail!("Could not parse URL host: {}", url)
+}
+
+/// Fetch UPnP device description and extract control URL
+async fn upnp_get_control_url(location: &str, service_type: &str, timeout_duration: Duration) -> Result<String> {
+    let host = parse_url_host(location)?;
+    let path = location.split(&format!("{}", host)).nth(1).unwrap_or("/");
+
+    // Fetch device description XML
+    let xml = http_get(&host, path, timeout_duration).await?;
+
+    // Parse control URL from XML (simple string search, not full XML parsing)
+    // Look for the serviceType and then the controlURL
+    let service_marker = format!("<serviceType>{}</serviceType>", service_type);
+    
+    // Also check without version number suffix
+    let base_service = service_type.trim_end_matches(char::is_numeric).trim_end_matches(':');
+    let alt_markers = [
+        service_marker.clone(),
+        format!("<serviceType>{}1</serviceType>", base_service),
+        format!("<serviceType>{}2</serviceType>", base_service),
+    ];
+
+    for marker in &alt_markers {
+        if let Some(service_idx) = xml.find(marker) {
+            // Find controlURL after this service definition
+            if let Some(control_start) = xml[service_idx..].find("<controlURL>") {
+                let control_section = &xml[service_idx + control_start..];
+                if let Some(control_end) = control_section.find("</controlURL>") {
+                    let control_url = &control_section[12..control_end];
+                    
+                    // Make absolute URL if relative
+                    let full_url = if control_url.starts_with('/') {
+                        control_url.to_string()
+                    } else if control_url.starts_with("http") {
+                        // Extract path from full URL
+                        if let Some(path_start) = control_url.find(&format!("{}", host.ip())) {
+                            control_url[path_start..].split('/').skip(1).collect::<Vec<_>>().join("/")
+                        } else {
+                            control_url.to_string()
+                        }
+                    } else {
+                        format!("/{}", control_url)
+                    };
+
+                    debug!("Found UPnP control URL: {}", full_url);
+                    return Ok(full_url);
+                }
+            }
+        }
+    }
+
+    // Try common default paths
+    for default_path in &["/ctl/IPConn", "/upnp/control/WANIPConnection", "/upnp/control/WANIPConn1"] {
+        debug!("Trying default control URL: {}", default_path);
+        return Ok(default_path.to_string());
+    }
+
+    anyhow::bail!("Could not find control URL in device description")
+}
+
+/// Add a UPnP port mapping via SOAP
+async fn upnp_add_port_mapping(
+    device: &UpnpDevice,
+    internal_port: u16,
+    external_port: u16,
+    internal_client: &str,
+    lifetime_secs: u32,
+    timeout_duration: Duration,
+) -> Result<u16> {
+    let service_urn = if device.service_type.contains("PPP") {
+        UPNP_SERVICE_WAN_PPP
+    } else {
+        UPNP_SERVICE_WAN_IP
+    };
+
+    let soap_body = format!(
+        r#"<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+<s:Body>
+<u:AddPortMapping xmlns:u="{}">
+<NewRemoteHost></NewRemoteHost>
+<NewExternalPort>{}</NewExternalPort>
+<NewProtocol>UDP</NewProtocol>
+<NewInternalPort>{}</NewInternalPort>
+<NewInternalClient>{}</NewInternalClient>
+<NewEnabled>1</NewEnabled>
+<NewPortMappingDescription>OmniEdge VPN</NewPortMappingDescription>
+<NewLeaseDuration>{}</NewLeaseDuration>
+</u:AddPortMapping>
+</s:Body>
+</s:Envelope>"#,
+        service_urn, external_port, internal_port, internal_client, lifetime_secs
+    );
+
+    let soap_action = format!("\"{}#AddPortMapping\"", service_urn);
+
+    let response = http_soap_request(
+        &device.host,
+        &device.control_url,
+        &soap_action,
+        &soap_body,
+        timeout_duration,
+    ).await?;
+
+    // Check for error in response
+    if response.contains("<errorCode>") {
+        // Extract error code
+        if let Some(error_start) = response.find("<errorCode>") {
+            if let Some(error_end) = response[error_start..].find("</errorCode>") {
+                let error_code = &response[error_start + 11..error_start + error_end];
+                anyhow::bail!("UPnP AddPortMapping failed: error code {}", error_code);
+            }
+        }
+        anyhow::bail!("UPnP AddPortMapping failed");
+    }
+
+    Ok(external_port)
+}
+
+/// Delete a UPnP port mapping via SOAP
+async fn upnp_delete_port_mapping(
+    device: &UpnpDevice,
+    external_port: u16,
+    timeout_duration: Duration,
+) -> Result<()> {
+    let service_urn = if device.service_type.contains("PPP") {
+        UPNP_SERVICE_WAN_PPP
+    } else {
+        UPNP_SERVICE_WAN_IP
+    };
+
+    let soap_body = format!(
+        r#"<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+<s:Body>
+<u:DeletePortMapping xmlns:u="{}">
+<NewRemoteHost></NewRemoteHost>
+<NewExternalPort>{}</NewExternalPort>
+<NewProtocol>UDP</NewProtocol>
+</u:DeletePortMapping>
+</s:Body>
+</s:Envelope>"#,
+        service_urn, external_port
+    );
+
+    let soap_action = format!("\"{}#DeletePortMapping\"", service_urn);
+
+    let _ = http_soap_request(
+        &device.host,
+        &device.control_url,
+        &soap_action,
+        &soap_body,
+        timeout_duration,
+    ).await;
+
+    // Ignore errors on delete (mapping might already be gone)
+    Ok(())
+}
+
+/// Get external IP address via UPnP SOAP
+pub async fn upnp_get_external_ip(device: &UpnpDevice, timeout_duration: Duration) -> Result<IpAddr> {
+    let service_urn = if device.service_type.contains("PPP") {
+        UPNP_SERVICE_WAN_PPP
+    } else {
+        UPNP_SERVICE_WAN_IP
+    };
+
+    let soap_body = format!(
+        r#"<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+<s:Body>
+<u:GetExternalIPAddress xmlns:u="{}">
+</u:GetExternalIPAddress>
+</s:Body>
+</s:Envelope>"#,
+        service_urn
+    );
+
+    let soap_action = format!("\"{}#GetExternalIPAddress\"", service_urn);
+
+    let response = http_soap_request(
+        &device.host,
+        &device.control_url,
+        &soap_action,
+        &soap_body,
+        timeout_duration,
+    ).await?;
+
+    // Parse external IP from response
+    if let Some(ip_start) = response.find("<NewExternalIPAddress>") {
+        if let Some(ip_end) = response[ip_start..].find("</NewExternalIPAddress>") {
+            let ip_str = &response[ip_start + 22..ip_start + ip_end];
+            if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                return Ok(IpAddr::V4(ip));
+            }
+        }
+    }
+
+    anyhow::bail!("Could not parse external IP from UPnP response")
+}
+
+// ============================================================================
+// HTTP Helpers (minimal implementation for UPnP SOAP)
+// ============================================================================
+
+/// Simple HTTP GET request
+async fn http_get(host: &SocketAddr, path: &str, timeout_duration: Duration) -> Result<String> {
+    let mut stream = timeout(timeout_duration, TcpStream::connect(host)).await??;
+
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, host
+    );
+
+    stream.write_all(request.as_bytes()).await?;
+
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+
+    // Skip headers
+    let mut line = String::new();
+    loop {
+        line.clear();
+        reader.read_line(&mut line).await?;
+        if line == "\r\n" || line.is_empty() {
+            break;
+        }
+    }
+
+    // Read body
+    reader.read_to_string(&mut response).await?;
+
+    Ok(response)
+}
+
+/// HTTP POST request with SOAP headers
+async fn http_soap_request(
+    host: &SocketAddr,
+    path: &str,
+    soap_action: &str,
+    body: &str,
+    timeout_duration: Duration,
+) -> Result<String> {
+    let mut stream = timeout(timeout_duration, TcpStream::connect(host)).await??;
+
+    let request = format!(
+        "POST {} HTTP/1.1\r\n\
+Host: {}\r\n\
+Content-Type: text/xml; charset=\"utf-8\"\r\n\
+Content-Length: {}\r\n\
+SOAPAction: {}\r\n\
+Connection: close\r\n\
+\r\n\
+{}",
+        path,
+        host,
+        body.len(),
+        soap_action,
+        body
+    );
+
+    stream.write_all(request.as_bytes()).await?;
+
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+
+    // Skip HTTP status line and headers
+    let mut line = String::new();
+    loop {
+        line.clear();
+        reader.read_line(&mut line).await?;
+        if line == "\r\n" || line.is_empty() {
+            break;
+        }
+    }
+
+    // Read body
+    reader.read_to_string(&mut response).await?;
+
+    Ok(response)
+}
+
+/// Get the local IP address
+async fn get_local_ip() -> Result<IpAddr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    socket.connect("8.8.8.8:53").await?;
+    let local_addr = socket.local_addr()?;
+    Ok(local_addr.ip())
 }
 
 // ============================================================================
@@ -544,5 +1061,79 @@ mod tests {
         assert_eq!(nat_pmp_error_string(1), "Unsupported version");
         assert_eq!(nat_pmp_error_string(4), "Out of resources");
         assert_eq!(nat_pmp_error_string(99), "Unknown error");
+    }
+
+    #[test]
+    fn test_parse_ssdp_header() {
+        let response = "HTTP/1.1 200 OK\r\n\
+            LOCATION: http://192.168.1.1:5000/rootDesc.xml\r\n\
+            ST: urn:schemas-upnp-org:service:WANIPConnection:1\r\n\
+            USN: uuid:test-device\r\n\r\n";
+
+        let location = parse_ssdp_header(response, "LOCATION");
+        assert_eq!(location, Some("http://192.168.1.1:5000/rootDesc.xml".to_string()));
+
+        let st = parse_ssdp_header(response, "ST");
+        assert_eq!(st, Some("urn:schemas-upnp-org:service:WANIPConnection:1".to_string()));
+
+        let missing = parse_ssdp_header(response, "NONEXISTENT");
+        assert_eq!(missing, None);
+
+        // Test case-insensitivity
+        let location_lower = parse_ssdp_header(response, "location");
+        assert_eq!(location_lower, Some("http://192.168.1.1:5000/rootDesc.xml".to_string()));
+    }
+
+    #[test]
+    fn test_parse_url_host() {
+        // Standard URL with port
+        let host = parse_url_host("http://192.168.1.1:5000/rootDesc.xml").unwrap();
+        assert_eq!(host.ip().to_string(), "192.168.1.1");
+        assert_eq!(host.port(), 5000);
+
+        // URL without port (should default to 80)
+        let host_no_port = parse_url_host("http://192.168.1.1/rootDesc.xml").unwrap();
+        assert_eq!(host_no_port.ip().to_string(), "192.168.1.1");
+        assert_eq!(host_no_port.port(), 80);
+    }
+
+    #[test]
+    fn test_upnp_device_creation() {
+        let device = UpnpDevice {
+            control_url: "/ctl/IPConn".to_string(),
+            service_type: SSDP_ST_WAN_IP.to_string(),
+            location: "http://192.168.1.1:5000/rootDesc.xml".to_string(),
+            host: "192.168.1.1:5000".parse().unwrap(),
+        };
+
+        assert_eq!(device.control_url, "/ctl/IPConn");
+        assert!(device.service_type.contains("WANIPConnection"));
+    }
+
+    #[test]
+    fn test_upnp_mapping_expiry() {
+        let mapping = PortMapping {
+            protocol: PortMapProtocol::Upnp,
+            internal_port: 51820,
+            external_port: 51820,
+            created_at: Instant::now(),
+            lifetime: Duration::from_secs(3600),
+            gateway: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+        };
+
+        assert!(!mapping.is_expired());
+        assert!(!mapping.needs_refresh());
+        assert_eq!(mapping.protocol, PortMapProtocol::Upnp);
+    }
+
+    #[test]
+    fn test_port_map_capabilities_default() {
+        let caps = PortMapCapabilities::default();
+        assert!(!caps.nat_pmp);
+        assert!(!caps.upnp);
+        assert!(!caps.pcp);
+        assert!(caps.gateway_addr.is_none());
+        assert!(caps.external_addr.is_none());
+        assert!(caps.upnp_device.is_none());
     }
 }
