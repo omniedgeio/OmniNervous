@@ -431,12 +431,14 @@ run_test() {
     print_step "Ping over tunnel ($VIP_A → $VIP_B) with retries..."
     local ping_output=""
     local avg_latency="N/A"
+    local ping_success=false
     for attempt in 1 2 3; do
         echo "   Attempt $attempt/3..."
         ping_output=$(ssh_cmd "$NODE_A" "ping -c 5 -W 5 $VIP_B 2>&1" || echo "PING_FAILED")
         if echo "$ping_output" | grep -q "rtt"; then
             avg_latency=$(echo "$ping_output" | grep "rtt" | awk -F'/' '{print $5}')
             echo -e "  ✅ Ping: ${YELLOW}${avg_latency} ms${NC}"
+            ping_success=true
             break
         else
             echo "   Ping failed, retrying in 10s..."
@@ -453,76 +455,91 @@ run_test() {
         echo "     Check logs for peer discovery errors"
     fi
     
-    # Check WireGuard interfaces are up before iperf3
-    print_step "Verifying WireGuard interfaces before iperf3..."
-    local wg_a_up=false
-    local wg_b_up=false
-    if ssh_cmd "$NODE_A" "ip addr show omni0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
-        wg_a_up=true
-        echo "  ✅ Edge A omni0: UP"
-    else
-        echo "  ⚠️ Edge A omni0: DOWN or not found"
-    fi
-    if ssh_cmd "$NODE_B" "ip addr show omni0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
-        wg_b_up=true
-        echo "  ✅ Edge B omni0: UP"
-    else
-        echo "  ⚠️ Edge B omni0: DOWN or not found"
-    fi
-
-    # iperf3 over tunnel (only if WG is up)
-    if [[ "$wg_a_up" == "true" && "$wg_b_up" == "true" ]]; then
-        print_step "Starting iperf3 server on Edge B..."
-        ssh_cmd "$NODE_B" "nohup iperf3 -s -p 5201 > iperf_server.log 2>&1 &"
-        sleep 3
+    # Initialize throughput to 0 (will be updated if iperf3 runs)
+    local throughput_mbps="0"
     
-        print_step "Running iperf3 throughput test ($TEST_DURATION seconds) over tunnel..."
-        local iperf_json
-        iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $VIP_B -p 5201 -t $TEST_DURATION -M 1300 -P 2 --json 2>/dev/null" || echo "{}")
-        
-        local throughput_bps
-        throughput_bps=$(echo "$iperf_json" | jq '.end.sum_sent.bits_per_second // 0' 2>/dev/null || echo "0")
-        local throughput_mbps
-        throughput_mbps=$(echo "scale=2; $throughput_bps / 1000000" | bc 2>/dev/null || echo "N/A")
-        
-        if [[ "$throughput_mbps" != "N/A" && "$throughput_mbps" != "0" && "$throughput_mbps" != ".00" ]]; then
-            echo -e "  ✅ Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
+    # Only run iperf3 if ping succeeded
+    if [[ "$ping_success" == "true" ]]; then
+        # Check WireGuard interfaces are up before iperf3
+        print_step "Verifying WireGuard interfaces before iperf3..."
+        local wg_a_up=false
+        local wg_b_up=false
+        if ssh_cmd "$NODE_A" "ip addr show omni0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
+            wg_a_up=true
+            echo "  ✅ Edge A omni0: UP"
         else
-            echo -e "  ❌ iperf3 test failed (tunnel may not be active)"
-            throughput_mbps="0"
+            echo "  ⚠️ Edge A omni0: DOWN or not found"
         fi
+        if ssh_cmd "$NODE_B" "ip addr show omni0 2>/dev/null | grep -E -q 'state UP|state UNKNOWN'"; then
+            wg_b_up=true
+            echo "  ✅ Edge B omni0: UP"
+        else
+            echo "  ⚠️ Edge B omni0: DOWN or not found"
+        fi
+
+        # iperf3 over tunnel (only if WG is up)
+        if [[ "$wg_a_up" == "true" && "$wg_b_up" == "true" ]]; then
+            print_step "Starting iperf3 server on Edge B..."
+            ssh_cmd "$NODE_B" "nohup iperf3 -s -p 5201 > iperf_server.log 2>&1 &"
+            sleep 3
         
-        # =======================================================================
-        # IPv6 TUNNEL TESTS
-        # =======================================================================
-        if [[ "$TEST_IPV6" == "true" ]]; then
-            print_header "IPv6 VPN Tunnel Metrics (WireGuard: A → B)"
-            echo "   Testing IPv6 connectivity over VPN tunnel."
-            echo ""
+            print_step "Running iperf3 throughput test ($TEST_DURATION seconds) over tunnel..."
+            local iperf_json
+            iperf_json=$(ssh_cmd "$NODE_A" "iperf3 -c $VIP_B -p 5201 -t $TEST_DURATION -M 1300 -P 2 --json 2>/dev/null" || echo "{}")
             
-            # Get IPv6 VIPs from interface
-            local VIP6_A_ACTUAL
-            local VIP6_B_ACTUAL
-            VIP6_A_ACTUAL=$(ssh_cmd "$NODE_A" "ip -6 addr show omni0 2>/dev/null | grep 'inet6' | grep -v 'fe80' | awk '{print \$2}' | cut -d/ -f1 | head -1" || echo "")
-            VIP6_B_ACTUAL=$(ssh_cmd "$NODE_B" "ip -6 addr show omni0 2>/dev/null | grep 'inet6' | grep -v 'fe80' | awk '{print \$2}' | cut -d/ -f1 | head -1" || echo "")
+            local throughput_bps
+            throughput_bps=$(echo "$iperf_json" | jq '.end.sum_sent.bits_per_second // 0' 2>/dev/null || echo "0")
+            throughput_mbps=$(echo "scale=2; $throughput_bps / 1000000" | bc 2>/dev/null || echo "N/A")
             
-            if [[ -n "$VIP6_A_ACTUAL" && -n "$VIP6_B_ACTUAL" ]]; then
-                echo "Edge A IPv6: $VIP6_A_ACTUAL"
-                echo "Edge B IPv6: $VIP6_B_ACTUAL"
-                
-                # IPv6 Ping test
-                print_step "IPv6 Ping over tunnel ($VIP6_A_ACTUAL → $VIP6_B_ACTUAL)..."
-                local ping6_output
-                ping6_output=$(ssh_cmd "$NODE_A" "ping -6 -c 5 -W 5 $VIP6_B_ACTUAL 2>&1" || echo "PING_FAILED")
-                if echo "$ping6_output" | grep -q "rtt"; then
-                    avg_latency_v6=$(echo "$ping6_output" | grep "rtt" | awk -F'/' '{print $5}')
-                    echo -e "  ✅ IPv6 Ping: ${YELLOW}${avg_latency_v6} ms${NC}"
-                else
-                    avg_latency_v6="N/A"
-                    echo -e "  ⚠️ IPv6 ping failed"
-                fi
-                
-                # IPv6 iperf3 test
+            if [[ "$throughput_mbps" != "N/A" && "$throughput_mbps" != "0" && "$throughput_mbps" != ".00" ]]; then
+                echo -e "  ✅ Throughput: ${YELLOW}${throughput_mbps} Mbps${NC}"
+            else
+                echo -e "  ❌ iperf3 test failed (tunnel may not be active)"
+                throughput_mbps="0"
+            fi
+        else
+            echo -e "  ⚠️ Skipping iperf3: WireGuard interfaces not ready"
+        fi
+    else
+        echo -e "  ⚠️ Skipping iperf3: Ping test failed (no connectivity)"
+    fi
+    
+    # =======================================================================
+    # IPv6 TUNNEL TESTS
+    # =======================================================================
+    local avg_latency_v6="N/A"
+    local throughput_mbps_v6="N/A"
+    
+    if [[ "$TEST_IPV6" == "true" ]]; then
+        print_header "IPv6 VPN Tunnel Metrics (WireGuard: A → B)"
+        echo "   Testing IPv6 connectivity over VPN tunnel."
+        echo ""
+        
+        # Get IPv6 VIPs from interface
+        local VIP6_A_ACTUAL
+        local VIP6_B_ACTUAL
+        VIP6_A_ACTUAL=$(ssh_cmd "$NODE_A" "ip -6 addr show omni0 2>/dev/null | grep 'inet6' | grep -v 'fe80' | awk '{print \$2}' | cut -d/ -f1 | head -1" || echo "")
+        VIP6_B_ACTUAL=$(ssh_cmd "$NODE_B" "ip -6 addr show omni0 2>/dev/null | grep 'inet6' | grep -v 'fe80' | awk '{print \$2}' | cut -d/ -f1 | head -1" || echo "")
+        
+        if [[ -n "$VIP6_A_ACTUAL" && -n "$VIP6_B_ACTUAL" ]]; then
+            echo "Edge A IPv6: $VIP6_A_ACTUAL"
+            echo "Edge B IPv6: $VIP6_B_ACTUAL"
+            
+            # IPv6 Ping test
+            print_step "IPv6 Ping over tunnel ($VIP6_A_ACTUAL → $VIP6_B_ACTUAL)..."
+            local ping6_output
+            local ping6_success=false
+            ping6_output=$(ssh_cmd "$NODE_A" "ping -6 -c 5 -W 5 $VIP6_B_ACTUAL 2>&1" || echo "PING_FAILED")
+            if echo "$ping6_output" | grep -q "rtt"; then
+                avg_latency_v6=$(echo "$ping6_output" | grep "rtt" | awk -F'/' '{print $5}')
+                echo -e "  ✅ IPv6 Ping: ${YELLOW}${avg_latency_v6} ms${NC}"
+                ping6_success=true
+            else
+                echo -e "  ⚠️ IPv6 ping failed"
+            fi
+            
+            # IPv6 iperf3 test (only if ping succeeded)
+            if [[ "$ping6_success" == "true" ]]; then
                 print_step "Starting iperf3 server on Edge B (IPv6)..."
                 ssh_cmd "$NODE_B" "pkill iperf3 2>/dev/null; nohup iperf3 -s -p 5202 > /tmp/iperf6_server.log 2>&1 &"
                 sleep 3
@@ -544,17 +561,11 @@ run_test() {
                 
                 ssh_cmd "$NODE_B" "pkill iperf3 2>/dev/null" || true
             else
-                echo -e "  ⚠️ IPv6 not configured on VPN interfaces, skipping IPv6 tests"
-                avg_latency_v6="N/A"
-                throughput_mbps_v6="N/A"
+                echo -e "  ⚠️ Skipping IPv6 iperf3: IPv6 ping failed (no connectivity)"
             fi
         else
-            avg_latency_v6="N/A"
-            throughput_mbps_v6="N/A"
+            echo -e "  ⚠️ IPv6 not configured on VPN interfaces, skipping IPv6 tests"
         fi
-    else
-        echo -e "  ⚠️ Skipping iperf3 test - WireGuard interfaces not ready"
-        local throughput_mbps="0"
     fi
     
     # Collect logs
