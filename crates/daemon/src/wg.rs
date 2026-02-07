@@ -596,14 +596,29 @@ impl UserspaceWgControl {
         // TUN -> UDP (Encrypt)
         let reader_handle = tokio::spawn(async move {
             let mut buf = [0u8; 2048];
+            let mut packet_count: u64 = 0;
+            info!("[TUN] Reader loop started");
             loop {
                 match reader.read(&mut buf).await {
                     Ok(n) if n > 0 => {
+                        packet_count += 1;
                         let dest_ip = parse_dst_ip(&buf[..n]);
+                        
+                        // Log first few packets and then every 100th for debugging
+                        let should_log = packet_count <= 5 || packet_count % 100 == 0;
+                        
+                        if should_log {
+                            debug!("[TUN] Read packet #{}: {} bytes, dest_ip={:?}", packet_count, n, dest_ip);
+                        }
+                        
                         if let Some(ip) = dest_ip {
                             let pk_opt = {
                                 let routing = inner.routing_table.read().await;
-                                routing.get(&ip).copied()
+                                let result = routing.get(&ip).copied();
+                                if should_log {
+                                    debug!("[TUN] Routing lookup for {}: found={}", ip, result.is_some());
+                                }
+                                result
                             };
 
                             if let Some(pk) = pk_opt {
@@ -614,24 +629,59 @@ impl UserspaceWgControl {
                                         let mut dst = [0u8; 2048];
                                         match t_lock.encapsulate(&buf[..n], &mut dst) {
                                             TunnResult::WriteToNetwork(packet) => {
-                                                if let Err(e) = socket_tx.send_to(packet, ep).await
-                                                {
-                                                    error!("Failed to send to {}: {}", ep, e);
+                                                let msg_type = if !packet.is_empty() { packet[0] } else { 0 };
+                                                let type_name = match msg_type {
+                                                    1 => "HandshakeInit",
+                                                    2 => "HandshakeResponse", 
+                                                    3 => "CookieReply",
+                                                    4 => "Data",
+                                                    _ => "Unknown",
+                                                };
+                                                if should_log || msg_type <= 3 {
+                                                    info!("[WG-TX] Sending {} ({} bytes) to {}", type_name, packet.len(), ep);
+                                                }
+                                                if let Err(e) = socket_tx.send_to(packet, ep).await {
+                                                    error!("[WG-TX] Failed to send to {}: {}", ep, e);
                                                 }
                                             }
                                             TunnResult::Err(e) => {
-                                                error!("Encapsulate error: {:?}", e)
+                                                error!("[WG-TX] Encapsulate error for {}: {:?}", ip, e);
                                             }
-                                            _ => {}
+                                            TunnResult::Done => {
+                                                if should_log {
+                                                    debug!("[WG-TX] Encapsulate returned Done (no packet to send)");
+                                                }
+                                            }
+                                            _ => {
+                                                if should_log {
+                                                    debug!("[WG-TX] Encapsulate returned other result");
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        if should_log {
+                                            debug!("[TUN] Peer {} has no endpoint set", hex::encode(&pk[..8]));
                                         }
                                     }
+                                } else {
+                                    if should_log {
+                                        debug!("[TUN] Peer not found for public key");
+                                    }
                                 }
+                            } else {
+                                if should_log {
+                                    debug!("[TUN] No route to {}", ip);
+                                }
+                            }
+                        } else {
+                            if should_log {
+                                debug!("[TUN] Could not parse destination IP from packet");
                             }
                         }
                     }
                     Ok(_) => continue,
                     Err(e) => {
-                        error!("TUN read error: {}", e);
+                        error!("[TUN] Read error: {}", e);
                         break;
                     }
                 }
@@ -675,17 +725,34 @@ impl UserspaceWgControl {
             return Ok(());
         }
         let msg_type = buf[0];
+        
+        // Log incoming WireGuard packets
+        let type_name = match msg_type {
+            1 => "HandshakeInit",
+            2 => "HandshakeResponse",
+            3 => "CookieReply", 
+            4 => "Data",
+            _ => "Unknown",
+        };
+        
+        // Always log handshake messages, sample data messages
+        if msg_type <= 3 {
+            info!("[WG-RX] Received {} ({} bytes) from {}", type_name, buf.len(), src);
+        }
 
         let tunnels_to_try = match msg_type {
             1 => {
                 // Handshake Initiation: Try all sessions
                 let peers = self.inner.peers.read().await;
+                let count = peers.len();
+                debug!("[WG-RX] HandshakeInit: trying {} peer sessions", count);
                 peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
             }
             2 => {
                 // Handshake Response: Receiver index at offset 8
                 if buf.len() >= 12 {
                     let index = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                    debug!("[WG-RX] HandshakeResponse: looking up index {}", index);
                     let indices = self.inner.index_map.read().await;
                     if let Some(pk) = indices.get(&index) {
                         let peers = self.inner.peers.read().await;
@@ -694,6 +761,7 @@ impl UserspaceWgControl {
                             .map(|s| vec![s.tunnel.clone()])
                             .unwrap_or_default()
                     } else {
+                        debug!("[WG-RX] HandshakeResponse: index {} not found in index_map", index);
                         vec![]
                     }
                 } else {
@@ -712,6 +780,9 @@ impl UserspaceWgControl {
                             .map(|s| vec![s.tunnel.clone()])
                             .unwrap_or_default()
                     } else {
+                        if msg_type == 4 {
+                            debug!("[WG-RX] Data packet: index {} not found", index);
+                        }
                         vec![]
                     }
                 } else {
@@ -721,11 +792,16 @@ impl UserspaceWgControl {
             _ => vec![],
         };
 
+        if tunnels_to_try.is_empty() && msg_type <= 4 {
+            debug!("[WG-RX] No tunnels to try for {} from {}", type_name, src);
+        }
+
         for t_arc in tunnels_to_try {
             let mut t_lock = t_arc.lock().await;
             let mut dst = [0u8; 2048];
             match t_lock.decapsulate(Some(src.ip()), buf, &mut dst) {
                 TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
+                    debug!("[WG-RX] Decapsulated {} bytes to TUN", packet.len());
                     let packet_vec = packet.to_vec();
                     let tun_writer = self.inner.tun_writer.read().await;
                     if let Some(tx) = tun_writer.as_ref() {
@@ -734,19 +810,37 @@ impl UserspaceWgControl {
                     return Ok(()); // Success
                 }
                 TunnResult::WriteToNetwork(packet) => {
+                    let resp_type = if !packet.is_empty() { packet[0] } else { 0 };
+                    let resp_name = match resp_type {
+                        1 => "HandshakeInit",
+                        2 => "HandshakeResponse",
+                        3 => "CookieReply",
+                        4 => "Data",
+                        _ => "Unknown",
+                    };
+                    info!("[WG-TX] Sending {} ({} bytes) to {} in response", resp_name, packet.len(), src);
                     if let Err(e) = udp_socket.send_to(packet, src).await {
-                        error!("Failed to send handshake response: {}", e);
+                        error!("[WG-TX] Failed to send handshake response to {}: {}", src, e);
                     }
                     return Ok(()); // Handshake progression
                 }
-                TunnResult::Err(boringtun::noise::errors::WireGuardError::WrongIndex) => continue,
+                TunnResult::Err(boringtun::noise::errors::WireGuardError::WrongIndex) => {
+                    debug!("[WG-RX] WrongIndex error, trying next peer");
+                    continue;
+                }
                 TunnResult::Err(e) => {
-                    debug!("Decapsulate error: {:?}", e);
+                    debug!("[WG-RX] Decapsulate error: {:?}", e);
                     // Might be wrong peer, continue
+                }
+                TunnResult::Done => {
+                    debug!("[WG-RX] Handshake progressed (Done)");
+                    return Ok(());
                 }
                 _ => {
                     // Handshake progression or nothing, but we found the peer
+                    debug!("[WG-RX] Decapsulate returned other result");
                     return Ok(());
+                }
                 }
             }
         }
