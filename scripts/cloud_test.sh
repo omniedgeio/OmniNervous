@@ -50,6 +50,8 @@ CLUSTER_NAME="${CLUSTER_NAME:-omni-test}"
 CLUSTER_SECRET="${CLUSTER_SECRET:-}"
 STUN_SERVERS=""
 USERSPACE=false
+LOCAL_DOCKER=false
+LOCAL_DOCKER_NAME="omni-node-local"
 
 show_help() {
     cat << EOF
@@ -78,6 +80,7 @@ Options:
   --cluster       Cluster name (default: omni-test)
   --secret        Cluster secret (min 16 chars, recommended)
   --userspace     Use userspace WireGuard mode (BoringTun)
+  --local-docker  Run local nodes (e.g. localhost) in Docker (ensures Linux environment parity)
   --help          Show this help
 
 Environment Variables:
@@ -120,9 +123,13 @@ ssh_cmd() {
     local host="$1"
     shift
     if is_local "$host"; then
-        # Local execution - ignore SSH flags
-        # Use sh -c to handle complex commands and redirections
-        sudo sh -c "$*"
+        if [[ "$LOCAL_DOCKER" == "true" ]]; then
+            # Run in local Docker container
+            docker exec -t "$LOCAL_DOCKER_NAME" sh -c "$*"
+        else
+            # Native local execution
+            sudo sh -c "$*"
+        fi
     else
         ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
             ${SSH_KEY:+-i "$SSH_KEY"} \
@@ -135,15 +142,46 @@ scp_to() {
     local host="$2"
     local dest="$3"
     if is_local "$host"; then
-        # Local copy
-        # Expand ~ manually if present in dest
-        local real_dest="${dest/#\~/$HOME}"
-        mkdir -p "$(dirname "$real_dest")"
-        cp "$src" "$real_dest"
+        if [[ "$LOCAL_DOCKER" == "true" ]]; then
+            # Copy to local Docker container
+            # Resolve ~/ to /root inside the container
+            local container_dest="${dest/#\~//root}"
+            docker exec "$LOCAL_DOCKER_NAME" mkdir -p "$(dirname "$container_dest")"
+            docker cp "$src" "$LOCAL_DOCKER_NAME:$container_dest"
+        else
+            # Native local copy
+            local real_dest="${dest/#\~/$HOME}"
+            mkdir -p "$(dirname "$real_dest")"
+            cp "$src" "$real_dest"
+        fi
     else
         scp -o StrictHostKeyChecking=no \
             ${SSH_KEY:+-i "$SSH_KEY"} \
             "$src" "$SSH_USER@$host:$dest"
+    fi
+}
+
+ensure_local_docker() {
+    if [[ "$LOCAL_DOCKER" != "true" ]]; then return 0; fi
+    
+    if ! docker ps --format '{{.Names}}' | grep -q "^$LOCAL_DOCKER_NAME$"; then
+        print_step "Setting up local Docker environment ($LOCAL_DOCKER_NAME)..."
+        docker rm -f "$LOCAL_DOCKER_NAME" 2>/dev/null || true
+        
+        # Use a lightweight ubuntu image with necessary tools
+        docker run -d --name "$LOCAL_DOCKER_NAME" \
+            --privileged \
+            --cap-add=NET_ADMIN \
+            --device /dev/net/tun:/dev/net/tun \
+            ubuntu:24.04 sleep infinity
+            
+        print_step "Installing dependencies in local Docker container..."
+        docker exec "$LOCAL_DOCKER_NAME" apt-get update -qq
+        docker exec "$LOCAL_DOCKER_NAME" apt-get install -y -qq iperf3 wireguard-tools iproute2 psmisc iputils-ping sudo >/dev/null 2>&1
+        
+        # Create same directory structure as cloud
+        docker exec "$LOCAL_DOCKER_NAME" mkdir -p /root/omni-test
+        # Symlink /root/omni-test to /home/ubuntu if needed or just use consistent paths
     fi
 }
 
@@ -154,11 +192,18 @@ scp_to() {
 preflight_check() {
     print_header "Pre-flight Checks"
     
+    # Ensure local Docker if requested
+    ensure_local_docker
+    
     local errors=0
     
     # Check for local dependencies
     print_step "Checking local dependencies..."
-    for cmd in ssh scp jq bc file; do
+    local deps="ssh scp jq bc file"
+    if [[ "$LOCAL_DOCKER" == "true" ]]; then
+        deps="$deps docker"
+    fi
+    for cmd in $deps; do
         if which "$cmd" &>/dev/null; then
             echo -e "  ✅ Local $cmd found"
         else
@@ -171,28 +216,18 @@ preflight_check() {
     local SCRIPT_DIR
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     
-    # Check for pre-built binary
-    local LINUX_BINARY="$SCRIPT_DIR/omninervous-linux-amd64"
-    if [[ -f "$LINUX_BINARY" ]]; then
-        # Verify it's actually an x86_64 ELF binary
-        if file "$LINUX_BINARY" | grep -q "ELF 64-bit.*x86-64"; then
-            local binary_size
-            binary_size=$(ls -lh "$LINUX_BINARY" | awk '{print $5}')
-            echo -e "✅ Pre-built binary found: $LINUX_BINARY ($binary_size)"
-            echo "   Architecture: x86-64 ELF (correct for cloud deployment)"
-        else
-            echo -e "❌ Binary exists but is NOT x86-64 ELF!"
-            echo "   Found: $(file "$LINUX_BINARY" | cut -d: -f2)"
-            echo "   Run: ./scripts/build_linux_amd64.sh to build correct binary"
-            errors=$((errors + 1))
+    # Check for linux binaries
+    local found_linux=false
+    for bin in "$SCRIPT_DIR/omninervous-linux-amd64" "$SCRIPT_DIR/omninervous-linux-arm64"; do
+        if [[ -f "$bin" ]]; then
+            echo -e "✅ Linux binary found: $(basename "$bin")"
+            found_linux=true
         fi
-    else
-        echo -e "❌ Pre-built binary not found: $LINUX_BINARY"
-        echo ""
-        echo "   To build the binary, run:"
-        echo "   ${CYAN}./scripts/build_linux_amd64.sh${NC}"
-        echo ""
-        echo "   This will cross-compile for linux-amd64 using Docker."
+    done
+    
+    if [[ "$found_linux" == "false" ]]; then
+        print_error "No Linux binaries found in $SCRIPT_DIR"
+        echo "   Requires omninervous-linux-amd64 and/or omninervous-linux-arm64"
         errors=$((errors + 1))
     fi
     
@@ -364,18 +399,20 @@ deploy_binaries() {
     local SCRIPT_DIR
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     
-    # Check for pre-built binary in same folder
-    local LINUX_BINARY="$SCRIPT_DIR/omninervous-linux-amd64"
+    # Define linux binaries
+    local LINUX_AMD64="$SCRIPT_DIR/omninervous-linux-amd64"
+    local LINUX_ARM64="$SCRIPT_DIR/omninervous-linux-arm64"
     
-    if [ ! -f "$LINUX_BINARY" ]; then
-        print_error "Pre-built binary not found: $LINUX_BINARY"
-        echo "   Download from GitHub releases or build with:"
-        echo "   docker build -t omninervous:latest . && docker cp \$(docker create omninervous:latest):/usr/local/bin/omninervous $LINUX_BINARY"
+    # Check at least one exists
+    if [[ ! -f "$LINUX_AMD64" && ! -f "$LINUX_ARM64" ]]; then
+        print_error "No Linux binaries found in $SCRIPT_DIR"
+        echo "   Requires: omninervous-linux-amd64 and/or omninervous-linux-arm64"
         exit 1
     fi
     
-    echo -e "✅ Using pre-built binary: $LINUX_BINARY"
-    file "$LINUX_BINARY" 2>/dev/null | grep -q "x86-64" && echo "   Architecture: x86_64" || echo "   Architecture: $(file "$LINUX_BINARY" | awk -F: '{print $2}')"
+    # Detect host architecture for local deployment choices
+    local host_arch=$(uname -m)
+    echo -e "✅ Host Architecture: ${YELLOW}$host_arch${NC}"
     
     # Deploy to all nodes
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
@@ -383,7 +420,28 @@ deploy_binaries() {
         
         # Detect remote platform
         local remote_os=$(ssh_cmd "$node" "uname")
-        local TARGET_BINARY="$LINUX_BINARY"
+        local TARGET_BINARY=""
+        
+        # Binary selection logic
+        if is_local "$node" && [[ "$LOCAL_DOCKER" == "true" ]]; then
+            # We are deploying to a local Linux Docker container
+            if [[ "$host_arch" == "arm64" || "$host_arch" == "aarch64" ]]; then
+                TARGET_BINARY="$LINUX_ARM64"
+            else
+                TARGET_BINARY="$LINUX_AMD64"
+            fi
+            
+            # Fallback if preferred arch choice doesn't exist
+            if [[ ! -f "$TARGET_BINARY" ]]; then
+                TARGET_BINARY="${LINUX_AMD64:-$LINUX_ARM64}"
+                [[ ! -f "$TARGET_BINARY" ]] && TARGET_BINARY="$LINUX_ARM64"
+            fi
+            echo -e "  🐳 Local Docker detected: using Linux binary for $host_arch"
+        elif [[ "$remote_os" == "Linux" ]]; then
+            # Standard cloud Linux node (usually amd64, but we could be smarter here too)
+            TARGET_BINARY="$LINUX_AMD64"
+            if [[ ! -f "$TARGET_BINARY" ]]; then TARGET_BINARY="$LINUX_ARM64"; fi
+        fi
         
         if [[ "$remote_os" == "Darwin" ]]; then
             # Look for macOS binary in order of preference
@@ -406,6 +464,11 @@ deploy_binaries() {
                 sudo xattr -rd com.apple.quarantine "$TARGET_BINARY" 2>/dev/null || true
                 codesign -s - -f "$TARGET_BINARY" 2>/dev/null || true
             fi
+        fi
+
+        if [[ -z "$TARGET_BINARY" ]]; then
+            echo -e "  ❌ Could not determine target binary for $node (OS: $remote_os)"
+            continue
         fi
 
         # Clean up and create remote directory
@@ -871,6 +934,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --userspace)
             USERSPACE=true
+            shift
+            ;;
+        --local-docker)
+            LOCAL_DOCKER=true
             shift
             ;;
         --no-ipv6)

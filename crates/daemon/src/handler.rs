@@ -91,9 +91,9 @@ pub struct MessageHandler<'a> {
     /// Our IPv6 VIP (for disco messages, dual-stack support)
     pub our_vip_v6: Option<Ipv6Addr>,
     /// Pending disco pings awaiting responses
-    pub pending_pings: HashMap<[u8; 12], PendingPing>,
+    pub pending_pings: &'a mut HashMap<[u8; 12], PendingPing>,
     /// Active Happy Eyeballs connection races (keyed by target VIP)
-    pub pending_races: HashMap<Ipv4Addr, ActiveRace>,
+    pub pending_races: &'a mut HashMap<Ipv4Addr, ActiveRace>,
     /// Disco configuration
     pub disco_config: DiscoConfig,
     /// Relay server (for nucleus mode)

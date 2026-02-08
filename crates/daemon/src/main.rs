@@ -346,6 +346,8 @@ async fn main() -> Result<()> {
     let mut heartbeat_interval = interval(config.timing.heartbeat_interval());
     // STUN interval - detect endpoint changes from NAT rebinding
     let mut stun_interval = interval(config.timing.stun_refresh());
+    // Fast interval for edge maintenance (disco, Happy Eyeballs)
+    let mut fast_interval = interval(Duration::from_secs(1));
 
     // Bind signaling socket first
     let bind_port = if is_nucleus_mode || args.userspace {
@@ -528,31 +530,10 @@ async fn main() -> Result<()> {
     #[cfg(not(all(feature = "l2-vpn", target_os = "linux")))]
     let _l2_transport: Option<()> = None;
 
-    loop {
-        let mut handler = MessageHandler {
-            socket: &socket,
-            peer_table: &peer_table_mutex,
-            wg_api: wg_api_opt.as_mut(),
-            metrics: &_metrics,
-            nucleus_state: &mut nucleus_state,
-            nucleus_client: nucleus_client.as_ref(),
-            is_nucleus_mode,
-            secret: cluster_secret.map(|s| s.as_str()),
-            our_public_key: Some(identity.public_key_bytes()),
-            our_vip: args.vip,
-            our_vip_v6: args.vip6,
-            pending_pings: std::collections::HashMap::new(),
-            pending_races: std::collections::HashMap::new(),
-            disco_config: DiscoConfig {
-                happy_eyeballs_delay_ms: config.network.happy_eyeballs_delay_ms,
-                ..DiscoConfig::default()
-            },
-            relay_server: relay_server.as_mut(),
-            relay_client: relay_client.as_mut(),
-            #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
-            l2_transport: l2_transport.as_ref(),
-        };
+    let mut pending_pings = std::collections::HashMap::new();
+    let mut pending_races = std::collections::HashMap::new();
 
+    loop {
         tokio::select! {
             _ = signal::ctrl_c() => {
                 info!("Exiting...");
@@ -600,6 +581,40 @@ async fn main() -> Result<()> {
                     });
                 }
             }
+            _ = fast_interval.tick() => {
+                if !is_nucleus_mode {
+                    let mut handler = MessageHandler {
+                        socket: &socket,
+                        peer_table: &peer_table_mutex,
+                        wg_api: wg_api_opt.as_mut(),
+                        metrics: &_metrics,
+                        nucleus_state: &mut nucleus_state,
+                        nucleus_client: nucleus_client.as_ref(),
+                        is_nucleus_mode,
+                        secret: cluster_secret.map(|s| s.as_str()),
+                        our_public_key: Some(identity.public_key_bytes()),
+                        our_vip: args.vip,
+                        our_vip_v6: args.vip6,
+                        pending_pings: &mut pending_pings,
+                        pending_races: &mut pending_races,
+                        disco_config: DiscoConfig {
+                            happy_eyeballs_delay_ms: config.network.happy_eyeballs_delay_ms,
+                            ..DiscoConfig::default()
+                        },
+                        relay_server: relay_server.as_mut(),
+                        relay_client: relay_client.as_mut(),
+                        #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+                        l2_transport: l2_transport.as_ref(),
+                    };
+
+                    // Edge maintenance: disco pings, relay fallback, Happy Eyeballs
+                    handler.advance_pending_races().await;
+                    handler.cleanup_expired_races(Duration::from_secs(30));
+                    if let Err(e) = handler.check_relay_fallback().await {
+                        debug!("Relay fallback check failed: {}", e);
+                    }
+                }
+            }
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, src)) => {
@@ -610,6 +625,30 @@ async fn main() -> Result<()> {
 
                         if first_byte >= 0x11 {
                             // Signaling message
+                            let mut handler = MessageHandler {
+                                socket: &socket,
+                                peer_table: &peer_table_mutex,
+                                wg_api: wg_api_opt.as_mut(),
+                                metrics: &_metrics,
+                                nucleus_state: &mut nucleus_state,
+                                nucleus_client: nucleus_client.as_ref(),
+                                is_nucleus_mode,
+                                secret: cluster_secret.map(|s| s.as_str()),
+                                our_public_key: Some(identity.public_key_bytes()),
+                                our_vip: args.vip,
+                                our_vip_v6: args.vip6,
+                                pending_pings: &mut pending_pings,
+                                pending_races: &mut pending_races,
+                                disco_config: DiscoConfig {
+                                    happy_eyeballs_delay_ms: config.network.happy_eyeballs_delay_ms,
+                                    ..DiscoConfig::default()
+                                },
+                                relay_server: relay_server.as_mut(),
+                                relay_client: relay_client.as_mut(),
+                                #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+                                l2_transport: l2_transport.as_ref(),
+                            };
+
                             if let Err(e) = handler.handle_packet(pkt, src).await {
                                 error!("Error handling signaling packet from {}: {}", src, e);
                             }
@@ -623,6 +662,29 @@ async fn main() -> Result<()> {
                         } else {
                             #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
                             if first_byte == L2_ENVELOPE {
+                                let mut handler = MessageHandler {
+                                    socket: &socket,
+                                    peer_table: &peer_table_mutex,
+                                    wg_api: wg_api_opt.as_mut(),
+                                    metrics: &_metrics,
+                                    nucleus_state: &mut nucleus_state,
+                                    nucleus_client: nucleus_client.as_ref(),
+                                    is_nucleus_mode,
+                                    secret: cluster_secret.map(|s| s.as_str()),
+                                    our_public_key: Some(identity.public_key_bytes()),
+                                    our_vip: args.vip,
+                                    our_vip_v6: args.vip6,
+                                    pending_pings: &mut pending_pings,
+                                    pending_races: &mut pending_races,
+                                    disco_config: DiscoConfig {
+                                        happy_eyeballs_delay_ms: config.network.happy_eyeballs_delay_ms,
+                                        ..DiscoConfig::default()
+                                    },
+                                    relay_server: relay_server.as_mut(),
+                                    relay_client: relay_client.as_mut(),
+                                    #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
+                                    l2_transport: l2_transport.as_ref(),
+                                };
                                 if let Err(e) = handler.handle_packet(pkt, src).await {
                                     error!("Error handling L2 packet from {}: {}", src, e);
                                 }
