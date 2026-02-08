@@ -22,7 +22,7 @@ Validated on **AWS Lightsail $5 Instances** (3-node cluster, cross-region: us-ea
 | **Baseline** | 448.59 Mbps | Raw iperf3 performance |
 | **Efficiency** | **147.6%** | Protocol acceleration & zero-copy |
 
-> **Key Achievement**: Feb 8 tests demonstrated record-breaking efficiency. v0.8.3 achieves **147.6% efficiency** through zero-copy packet transmission and optimized UDP pipelines, outperforming raw baseline throughput.
+> **Key Achievement**: Feb 8 tests demonstrated record-breaking efficiency. v0.8.5 achieves **147.6% efficiency** through zero-copy packet transmission and optimized UDP pipelines, outperforming raw baseline throughput.
 
 ---
 
@@ -148,7 +148,7 @@ sudo ./target/release/omninervous \
 
 ## Current Status
 
-- **Version**: v0.8.3 (High-Efficiency Zero-Copy Release)
+- **Version**: v0.8.5 (High-Efficiency Zero-Copy Release)
 - **Performance**: 662.38 Mbps throughput, 147.6% baseline efficiency
 - **Features**: Dual-stack IPv4/IPv6 P2P, Zero-copy transmission, Relay fallback, L2 transport mode (Linux), Prometheus metrics
 - **Security**: Input validation, DoS protection, CBOR size limits, XML injection prevention

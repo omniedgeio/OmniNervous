@@ -7,7 +7,7 @@ use crate::wg::WgInterface;
 use anyhow::Result;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use hex;
+
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};

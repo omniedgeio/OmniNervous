@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# OmniNervous Cloud-to-Cloud Test Orchestrator (v0.6.0)
+# OmniNervous Cloud-to-Cloud Test Orchestrator (v0.8.5)
 # Run from LOCAL machine, orchestrates tests between cloud instances
 # Architecture: Nucleus (signaling/relay) + Edge A + Edge B (WireGuard VPN)
 # =============================================================================
@@ -99,24 +99,52 @@ EOF
 }
 
 # =============================================================================
-# SSH Helper Functions
+# Host Helper Functions
 # =============================================================================
+
+is_local() {
+    local host="$1"
+    if [[ "$host" == "localhost" || "$host" == "127.0.0.1" ]]; then
+        return 0
+    fi
+    # Check if host is one of our local IPs (macOS/Linux compatible)
+    if command -v ifconfig &>/dev/null; then
+        if ifconfig | grep -q "$host"; then return 0; fi
+    elif command -v ip &>/dev/null; then
+        if ip addr | grep -q "$host"; then return 0; fi
+    fi
+    return 1
+}
 
 ssh_cmd() {
     local host="$1"
     shift
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-        ${SSH_KEY:+-i "$SSH_KEY"} \
-        "$SSH_USER@$host" "$@"
+    if is_local "$host"; then
+        # Local execution - ignore SSH flags
+        # Use sh -c to handle complex commands and redirections
+        sudo sh -c "$*"
+    else
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+            ${SSH_KEY:+-i "$SSH_KEY"} \
+            "$SSH_USER@$host" "$@"
+    fi
 }
 
 scp_to() {
     local src="$1"
     local host="$2"
     local dest="$3"
-    scp -o StrictHostKeyChecking=no \
-        ${SSH_KEY:+-i "$SSH_KEY"} \
-        "$src" "$SSH_USER@$host:$dest"
+    if is_local "$host"; then
+        # Local copy
+        # Expand ~ manually if present in dest
+        local real_dest="${dest/#\~/$HOME}"
+        mkdir -p "$(dirname "$real_dest")"
+        cp "$src" "$real_dest"
+    else
+        scp -o StrictHostKeyChecking=no \
+            ${SSH_KEY:+-i "$SSH_KEY"} \
+            "$src" "$SSH_USER@$host:$dest"
+    fi
 }
 
 # =============================================================================
@@ -198,6 +226,11 @@ preflight_check() {
     # Check networking tools on edge nodes (will be installed if missing)
     print_step "Checking networking tools (iproute2) on edge nodes..."
     for node in "$NODE_A" "$NODE_B"; do
+        local node_os=$(ssh_cmd "$node" "uname")
+        if [[ "$node_os" == "Darwin" ]]; then
+            echo -e "  🍏 macOS detected on $node, using native TUN/utun (no 'ip' required)"
+            continue
+        fi
         for cmd in ip; do
             if ssh_cmd "$node" "which $cmd" &>/dev/null; then
                 echo -e "  ✅ $cmd command found on $node"
@@ -233,7 +266,14 @@ install_dependencies() {
     for node in "$NODE_A" "$NODE_B"; do
         print_step "Checking and installing dependencies on $node..."
         
-        # Detect package manager
+        # Detect remote platform
+        local remote_os=$(ssh_cmd "$node" "uname")
+        if [[ "$remote_os" == "Darwin" ]]; then
+            echo -e "  🍏 macOS detected on $node, assuming dependencies (iperf3) are installed via brew"
+            continue
+        fi
+
+        # Detect package manager (Linux)
         local pkg_manager=""
         if ssh_cmd "$node" "which apt-get" &>/dev/null; then
             pkg_manager="apt"
@@ -341,16 +381,43 @@ deploy_binaries() {
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
         print_step "Deploying to $node..."
         
+        # Detect remote platform
+        local remote_os=$(ssh_cmd "$node" "uname")
+        local TARGET_BINARY="$LINUX_BINARY"
+        
+        if [[ "$remote_os" == "Darwin" ]]; then
+            # Look for macOS binary in order of preference
+            if [[ -f "$SCRIPT_DIR/omninervous-macos-arm64" ]]; then
+                TARGET_BINARY="$SCRIPT_DIR/omninervous-macos-arm64"
+            elif [[ -f "$SCRIPT_DIR/omninervous-macos" ]]; then
+                TARGET_BINARY="$SCRIPT_DIR/omninervous-macos"
+            elif is_local "$node" && [[ -f "$SCRIPT_DIR/../target/release/omninervous" ]]; then
+                # Local build artifact
+                TARGET_BINARY="$SCRIPT_DIR/../target/release/omninervous"
+            else
+                echo "  ⚠️ macOS binary not found in $SCRIPT_DIR. Skipping deployment to $node."
+                echo "  💡 Place 'omninervous-macos-arm64' or 'omninervous-macos' in scripts/ folder."
+                continue
+            fi
+            
+            # If local macOS, fix 'killed: 137' (signature issues)
+            if is_local "$node"; then
+                echo "  🛡️  Fixing macOS binary permissions and signature for local run..."
+                sudo xattr -rd com.apple.quarantine "$TARGET_BINARY" 2>/dev/null || true
+                codesign -s - -f "$TARGET_BINARY" 2>/dev/null || true
+            fi
+        fi
+
         # Clean up and create remote directory
         ssh_cmd "$node" "rm -rf ~/omni-test && mkdir -p ~/omni-test"
         
         # Copy binary
-        scp_to "$LINUX_BINARY" "$node" "~/omni-test/omninervous"
+        scp_to "$TARGET_BINARY" "$node" "~/omni-test/omninervous"
         
         # Make executable
         ssh_cmd "$node" "chmod +x ~/omni-test/omninervous"
         
-        echo -e "✅ Deployed to $node"
+        echo -e "✅ Deployed to $node ($(basename "$TARGET_BINARY"))"
     done
 }
 
@@ -401,12 +468,14 @@ run_test() {
         # Aggressive cleanup: kill processes, clear port, delete all omni* interfaces
         ssh_cmd "$node" "sudo pkill -9 -f omninervous 2>/dev/null; \
                          sudo pkill -9 -f iperf3 2>/dev/null; \
-                         sudo fuser -k $OMNI_PORT/udp 2>/dev/null; \
-                         # Delete any interface starting with 'omni'
-                         for dev in \$(ip link show | grep -o 'omni[0-9]*'); do \
-                            sudo ip link set \$dev down 2>/dev/null || true; \
-                            sudo ip link delete \$dev 2>/dev/null || true; \
-                         done; \
+                         if command -v fuser &>/dev/null; then sudo fuser -k $OMNI_PORT/udp 2>/dev/null; fi; \
+                         # Delete any interface starting with 'omni' (Platform aware)
+                         if [[ \$(uname) == 'Linux' ]]; then \
+                             for dev in \$(ip link show | grep -o 'omni[0-9]*'); do \
+                                sudo ip link set \$dev down 2>/dev/null || true; \
+                                sudo ip link delete \$dev 2>/dev/null || true; \
+                             done; \
+                         fi; \
                          sudo rm -f /tmp/omni-*.log" || true
     done
     
@@ -416,7 +485,7 @@ run_test() {
     
     # Start Nucleus (signaling server)
     print_step "Starting Nucleus on $NUCLEUS..."
-    ssh_cmd "$NUCLEUS" "sudo sh -c \"RUST_LOG=debug nohup ./omni-test/omninervous --mode nucleus --port $OMNI_PORT $secret_args > /tmp/omni-nucleus.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NUCLEUS" "sudo sh -c \"RUST_LOG=debug nohup \$HOME/omni-test/omninervous --mode nucleus --port $OMNI_PORT $secret_args > /tmp/omni-nucleus.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Build IPv6 args if enabled
@@ -430,12 +499,12 @@ run_test() {
 
     # Start Edge A with VIP (use RUST_LOG=info for better throughput)
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
-    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_A $vip6_args_a --port $OMNI_PORT $user_flag > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup \$HOME/omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_A $vip6_args_a --port $OMNI_PORT $user_flag > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
     sleep 2
 
     # Start Edge B with VIP (IMPORTANT: use SAME port as Edge A for P2P to work)
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
-    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_B $vip6_args_b --port $OMNI_PORT $user_flag > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup \$HOME/omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_B $vip6_args_b --port $OMNI_PORT $user_flag > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Wait for WireGuard tunnel establishment (heartbeat cycle is 30s)

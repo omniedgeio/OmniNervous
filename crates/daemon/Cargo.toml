@@ -1,6 +1,6 @@
 [package]
 name = "omninervous"
-version = "0.8.3"
+version = "0.8.5"
 description = "High-Performance P2P VPN for AI & Robotics"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/omniedgeio/OmniNervous"
