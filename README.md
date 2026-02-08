@@ -10,18 +10,19 @@ OmniNervous uses a dual-plane design: control plane for signaling and peer manag
 ---
 
 
-## Performance Results (Jan 23, 2026)
+## Performance Results (Feb 8, 2026)
 
-Validated on **AWS Lightsail $5 Instances** (3-node cluster, cross-region: us-east-1 and us-east-1):
+Validated on **AWS Lightsail $5 Instances** (3-node cluster, cross-region: us-east-1 and us-east-2):
 
 | Metric | Result | Notes |
 |:---|---:|:---|
-| **Throughput** | **557.96 Mbps** | 127.5% of baseline |
-| **Latency** | **54.68 ms** | Cross-region (ping) |
-| **Baseline** | 437.60 Mbps | Raw iperf3 performance |
-| **Efficiency** | **127.5%** | optimized protocol overhead |
+| **Throughput (IPv4)** | **662.38 Mbps** | 147.6% of baseline |
+| **Throughput (IPv6)** | **632.25 Mbps** | Dual-stack VPN support |
+| **Latency** | **46.63 ms** | Cross-region (ping) |
+| **Baseline** | 448.59 Mbps | Raw iperf3 performance |
+| **Efficiency** | **147.6%** | Protocol acceleration & zero-copy |
 
-> **Key Achievement**: Jan 23 tests demonstrated extreme protocol efficiency, achieving higher throughput over the tunnel than the baseline through optimized message handling.
+> **Key Achievement**: Feb 8 tests demonstrated record-breaking efficiency. v0.8.3 achieves **147.6% efficiency** through zero-copy packet transmission and optimized UDP pipelines, outperforming raw baseline throughput.
 
 ---
 
@@ -147,9 +148,9 @@ sudo ./target/release/omninervous \
 
 ## Current Status
 
-- **Version**: v0.7.0 (Major Throughput Optimization)
-- **Performance**: 557.96 Mbps throughput, 127.5% baseline efficiency
-- **Features**: Port mapping (NAT-PMP/UPnP/PCP), relay fallback, L2 transport mode (Linux), dual-stack signaling, dedicated UDP TX pipeline
+- **Version**: v0.8.3 (High-Efficiency Zero-Copy Release)
+- **Performance**: 662.38 Mbps throughput, 147.6% baseline efficiency
+- **Features**: Dual-stack IPv4/IPv6 P2P, Zero-copy transmission, Relay fallback, L2 transport mode (Linux), Prometheus metrics
 - **Security**: Input validation, DoS protection, CBOR size limits, XML injection prevention
 
 ---

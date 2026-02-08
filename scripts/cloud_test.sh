@@ -247,7 +247,7 @@ install_dependencies() {
         fi
         echo -e "  📦 Detected package manager: $pkg_manager"
         
-        # Install wireguard-tools (for kernel mode)
+        # Install wireguard-tools and load module (for kernel mode)
         if [[ "$USERSPACE" == "false" ]]; then
             if ! ssh_cmd "$node" "which wg" &>/dev/null; then
                 echo -e "  📥 Installing wireguard-tools..."
@@ -262,6 +262,10 @@ install_dependencies() {
             else
                 echo -e "  ✅ wireguard-tools already installed"
             fi
+            
+            # Ensure module is loaded
+            echo -e "  ⚙️ Ensuring WireGuard kernel module is loaded..."
+            ssh_cmd "$node" "sudo modprobe wireguard" || echo "  ⚠️ Failed to modprobe wireguard (might be builtin)"
         fi
         
         # Install iperf3
@@ -294,19 +298,22 @@ install_dependencies() {
             echo -e "  ✅ netperf already installed"
         fi
         
-        # Install iproute2 (for ip command)
+        # Install iproute2, jq, and bc
         if ! ssh_cmd "$node" "which ip" &>/dev/null; then
-            echo -e "  📥 Installing iproute2..."
+            echo -e "  📥 Installing utility tools (iproute2, jq, bc)..."
             case $pkg_manager in
                 apt)
-                    ssh_cmd "$node" "sudo apt-get install -y -qq iproute2"
+                    ssh_cmd "$node" "sudo apt-get install -y -qq iproute2 jq bc"
                     ;;
                 dnf|yum)
-                    ssh_cmd "$node" "sudo $pkg_manager install -y iproute"
+                    ssh_cmd "$node" "sudo $pkg_manager install -y iproute jq bc"
                     ;;
             esac
         else
-            echo -e "  ✅ iproute2 already installed"
+            # Ensure jq and bc are also present even if ip is there
+            ssh_cmd "$node" "which jq &>/dev/null || (sudo $pkg_manager install -y jq || true)" || true
+            ssh_cmd "$node" "which bc &>/dev/null || (sudo $pkg_manager install -y bc || true)" || true
+            echo -e "  ✅ Utility tools (ip, jq, bc) check complete"
         fi
         
         echo -e "  ✅ Dependencies installed on $node"
