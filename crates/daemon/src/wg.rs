@@ -756,26 +756,17 @@ impl UserspaceWgControl {
                 debug!("[WG-RX] HandshakeResponse: trying {} peer sessions", count);
                 peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
             }
-            3 | 4 => {
-                // Cookie Reply (3) or Data (4): Receiver index at offset 4
-                if buf.len() >= 8 {
-                    let index = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-                    let indices = self.inner.index_map.read().await;
-                    if let Some(pk) = indices.get(&index) {
-                        let peers = self.inner.peers.read().await;
-                        peers
-                            .get(pk)
-                            .map(|s| vec![s.tunnel.clone()])
-                            .unwrap_or_default()
-                    } else {
-                        if msg_type == 4 {
-                            debug!("[WG-RX] Data packet: index {} not found", index);
-                        }
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                }
+            3 => {
+                // Cookie Reply: Try all sessions (BoringTun uses internal indices)
+                let peers = self.inner.peers.read().await;
+                debug!("[WG-RX] CookieReply: trying {} peer sessions", peers.len());
+                peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
+            }
+            4 => {
+                // Data packet: Try all sessions because BoringTun uses internal indices
+                // that don't match our index_map. BoringTun will reject packets with wrong indices.
+                let peers = self.inner.peers.read().await;
+                peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
             }
             _ => vec![],
         };
