@@ -43,8 +43,8 @@ RESULTS_DIR="./test_results"
 VIP_A="10.200.0.10"
 VIP_B="10.200.0.20"
 # Virtual IPs for P2P tunnel (IPv6 - ULA range)
-VIP6_A="fd00:omni::10"
-VIP6_B="fd00:omni::20"
+VIP6_A="fd00:200::10"
+VIP6_B="fd00:200::20"
 TEST_IPV6=true
 CLUSTER_NAME="${CLUSTER_NAME:-omni-test}"
 CLUSTER_SECRET="${CLUSTER_SECRET:-}"
@@ -318,14 +318,23 @@ run_test() {
     ssh_cmd "$NUCLEUS" "sudo sh -c \"RUST_LOG=debug nohup ./omni-test/omninervous --mode nucleus --port $OMNI_PORT $secret_args > /tmp/omni-nucleus.log 2>&1 &\" < /dev/null"
     sleep 2
     
-    # Start Edge A with VIP
+    # Build IPv6 args if enabled
+    local vip6_args_a=""
+    local vip6_args_b=""
+    if [[ "$TEST_IPV6" == "true" ]]; then
+        vip6_args_a="--vip6 $VIP6_A"
+        vip6_args_b="--vip6 $VIP6_B"
+        echo -e "🌐 IPv6 enabled: Edge A=$VIP6_A, Edge B=$VIP6_B"
+    fi
+
+    # Start Edge A with VIP (use RUST_LOG=info for better throughput)
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
-    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=debug nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_A --port $OMNI_PORT $user_flag > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_A $vip6_args_a --port $OMNI_PORT $user_flag > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
     sleep 2
 
     # Start Edge B with VIP (IMPORTANT: use SAME port as Edge A for P2P to work)
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
-    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=debug nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_B --port $OMNI_PORT $user_flag > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup ./omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_B $vip6_args_b --port $OMNI_PORT $user_flag > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Wait for WireGuard tunnel establishment (heartbeat cycle is 30s)
