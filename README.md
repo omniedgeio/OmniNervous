@@ -147,9 +147,9 @@ sudo ./target/release/omninervous \
 
 ## Current Status
 
-- **Version**: v0.6.0 (NAT Traversal & Security Hardening)
+- **Version**: v0.7.0 (Major Throughput Optimization)
 - **Performance**: 557.96 Mbps throughput, 127.5% baseline efficiency
-- **Features**: Port mapping (NAT-PMP/UPnP/PCP), relay fallback, L2 transport mode (Linux), dual-stack signaling
+- **Features**: Port mapping (NAT-PMP/UPnP/PCP), relay fallback, L2 transport mode (Linux), dual-stack signaling, dedicated UDP TX pipeline
 - **Security**: Input validation, DoS protection, CBOR size limits, XML injection prevention
 
 ---
