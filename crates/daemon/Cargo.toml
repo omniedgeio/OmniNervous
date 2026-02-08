@@ -1,6 +1,6 @@
 [package]
 name = "omninervous"
-version = "0.6.0"
+version = "0.7.0"
 description = "High-Performance P2P VPN for AI & Robotics"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/omniedgeio/OmniNervous"
@@ -53,6 +53,8 @@ crypto_box = "0.9"
 lru = "0.12"
 subtle = "2.5"
 zeroize = { version = "1.7", features = ["derive"] }
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 wintun = "0.3"
