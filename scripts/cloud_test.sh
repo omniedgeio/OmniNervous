@@ -179,14 +179,13 @@ preflight_check() {
         fi
     done
     
-    # Check iperf3 on edge nodes
+    # Check iperf3 on edge nodes (will be installed if missing)
     print_step "Checking iperf3 and sudo on edge nodes..."
     for node in "$NODE_A" "$NODE_B"; do
         if ssh_cmd "$node" "which iperf3" &>/dev/null; then
             echo -e "  ✅ iperf3 installed on $node"
         else
-            echo -e "  ❌ iperf3 not installed on $node"
-            errors=$((errors + 1))
+            echo -e "  ⚠️ iperf3 not installed on $node (will be installed)"
         fi
         
         if ssh_cmd "$node" "sudo -n true" &>/dev/null; then
@@ -196,22 +195,22 @@ preflight_check() {
         fi
     done
     
-    # Check networking tools on edge nodes
+    # Check networking tools on edge nodes (will be installed if missing)
     print_step "Checking networking tools (iproute2) on edge nodes..."
     for node in "$NODE_A" "$NODE_B"; do
         for cmd in ip; do
             if ssh_cmd "$node" "which $cmd" &>/dev/null; then
                 echo -e "  ✅ $cmd command found on $node"
             else
-                echo -e "  ❌ $cmd command NOT found on $node"
-                errors=$((errors + 1))
+                echo -e "  ⚠️ $cmd command NOT found on $node (will be installed)"
             fi
         done
         
         if [[ "$USERSPACE" == "false" ]]; then
             if ! ssh_cmd "$node" "which wg" &>/dev/null; then
-                echo -e "  ❌ wg command NOT found on $node (required for kernel mode)"
-                errors=$((errors + 1))
+                echo -e "  ⚠️ wg command NOT found on $node (will be installed for kernel mode)"
+            else
+                echo -e "  ✅ wg command found on $node"
             fi
         fi
     done
@@ -222,6 +221,98 @@ preflight_check() {
     fi
     
     echo -e "\n${GREEN}All pre-flight checks passed!${NC}"
+}
+
+# =============================================================================
+# Install Missing Dependencies
+# =============================================================================
+
+install_dependencies() {
+    print_header "Installing Missing Dependencies"
+    
+    for node in "$NODE_A" "$NODE_B"; do
+        print_step "Checking and installing dependencies on $node..."
+        
+        # Detect package manager
+        local pkg_manager=""
+        if ssh_cmd "$node" "which apt-get" &>/dev/null; then
+            pkg_manager="apt"
+        elif ssh_cmd "$node" "which dnf" &>/dev/null; then
+            pkg_manager="dnf"
+        elif ssh_cmd "$node" "which yum" &>/dev/null; then
+            pkg_manager="yum"
+        else
+            echo -e "  ⚠️ Unknown package manager on $node, skipping auto-install"
+            continue
+        fi
+        echo -e "  📦 Detected package manager: $pkg_manager"
+        
+        # Install wireguard-tools (for kernel mode)
+        if [[ "$USERSPACE" == "false" ]]; then
+            if ! ssh_cmd "$node" "which wg" &>/dev/null; then
+                echo -e "  📥 Installing wireguard-tools..."
+                case $pkg_manager in
+                    apt)
+                        ssh_cmd "$node" "sudo apt-get update -qq && sudo apt-get install -y -qq wireguard-tools"
+                        ;;
+                    dnf|yum)
+                        ssh_cmd "$node" "sudo $pkg_manager install -y wireguard-tools"
+                        ;;
+                esac
+            else
+                echo -e "  ✅ wireguard-tools already installed"
+            fi
+        fi
+        
+        # Install iperf3
+        if ! ssh_cmd "$node" "which iperf3" &>/dev/null; then
+            echo -e "  📥 Installing iperf3..."
+            case $pkg_manager in
+                apt)
+                    ssh_cmd "$node" "sudo apt-get install -y -qq iperf3"
+                    ;;
+                dnf|yum)
+                    ssh_cmd "$node" "sudo $pkg_manager install -y iperf3"
+                    ;;
+            esac
+        else
+            echo -e "  ✅ iperf3 already installed"
+        fi
+        
+        # Install netperf (optional, for latency testing)
+        if ! ssh_cmd "$node" "which netperf" &>/dev/null; then
+            echo -e "  📥 Installing netperf..."
+            case $pkg_manager in
+                apt)
+                    ssh_cmd "$node" "sudo apt-get install -y -qq netperf" || echo "  ⚠️ netperf not available"
+                    ;;
+                dnf|yum)
+                    ssh_cmd "$node" "sudo $pkg_manager install -y netperf" || echo "  ⚠️ netperf not available"
+                    ;;
+            esac
+        else
+            echo -e "  ✅ netperf already installed"
+        fi
+        
+        # Install iproute2 (for ip command)
+        if ! ssh_cmd "$node" "which ip" &>/dev/null; then
+            echo -e "  📥 Installing iproute2..."
+            case $pkg_manager in
+                apt)
+                    ssh_cmd "$node" "sudo apt-get install -y -qq iproute2"
+                    ;;
+                dnf|yum)
+                    ssh_cmd "$node" "sudo $pkg_manager install -y iproute"
+                    ;;
+            esac
+        else
+            echo -e "  ✅ iproute2 already installed"
+        fi
+        
+        echo -e "  ✅ Dependencies installed on $node"
+    done
+    
+    echo -e "\n${GREEN}Dependency installation complete!${NC}"
 }
 
 # =============================================================================
@@ -735,6 +826,7 @@ echo "Auth:      $([ -n "$CLUSTER_SECRET" ] && echo "PSK enabled" || echo "OPEN 
 
 # Run test sequence
 preflight_check
+install_dependencies
 
 if ! $SKIP_DEPLOY; then
     deploy_binaries
