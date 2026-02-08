@@ -596,84 +596,84 @@ impl UserspaceWgControl {
         let inner = self.inner.clone();
         let socket_tx = udp_socket.clone();
 
-        // TUN -> Encrypt -> UDP (direct send, v0.7.1)
-        // Direct send is faster than channel-based approach for this workload
+        // TUN -> Encrypt -> UDP (v0.8.0 - zero-copy hot path)
+        // Key optimization: avoid Vec allocation by sending from pre-allocated buffer
         let reader_handle = tokio::spawn(async move {
-            // Pre-allocate buffer for TUN reads
+            // Pre-allocate buffers for TUN reads and encryption output
             let mut buf = [0u8; 2048];
-            let mut dst = [0u8; 2048]; // Pre-allocate encryption output buffer
-            info!("[TUN] High-performance reader loop started (v0.7.1 - direct send)");
+            let mut dst = [0u8; 2048];
+            info!("[TUN] High-performance reader loop started (v0.8.0 - zero-copy)");
             
             loop {
-                match reader.read(&mut buf).await {
-                    Ok(n) if n > 0 => {
-                        let dest_ip = parse_dst_ip(&buf[..n]);
-                        
-                        if let Some(ip) = dest_ip {
-                            // Fast path: minimal lock scope
-                            let pk_opt = {
-                                let routing = inner.routing_table.read().await;
-                                routing.get(&ip).copied()
-                            };
-
-                            if let Some(pk) = pk_opt {
-                                // Get tunnel Arc and endpoint, release peers lock immediately
-                                let tunnel_and_endpoint = {
-                                    let peers = inner.peers.read().await;
-                                    peers.get(&pk).map(|s| (s.tunnel.clone(), s.endpoint))
-                                };
-
-                                if let Some((tunnel_arc, Some(ep))) = tunnel_and_endpoint {
-                                    // Encrypt with minimal lock hold time
-                                    let send_data = {
-                                        let mut t_lock = tunnel_arc.lock().await;
-                                        match t_lock.encapsulate(&buf[..n], &mut dst) {
-                                            TunnResult::WriteToNetwork(packet) => {
-                                                let msg_type = if !packet.is_empty() { packet[0] } else { 0 };
-                                                
-                                                // Handle HandshakeInit index registration
-                                                if msg_type == 1 && packet.len() >= 8 {
-                                                    let sender_index = u32::from_le_bytes([
-                                                        packet[4], packet[5], packet[6], packet[7]
-                                                    ]);
-                                                    drop(t_lock);
-                                                    let mut indices = inner.index_map.write().await;
-                                                    indices.insert(sender_index, pk);
-                                                    info!("[WG-TX] Sending HandshakeInit ({} bytes) to {}", packet.len(), ep);
-                                                }
-                                                Some((packet.to_vec(), msg_type))
-                                            }
-                                            TunnResult::Err(e) => {
-                                                error!("[WG-TX] Encapsulate error: {:?}", e);
-                                                None
-                                            }
-                                            _ => None
-                                        }
-                                    }; // tunnel lock released
-
-                                    // Direct send (no channel overhead)
-                                    if let Some((data, msg_type)) = send_data {
-                                        // Log handshakes only (types 2-3, type 1 logged above)
-                                        if msg_type > 1 && msg_type <= 3 {
-                                            let type_name = match msg_type {
-                                                2 => "HandshakeResponse",
-                                                3 => "CookieReply",
-                                                _ => "Control",
-                                            };
-                                            info!("[WG-TX] Sending {} ({} bytes) to {}", type_name, data.len(), ep);
-                                        }
-                                        // Direct UDP send - simplest and fastest
-                                        let _ = socket_tx.send_to(&data, ep).await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Ok(_) => continue,
+                // Read from TUN
+                let n = match reader.read(&mut buf).await {
+                    Ok(0) => continue,
+                    Ok(n) => n,
                     Err(e) => {
                         error!("[TUN] Read error: {}", e);
                         break;
                     }
+                };
+                
+                // Parse destination IP (fast path check)
+                let dest_ip = match parse_dst_ip(&buf[..n]) {
+                    Some(ip) => ip,
+                    None => continue,
+                };
+                
+                // Lookup peer - acquire and release locks quickly
+                let (tunnel_arc, endpoint, pk) = {
+                    // Routing lookup
+                    let pk = match inner.routing_table.read().await.get(&dest_ip).copied() {
+                        Some(pk) => pk,
+                        None => continue,
+                    };
+                    
+                    // Peer lookup
+                    match inner.peers.read().await.get(&pk) {
+                        Some(state) => match state.endpoint {
+                            Some(ep) => (state.tunnel.clone(), ep, pk),
+                            None => continue,
+                        },
+                        None => continue,
+                    }
+                }; // Both locks released
+                
+                // Encrypt - this is the CPU-intensive part
+                let mut tunnel = tunnel_arc.lock().await;
+                match tunnel.encapsulate(&buf[..n], &mut dst) {
+                    TunnResult::WriteToNetwork(packet) => {
+                        let plen = packet.len();
+                        let msg_type = if plen > 0 { packet[0] } else { 0 };
+                        
+                        // Handle HandshakeInit - need to register index
+                        if msg_type == 1 && plen >= 8 {
+                            let sender_index = u32::from_le_bytes([
+                                packet[4], packet[5], packet[6], packet[7]
+                            ]);
+                            drop(tunnel); // Release before acquiring write lock
+                            inner.index_map.write().await.insert(sender_index, pk);
+                            info!("[WG-TX] Sending HandshakeInit ({} bytes) to {}", plen, endpoint);
+                        } else {
+                            drop(tunnel); // Release ASAP for other packets
+                            // Log handshake responses only
+                            if msg_type > 1 && msg_type <= 3 {
+                                let type_name = match msg_type {
+                                    2 => "HandshakeResponse",
+                                    3 => "CookieReply",
+                                    _ => "Control",
+                                };
+                                info!("[WG-TX] Sending {} ({} bytes) to {}", type_name, plen, endpoint);
+                            }
+                        }
+                        
+                        // CRITICAL: Send directly from dst buffer, no Vec allocation!
+                        let _ = socket_tx.send_to(&dst[..plen], endpoint).await;
+                    }
+                    TunnResult::Err(e) => {
+                        error!("[WG-TX] Encapsulate error: {:?}", e);
+                    }
+                    _ => {}
                 }
             }
         });
