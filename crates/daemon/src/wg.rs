@@ -272,11 +272,11 @@ struct UserspaceInner {
     tun_task_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
-#[allow(dead_code)]  // public_key is kept for future optimizations
+#[allow(dead_code)] // public_key is kept for future optimizations
 struct PeerSession {
     tunnel: Arc<Mutex<Tunn>>,
     endpoint: Option<SocketAddr>,
-    public_key: [u8; 32],  // Store public key for reverse lookup
+    public_key: [u8; 32], // Store public key for reverse lookup
 }
 
 #[derive(Clone)]
@@ -637,7 +637,7 @@ impl UserspaceWgControl {
             let mut buf = [0u8; 2048];
             let mut dst = [0u8; 2048];
             info!("[TUN] High-performance reader loop started (v0.8.0 - zero-copy)");
-            
+
             loop {
                 // Read from TUN
                 let n = match reader.read(&mut buf).await {
@@ -648,13 +648,13 @@ impl UserspaceWgControl {
                         break;
                     }
                 };
-                
+
                 // Parse destination IP (fast path check)
                 let dest_ip = match parse_dst_ip(&buf[..n]) {
                     Some(ip) => ip,
                     None => continue,
                 };
-                
+
                 // Lookup peer - acquire and release locks quickly
                 let (tunnel_arc, endpoint, pk) = {
                     // Routing lookup
@@ -662,7 +662,7 @@ impl UserspaceWgControl {
                         Some(pk) => pk,
                         None => continue,
                     };
-                    
+
                     // Peer lookup
                     match inner.peers.read().await.get(&pk) {
                         Some(state) => match state.endpoint {
@@ -672,35 +672,40 @@ impl UserspaceWgControl {
                         None => continue,
                     }
                 }; // Both locks released
-                
+
                 // Encrypt - this is the CPU-intensive part
                 let mut tunnel = tunnel_arc.lock().await;
                 match tunnel.encapsulate(&buf[..n], &mut dst) {
                     TunnResult::WriteToNetwork(packet) => {
                         let plen = packet.len();
                         let msg_type = if plen > 0 { packet[0] } else { 0 };
-                        
+
                         // Handle HandshakeInit - need to register index
                         if msg_type == 1 && plen >= 8 {
-                            let sender_index = u32::from_le_bytes([
-                                packet[4], packet[5], packet[6], packet[7]
-                            ]);
+                            let sender_index =
+                                u32::from_le_bytes([packet[4], packet[5], packet[6], packet[7]]);
                             drop(tunnel); // Release before acquiring write lock
                             inner.index_map.write().await.insert(sender_index, pk);
-                            info!("[WG-TX] Sending HandshakeInit ({} bytes) to {}", plen, endpoint);
+                            info!(
+                                "[WG-TX] Sending HandshakeInit ({} bytes) to {}",
+                                plen, endpoint
+                            );
                         } else {
                             drop(tunnel); // Release ASAP for other packets
-                            // Log handshake responses only
+                                          // Log handshake responses only
                             if msg_type > 1 && msg_type <= 3 {
                                 let type_name = match msg_type {
                                     2 => "HandshakeResponse",
                                     3 => "CookieReply",
                                     _ => "Control",
                                 };
-                                info!("[WG-TX] Sending {} ({} bytes) to {}", type_name, plen, endpoint);
+                                info!(
+                                    "[WG-TX] Sending {} ({} bytes) to {}",
+                                    type_name, plen, endpoint
+                                );
                             }
                         }
-                        
+
                         // CRITICAL: Send directly from dst buffer, no Vec allocation!
                         let _ = socket_tx.send_to(&dst[..plen], endpoint).await;
                     }
@@ -749,19 +754,24 @@ impl UserspaceWgControl {
             return Ok(());
         }
         let msg_type = buf[0];
-        
+
         // Log incoming WireGuard packets
         let type_name = match msg_type {
             1 => "HandshakeInit",
             2 => "HandshakeResponse",
-            3 => "CookieReply", 
+            3 => "CookieReply",
             4 => "Data",
             _ => "Unknown",
         };
-        
+
         // Always log handshake messages, sample data messages
         if msg_type <= 3 {
-            info!("[WG-RX] Received {} ({} bytes) from {}", type_name, buf.len(), src);
+            info!(
+                "[WG-RX] Received {} ({} bytes) from {}",
+                type_name,
+                buf.len(),
+                src
+            );
         }
 
         let tunnels_to_try = match msg_type {
@@ -795,10 +805,16 @@ impl UserspaceWgControl {
                     if let Some(pk) = indices.get(&receiver_index) {
                         let peers = self.inner.peers.read().await;
                         if let Some(session) = peers.get(pk) {
-                            debug!("[WG-RX] Data packet: found peer via index {}", receiver_index);
+                            debug!(
+                                "[WG-RX] Data packet: found peer via index {}",
+                                receiver_index
+                            );
                             vec![session.tunnel.clone()]
                         } else {
-                            debug!("[WG-RX] Data packet: index {} maps to unknown peer", receiver_index);
+                            debug!(
+                                "[WG-RX] Data packet: index {} maps to unknown peer",
+                                receiver_index
+                            );
                             // Fallback: try all peers
                             let peers = self.inner.peers.read().await;
                             peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
@@ -842,11 +858,12 @@ impl UserspaceWgControl {
                         4 => "Data",
                         _ => "Unknown",
                     };
-                    
+
                     // When sending HandshakeResponse (as responder), register our sender_index
                     // This enables O(1) routing for incoming Data packets
                     if resp_type == 2 && packet.len() >= 8 {
-                        let sender_index = u32::from_le_bytes([packet[4], packet[5], packet[6], packet[7]]);
+                        let sender_index =
+                            u32::from_le_bytes([packet[4], packet[5], packet[6], packet[7]]);
                         // We need to find the public key for this tunnel - look it up from peers
                         let peers = self.inner.peers.read().await;
                         for (pk, session) in peers.iter() {
@@ -854,15 +871,26 @@ impl UserspaceWgControl {
                             if Arc::ptr_eq(&session.tunnel, &t_arc) {
                                 let mut indices = self.inner.index_map.write().await;
                                 indices.insert(sender_index, *pk);
-                                debug!("[WG-TX] Registered sender_index {} for peer (responder)", sender_index);
+                                debug!(
+                                    "[WG-TX] Registered sender_index {} for peer (responder)",
+                                    sender_index
+                                );
                                 break;
                             }
                         }
                     }
-                    
-                    info!("[WG-TX] Sending {} ({} bytes) to {} in response", resp_name, packet.len(), src);
+
+                    info!(
+                        "[WG-TX] Sending {} ({} bytes) to {} in response",
+                        resp_name,
+                        packet.len(),
+                        src
+                    );
                     if let Err(e) = udp_socket.send_to(packet, src).await {
-                        error!("[WG-TX] Failed to send handshake response to {}: {}", src, e);
+                        error!(
+                            "[WG-TX] Failed to send handshake response to {}: {}",
+                            src, e
+                        );
                     }
                     return Ok(()); // Handshake progression
                 }

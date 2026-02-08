@@ -357,7 +357,7 @@ impl SignalingEncryption {
                 MAX_ENCRYPTED_MESSAGE_SIZE
             );
         }
-        
+
         if data.is_empty() {
             anyhow::bail!("Empty message");
         }
@@ -391,7 +391,7 @@ impl SignalingEncryption {
                 MAX_ENCRYPTED_MESSAGE_SIZE
             );
         }
-        
+
         if data.is_empty() {
             anyhow::bail!("Empty message");
         }
@@ -716,7 +716,7 @@ pub fn handle_nucleus_message(
     if data.is_empty() {
         return None;
     }
-    
+
     // SECURITY: Limit maximum message size to prevent DoS via large payloads
     // Maximum expected message size:
     // - RegisterMessage: ~1KB (cluster name, public key, endpoints)
@@ -727,7 +727,9 @@ pub fn handle_nucleus_message(
     if data.len() > MAX_SIGNALING_MESSAGE_SIZE {
         warn!(
             "Signaling message from {} exceeds size limit ({} > {} bytes)",
-            src, data.len(), MAX_SIGNALING_MESSAGE_SIZE
+            src,
+            data.len(),
+            MAX_SIGNALING_MESSAGE_SIZE
         );
         return None;
     }
@@ -766,7 +768,7 @@ pub fn handle_nucleus_message(
                         return None;
                     }
                 }
-                
+
                 // SECURITY: Validate external_addr if provided
                 // This prevents injection of malicious endpoint strings
                 let validated_external_addr = if let Some(ref addr_str) = reg.external_addr {
@@ -776,10 +778,7 @@ pub fn handle_nucleus_message(
                             // (not localhost, not link-local, not private for most cases)
                             let ip = addr.ip();
                             if ip.is_loopback() {
-                                warn!(
-                                    "Rejecting loopback external_addr {} from {}",
-                                    addr_str, src
-                                );
+                                warn!("Rejecting loopback external_addr {} from {}", addr_str, src);
                                 None
                             } else {
                                 Some(addr_str.clone())
@@ -806,7 +805,8 @@ pub fn handle_nucleus_message(
                     nat_type: reg.nat_type,
                     // Construct mapped endpoint from validated external_addr or external_port
                     mapped_endpoint: validated_external_addr.or_else(|| {
-                        reg.external_port.map(|port| format!("{}:{}", src.ip(), port))
+                        reg.external_port
+                            .map(|port| format!("{}:{}", src.ip(), port))
                     }),
                     joined_at: Instant::now(),
                     last_seen: Instant::now(),
