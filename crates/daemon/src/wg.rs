@@ -255,9 +255,11 @@ struct UserspaceInner {
     tun_task_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
+#[allow(dead_code)]  // public_key is kept for future optimizations
 struct PeerSession {
     tunnel: Arc<Mutex<Tunn>>,
     endpoint: Option<SocketAddr>,
+    public_key: [u8; 32],  // Store public key for reverse lookup
 }
 
 #[derive(Clone)]
@@ -571,6 +573,7 @@ impl UserspaceWgControl {
                 PeerSession {
                     tunnel: Arc::new(Mutex::new(tunnel)),
                     endpoint,
+                    public_key: pk,
                 },
             );
 
@@ -637,6 +640,16 @@ impl UserspaceWgControl {
                                                     4 => "Data",
                                                     _ => "Unknown",
                                                 };
+                                                
+                                                // Extract sender_index from HandshakeInit (bytes 4-7) and store in index_map
+                                                // This enables O(1) routing for incoming Data packets
+                                                if msg_type == 1 && packet.len() >= 8 {
+                                                    let sender_index = u32::from_le_bytes([packet[4], packet[5], packet[6], packet[7]]);
+                                                    let mut indices = inner.index_map.write().await;
+                                                    indices.insert(sender_index, pk);
+                                                    debug!("[WG-TX] Registered sender_index {} for peer", sender_index);
+                                                }
+                                                
                                                 if should_log || msg_type <= 3 {
                                                     info!("[WG-TX] Sending {} ({} bytes) to {}", type_name, packet.len(), ep);
                                                 }
@@ -763,10 +776,31 @@ impl UserspaceWgControl {
                 peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
             }
             4 => {
-                // Data packet: Try all sessions because BoringTun uses internal indices
-                // that don't match our index_map. BoringTun will reject packets with wrong indices.
-                let peers = self.inner.peers.read().await;
-                peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
+                // Data packet: Use receiver_index (bytes 4-7) for O(1) direct lookup
+                // This is the key optimization - avoids O(n) trial loop
+                if buf.len() >= 8 {
+                    let receiver_index = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                    let indices = self.inner.index_map.read().await;
+                    if let Some(pk) = indices.get(&receiver_index) {
+                        let peers = self.inner.peers.read().await;
+                        if let Some(session) = peers.get(pk) {
+                            debug!("[WG-RX] Data packet: found peer via index {}", receiver_index);
+                            vec![session.tunnel.clone()]
+                        } else {
+                            debug!("[WG-RX] Data packet: index {} maps to unknown peer", receiver_index);
+                            // Fallback: try all peers
+                            let peers = self.inner.peers.read().await;
+                            peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
+                        }
+                    } else {
+                        debug!("[WG-RX] Data packet: receiver_index {} not in index_map, trying all peers", receiver_index);
+                        // Fallback: try all peers (handles initial packets before index is registered)
+                        let peers = self.inner.peers.read().await;
+                        peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
+                    }
+                } else {
+                    vec![]
+                }
             }
             _ => vec![],
         };
@@ -797,6 +831,24 @@ impl UserspaceWgControl {
                         4 => "Data",
                         _ => "Unknown",
                     };
+                    
+                    // When sending HandshakeResponse (as responder), register our sender_index
+                    // This enables O(1) routing for incoming Data packets
+                    if resp_type == 2 && packet.len() >= 8 {
+                        let sender_index = u32::from_le_bytes([packet[4], packet[5], packet[6], packet[7]]);
+                        // We need to find the public key for this tunnel - look it up from peers
+                        let peers = self.inner.peers.read().await;
+                        for (pk, session) in peers.iter() {
+                            // Check if this is the tunnel we just used
+                            if Arc::ptr_eq(&session.tunnel, &t_arc) {
+                                let mut indices = self.inner.index_map.write().await;
+                                indices.insert(sender_index, *pk);
+                                debug!("[WG-TX] Registered sender_index {} for peer (responder)", sender_index);
+                                break;
+                            }
+                        }
+                    }
+                    
                     info!("[WG-TX] Sending {} ({} bytes) to {} in response", resp_name, packet.len(), src);
                     if let Err(e) = udp_socket.send_to(packet, src).await {
                         error!("[WG-TX] Failed to send handshake response to {}: {}", src, e);
