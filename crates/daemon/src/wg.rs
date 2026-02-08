@@ -308,7 +308,7 @@ impl UserspaceWgControl {
     pub async fn setup_tunnel(
         &self,
         vip: &str,
-        _vip6: Option<&str>,  // IPv6 VIP (not yet used in userspace - tun crate limitation)
+        _vip6: Option<&str>,
         _port: u16,
         private_key: &str,
     ) -> Result<(), String> {
@@ -400,6 +400,22 @@ impl UserspaceWgControl {
             {
                 let mut d_lock = self.inner.device.lock().await;
                 *d_lock = Some(device);
+            }
+
+            // Configure IPv6 address if provided (Linux only for now)
+            #[cfg(target_os = "linux")]
+            if let Some(v6) = _vip6 {
+                info!("[WG] Adding IPv6 address {}/64 to {}", v6, self.interface);
+                let _ = std::process::Command::new("ip")
+                    .args([
+                        "-6",
+                        "address",
+                        "add",
+                        &format!("{}/64", v6),
+                        "dev",
+                        &self.interface,
+                    ])
+                    .output();
             }
 
             Ok(())

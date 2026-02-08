@@ -392,11 +392,12 @@ async fn main() -> Result<()> {
     let nucleus_client: Option<signaling::NucleusClient> = if !is_nucleus_mode {
         if let (Some(nucleus_addr), Some(cluster)) = (&args.nucleus, &args.cluster) {
             if let Some(vip) = args.vip {
-                match signaling::NucleusClient::new(
+                match signaling::NucleusClient::with_ipv6(
                     nucleus_addr,
                     cluster.clone(),
                     identity.public_key_bytes(),
                     vip,
+                    args.vip6,
                     args.port,
                     cluster_secret.cloned(),
                 )

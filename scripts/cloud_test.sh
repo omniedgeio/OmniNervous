@@ -398,11 +398,11 @@ run_test() {
     fi
 
     # Kill any existing processes
-    print_step "Cleaning up old processes and logs..."
+    print_step "Cleaning up old processes, interfaces and logs..."
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
-        ssh_cmd "$node" "sudo pkill -9 -f omninervous 2>/dev/null; sudo pkill -9 -f iperf3 2>/dev/null; sudo rm -f /tmp/omni-*.log" || true
+        ssh_cmd "$node" "sudo pkill -9 -f omninervous 2>/dev/null; sudo pkill -9 -f iperf3 2>/dev/null; sudo ip link delete omni0 2>/dev/null; sudo rm -f /tmp/omni-*.log" || true
     done
-    sleep 2
+    sleep 3
     
     # Start Nucleus (signaling server)
     print_step "Starting Nucleus on $NUCLEUS..."
