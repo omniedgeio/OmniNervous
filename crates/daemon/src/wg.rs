@@ -596,62 +596,37 @@ impl UserspaceWgControl {
         let inner = self.inner.clone();
         let socket_tx = udp_socket.clone();
 
-        // OPTIMIZATION v0.7: Create dedicated UDP TX channel
-        // This decouples encryption from network I/O for maximum throughput
-        // Channel size of 1024 allows encryption to run ahead of network sends
-        let (udp_tx_sender, mut udp_tx_receiver) = tokio::sync::mpsc::channel::<(Vec<u8>, SocketAddr)>(1024);
-
-        // UDP TX Task - dedicated sender for encrypted packets
-        // This runs independently of encryption, maximizing throughput
-        let udp_tx_handle = tokio::spawn(async move {
-            while let Some((packet, endpoint)) = udp_tx_receiver.recv().await {
-                // Fire-and-forget send - errors are logged but don't block
-                if let Err(e) = socket_tx.send_to(&packet, endpoint).await {
-                    error!("[UDP-TX] Send failed to {}: {}", endpoint, e);
-                }
-            }
-        });
-
-        // TUN -> Encrypt -> UDP TX Channel (Encrypt)
-        // This task only does encryption and queues packets for sending
+        // TUN -> Encrypt -> UDP (direct send, v0.7.1)
+        // Direct send is faster than channel-based approach for this workload
         let reader_handle = tokio::spawn(async move {
             // Pre-allocate buffer for TUN reads
             let mut buf = [0u8; 2048];
-            let mut packet_count: u64 = 0;
-            info!("[TUN] High-performance reader loop started (v0.7)");
+            let mut dst = [0u8; 2048]; // Pre-allocate encryption output buffer
+            info!("[TUN] High-performance reader loop started (v0.7.1 - direct send)");
             
             loop {
                 match reader.read(&mut buf).await {
                     Ok(n) if n > 0 => {
-                        packet_count += 1;
                         let dest_ip = parse_dst_ip(&buf[..n]);
                         
-                        // Minimal logging - only first 5 packets for debugging
-                        let should_log = packet_count <= 5;
-                        
-                        if should_log {
-                            debug!("[TUN] Packet #{}: {} bytes, dst={:?}", packet_count, n, dest_ip);
-                        }
-                        
                         if let Some(ip) = dest_ip {
-                            // OPTIMIZATION: Fast path with minimal lock scope
+                            // Fast path: minimal lock scope
                             let pk_opt = {
                                 let routing = inner.routing_table.read().await;
                                 routing.get(&ip).copied()
                             };
 
                             if let Some(pk) = pk_opt {
-                                // Cache Arc and endpoint immediately, release lock
+                                // Get tunnel Arc and endpoint, release peers lock immediately
                                 let tunnel_and_endpoint = {
                                     let peers = inner.peers.read().await;
                                     peers.get(&pk).map(|s| (s.tunnel.clone(), s.endpoint))
                                 };
 
                                 if let Some((tunnel_arc, Some(ep))) = tunnel_and_endpoint {
-                                    // Encrypt and queue for sending
-                                    let packet_to_send = {
+                                    // Encrypt with minimal lock hold time
+                                    let send_data = {
                                         let mut t_lock = tunnel_arc.lock().await;
-                                        let mut dst = [0u8; 2048];
                                         match t_lock.encapsulate(&buf[..n], &mut dst) {
                                             TunnResult::WriteToNetwork(packet) => {
                                                 let msg_type = if !packet.is_empty() { packet[0] } else { 0 };
@@ -664,11 +639,9 @@ impl UserspaceWgControl {
                                                     drop(t_lock);
                                                     let mut indices = inner.index_map.write().await;
                                                     indices.insert(sender_index, pk);
-                                                    debug!("[WG-TX] Registered sender_index {}", sender_index);
-                                                    // For handshakes, log
                                                     info!("[WG-TX] Sending HandshakeInit ({} bytes) to {}", packet.len(), ep);
                                                 }
-                                                Some((packet.to_vec(), ep, msg_type))
+                                                Some((packet.to_vec(), msg_type))
                                             }
                                             TunnResult::Err(e) => {
                                                 error!("[WG-TX] Encapsulate error: {:?}", e);
@@ -678,23 +651,19 @@ impl UserspaceWgControl {
                                         }
                                     }; // tunnel lock released
 
-                                    // Queue for UDP TX task (non-blocking)
-                                    if let Some((data, endpoint, msg_type)) = packet_to_send {
-                                        // Log handshakes only (types 1-3)
+                                    // Direct send (no channel overhead)
+                                    if let Some((data, msg_type)) = send_data {
+                                        // Log handshakes only (types 2-3, type 1 logged above)
                                         if msg_type > 1 && msg_type <= 3 {
                                             let type_name = match msg_type {
                                                 2 => "HandshakeResponse",
                                                 3 => "CookieReply",
                                                 _ => "Control",
                                             };
-                                            info!("[WG-TX] Sending {} ({} bytes) to {}", type_name, data.len(), endpoint);
+                                            info!("[WG-TX] Sending {} ({} bytes) to {}", type_name, data.len(), ep);
                                         }
-                                        // Send to UDP TX channel - don't wait
-                                        if udp_tx_sender.try_send((data, endpoint)).is_err() {
-                                            // Channel full - this means network is bottleneck
-                                            // Use blocking send as fallback
-                                            let _ = udp_tx_sender.send((vec![], endpoint)).await;
-                                        }
+                                        // Direct UDP send - simplest and fastest
+                                        let _ = socket_tx.send_to(&data, ep).await;
                                     }
                                 }
                             }
@@ -729,7 +698,6 @@ impl UserspaceWgControl {
         // Store task handles for cleanup
         {
             let mut handles = self.inner.tun_task_handles.lock().await;
-            handles.push(udp_tx_handle);
             handles.push(reader_handle);
             handles.push(writer_handle);
         }
