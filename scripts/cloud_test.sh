@@ -407,12 +407,15 @@ run_test() {
     # Kill any existing processes and clean up interfaces
     print_step "Cleaning up old processes, interfaces and logs..."
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
-        # Aggressive cleanup: kill processes, clear port, delete interface
+        # Aggressive cleanup: kill processes, clear port, delete all omni* interfaces
         ssh_cmd "$node" "sudo pkill -9 -f omninervous 2>/dev/null; \
                          sudo pkill -9 -f iperf3 2>/dev/null; \
                          sudo fuser -k $OMNI_PORT/udp 2>/dev/null; \
-                         sudo ip link set omni0 down 2>/dev/null; \
-                         sudo ip link delete omni0 2>/dev/null; \
+                         # Delete any interface starting with 'omni'
+                         for dev in \$(ip -o link show | awk -F': ' '{print \$2}' | grep '^omni' | cut -d'@' -f1); do \
+                            sudo ip link set \$dev down 2>/dev/null || true; \
+                            sudo ip link delete \$dev 2>/dev/null || true; \
+                         done; \
                          sudo rm -f /tmp/omni-*.log" || true
     done
     
