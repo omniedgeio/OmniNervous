@@ -322,7 +322,10 @@ impl PortMapper {
                 if self.capabilities.external_addr.is_none() {
                     self.capabilities.external_addr = Some(external_addr);
                 }
-                info!("PCP supported on {}, external IP: {}", gateway, external_addr);
+                info!(
+                    "PCP supported on {}, external IP: {}",
+                    gateway, external_addr
+                );
             }
             Err(e) => {
                 debug!("PCP not available: {}", e);
@@ -615,7 +618,10 @@ impl PortMapper {
         for st in &search_targets {
             match upnp_discover(st, self.timeout).await {
                 Ok(device) => {
-                    info!("UPnP device discovered: {} at {}", device.service_type, device.host);
+                    info!(
+                        "UPnP device discovered: {} at {}",
+                        device.service_type, device.host
+                    );
                     return Ok(device);
                 }
                 Err(e) => {
@@ -629,7 +635,10 @@ impl PortMapper {
 
     /// Request a port mapping via UPnP
     pub async fn request_mapping_upnp(&mut self, lifetime_secs: u32) -> Result<u16> {
-        let device = self.capabilities.upnp_device.clone()
+        let device = self
+            .capabilities
+            .upnp_device
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("No UPnP device discovered"))?;
 
         // Get our local IP address
@@ -643,7 +652,8 @@ impl PortMapper {
             &local_ip.to_string(),
             lifetime_secs,
             self.timeout,
-        ).await?;
+        )
+        .await?;
 
         info!(
             "UPnP mapping created: internal {} -> external {}, lifetime {}s",
@@ -665,7 +675,10 @@ impl PortMapper {
 
     /// Release a UPnP port mapping
     async fn release_upnp(&self, mapping: &PortMapping) -> Result<()> {
-        let device = self.capabilities.upnp_device.as_ref()
+        let device = self
+            .capabilities
+            .upnp_device
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No UPnP device for release"))?;
 
         upnp_delete_port_mapping(device, mapping.external_port, self.timeout).await?;
@@ -928,9 +941,9 @@ fn build_pcp_request(
     let mut packet = Vec::with_capacity(60);
 
     // PCP Header (24 bytes)
-    packet.push(PCP_VERSION);           // Version
-    packet.push(opcode);                // Opcode (R=0 for request)
-    packet.extend_from_slice(&[0, 0]);  // Reserved
+    packet.push(PCP_VERSION); // Version
+    packet.push(opcode); // Opcode (R=0 for request)
+    packet.extend_from_slice(&[0, 0]); // Reserved
     packet.extend_from_slice(&lifetime.to_be_bytes()); // Requested lifetime
 
     // Client IP address (16 bytes, IPv4-mapped IPv6)
@@ -1008,8 +1021,8 @@ async fn upnp_discover(search_target: &str, timeout_duration: Duration) -> Resul
         .ok_or_else(|| anyhow::anyhow!("No LOCATION in SSDP response"))?;
 
     // Parse ST (Service Type) header
-    let service_type = parse_ssdp_header(&response, "ST")
-        .unwrap_or_else(|| search_target.to_string());
+    let service_type =
+        parse_ssdp_header(&response, "ST").unwrap_or_else(|| search_target.to_string());
 
     // Parse location URL to get host
     let host = parse_url_host(&location)?;
@@ -1041,7 +1054,9 @@ fn parse_ssdp_header(response: &str, header: &str) -> Option<String> {
 /// Parse host:port from a URL
 fn parse_url_host(url: &str) -> Result<SocketAddr> {
     // URL format: http://host:port/path
-    let url = url.trim_start_matches("http://").trim_start_matches("https://");
+    let url = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
     let host_port = url.split('/').next().unwrap_or(url);
 
     // Parse host:port
@@ -1060,7 +1075,11 @@ fn parse_url_host(url: &str) -> Result<SocketAddr> {
 }
 
 /// Fetch UPnP device description and extract control URL
-async fn upnp_get_control_url(location: &str, service_type: &str, timeout_duration: Duration) -> Result<String> {
+async fn upnp_get_control_url(
+    location: &str,
+    service_type: &str,
+    timeout_duration: Duration,
+) -> Result<String> {
     let host = parse_url_host(location)?;
     let path = location.split(&format!("{}", host)).nth(1).unwrap_or("/");
 
@@ -1070,9 +1089,11 @@ async fn upnp_get_control_url(location: &str, service_type: &str, timeout_durati
     // Parse control URL from XML (simple string search, not full XML parsing)
     // Look for the serviceType and then the controlURL
     let service_marker = format!("<serviceType>{}</serviceType>", service_type);
-    
+
     // Also check without version number suffix
-    let base_service = service_type.trim_end_matches(char::is_numeric).trim_end_matches(':');
+    let base_service = service_type
+        .trim_end_matches(char::is_numeric)
+        .trim_end_matches(':');
     let alt_markers = [
         service_marker.clone(),
         format!("<serviceType>{}1</serviceType>", base_service),
@@ -1086,14 +1107,18 @@ async fn upnp_get_control_url(location: &str, service_type: &str, timeout_durati
                 let control_section = &xml[service_idx + control_start..];
                 if let Some(control_end) = control_section.find("</controlURL>") {
                     let control_url = &control_section[12..control_end];
-                    
+
                     // Make absolute URL if relative
                     let full_url = if control_url.starts_with('/') {
                         control_url.to_string()
                     } else if control_url.starts_with("http") {
                         // Extract path from full URL
                         if let Some(path_start) = control_url.find(&format!("{}", host.ip())) {
-                            control_url[path_start..].split('/').skip(1).collect::<Vec<_>>().join("/")
+                            control_url[path_start..]
+                                .split('/')
+                                .skip(1)
+                                .collect::<Vec<_>>()
+                                .join("/")
                         } else {
                             control_url.to_string()
                         }
@@ -1107,14 +1132,10 @@ async fn upnp_get_control_url(location: &str, service_type: &str, timeout_durati
             }
         }
     }
-
     // Try common default paths
-    for default_path in &["/ctl/IPConn", "/upnp/control/WANIPConnection", "/upnp/control/WANIPConn1"] {
-        debug!("Trying default control URL: {}", default_path);
-        return Ok(default_path.to_string());
-    }
-
-    anyhow::bail!("Could not find control URL in device description")
+    let default_path = "/ctl/IPConn";
+    debug!("Trying default control URL: {}", default_path);
+    Ok(default_path.to_string())
 }
 
 /// Add a UPnP port mapping via SOAP
@@ -1163,7 +1184,8 @@ async fn upnp_add_port_mapping(
         &soap_action,
         &soap_body,
         timeout_duration,
-    ).await?;
+    )
+    .await?;
 
     // Check for error in response
     if response.contains("<errorCode>") {
@@ -1214,14 +1236,18 @@ async fn upnp_delete_port_mapping(
         &soap_action,
         &soap_body,
         timeout_duration,
-    ).await;
+    )
+    .await;
 
     // Ignore errors on delete (mapping might already be gone)
     Ok(())
 }
 
 /// Get external IP address via UPnP SOAP
-pub async fn upnp_get_external_ip(device: &UpnpDevice, timeout_duration: Duration) -> Result<IpAddr> {
+pub async fn upnp_get_external_ip(
+    device: &UpnpDevice,
+    timeout_duration: Duration,
+) -> Result<IpAddr> {
     let service_urn = if device.service_type.contains("PPP") {
         UPNP_SERVICE_WAN_PPP
     } else {
@@ -1247,7 +1273,8 @@ pub async fn upnp_get_external_ip(device: &UpnpDevice, timeout_duration: Duratio
         &soap_action,
         &soap_body,
         timeout_duration,
-    ).await?;
+    )
+    .await?;
 
     // Parse external IP from response
     if let Some(ip_start) = response.find("<NewExternalIPAddress>") {
@@ -1281,12 +1308,12 @@ async fn http_get(host: &SocketAddr, path: &str, timeout_duration: Duration) -> 
     stream.write_all(request.as_bytes()).await?;
 
     let mut reader = BufReader::new(stream);
-    
+
     // SECURITY: Parse and validate HTTP status line
     let mut status_line = String::new();
     reader.read_line(&mut status_line).await?;
     let status_code = parse_http_status(&status_line)?;
-    if status_code < 200 || status_code >= 300 {
+    if !(200..300).contains(&status_code) {
         anyhow::bail!("HTTP GET failed with status {}", status_code);
     }
 
@@ -1305,7 +1332,10 @@ async fn http_get(host: &SocketAddr, path: &str, timeout_duration: Duration) -> 
     let mut total_read = 0;
     loop {
         if total_read >= MAX_HTTP_RESPONSE_SIZE {
-            warn!("HTTP response exceeded {} bytes, truncating", MAX_HTTP_RESPONSE_SIZE);
+            warn!(
+                "HTTP response exceeded {} bytes, truncating",
+                MAX_HTTP_RESPONSE_SIZE
+            );
             break;
         }
         let n = reader.read(&mut response[total_read..]).await?;
@@ -1349,14 +1379,14 @@ Connection: close\r\n\
     stream.write_all(request.as_bytes()).await?;
 
     let mut reader = BufReader::new(stream);
-    
+
     // SECURITY: Parse and validate HTTP status line
     // Note: UPnP SOAP may return 500 for SOAP faults, which we handle in the caller
     let mut status_line = String::new();
     reader.read_line(&mut status_line).await?;
     let status_code = parse_http_status(&status_line)?;
     // Allow 200-599 range (success and server errors with SOAP fault details)
-    if status_code < 200 || status_code >= 600 {
+    if !(200..600).contains(&status_code) {
         anyhow::bail!("HTTP POST failed with status {}", status_code);
     }
 
@@ -1375,7 +1405,10 @@ Connection: close\r\n\
     let mut total_read = 0;
     loop {
         if total_read >= MAX_HTTP_RESPONSE_SIZE {
-            warn!("SOAP response exceeded {} bytes, truncating", MAX_HTTP_RESPONSE_SIZE);
+            warn!(
+                "SOAP response exceeded {} bytes, truncating",
+                MAX_HTTP_RESPONSE_SIZE
+            );
             break;
         }
         let n = reader.read(&mut response[total_read..]).await?;
@@ -1537,17 +1570,26 @@ mod tests {
             USN: uuid:test-device\r\n\r\n";
 
         let location = parse_ssdp_header(response, "LOCATION");
-        assert_eq!(location, Some("http://192.168.1.1:5000/rootDesc.xml".to_string()));
+        assert_eq!(
+            location,
+            Some("http://192.168.1.1:5000/rootDesc.xml".to_string())
+        );
 
         let st = parse_ssdp_header(response, "ST");
-        assert_eq!(st, Some("urn:schemas-upnp-org:service:WANIPConnection:1".to_string()));
+        assert_eq!(
+            st,
+            Some("urn:schemas-upnp-org:service:WANIPConnection:1".to_string())
+        );
 
         let missing = parse_ssdp_header(response, "NONEXISTENT");
         assert_eq!(missing, None);
 
         // Test case-insensitivity
         let location_lower = parse_ssdp_header(response, "location");
-        assert_eq!(location_lower, Some("http://192.168.1.1:5000/rootDesc.xml".to_string()));
+        assert_eq!(
+            location_lower,
+            Some("http://192.168.1.1:5000/rootDesc.xml".to_string())
+        );
     }
 
     #[test]
@@ -1606,13 +1648,31 @@ mod tests {
     #[test]
     fn test_pcp_error_strings() {
         assert_eq!(pcp_error_string(PCP_RESULT_SUCCESS), "Success");
-        assert_eq!(pcp_error_string(PCP_RESULT_UNSUPP_VERSION), "Unsupported version");
-        assert_eq!(pcp_error_string(PCP_RESULT_NOT_AUTHORIZED), "Not authorized");
-        assert_eq!(pcp_error_string(PCP_RESULT_MALFORMED_REQUEST), "Malformed request");
-        assert_eq!(pcp_error_string(PCP_RESULT_UNSUPP_OPCODE), "Unsupported opcode");
-        assert_eq!(pcp_error_string(PCP_RESULT_NETWORK_FAILURE), "Network failure");
+        assert_eq!(
+            pcp_error_string(PCP_RESULT_UNSUPP_VERSION),
+            "Unsupported version"
+        );
+        assert_eq!(
+            pcp_error_string(PCP_RESULT_NOT_AUTHORIZED),
+            "Not authorized"
+        );
+        assert_eq!(
+            pcp_error_string(PCP_RESULT_MALFORMED_REQUEST),
+            "Malformed request"
+        );
+        assert_eq!(
+            pcp_error_string(PCP_RESULT_UNSUPP_OPCODE),
+            "Unsupported opcode"
+        );
+        assert_eq!(
+            pcp_error_string(PCP_RESULT_NETWORK_FAILURE),
+            "Network failure"
+        );
         assert_eq!(pcp_error_string(PCP_RESULT_NO_RESOURCES), "No resources");
-        assert_eq!(pcp_error_string(PCP_RESULT_ADDRESS_MISMATCH), "Address mismatch");
+        assert_eq!(
+            pcp_error_string(PCP_RESULT_ADDRESS_MISMATCH),
+            "Address mismatch"
+        );
         assert_eq!(pcp_error_string(99), "Unknown error");
     }
 
@@ -1625,15 +1685,15 @@ mod tests {
         assert_eq!(packet.len(), 24);
 
         // Check header fields
-        assert_eq!(packet[0], PCP_VERSION);  // Version
-        assert_eq!(packet[1], PCP_OP_ANNOUNCE);  // Opcode
+        assert_eq!(packet[0], PCP_VERSION); // Version
+        assert_eq!(packet[1], PCP_OP_ANNOUNCE); // Opcode
 
         // Client IP starts at byte 8 (16 bytes for IPv6-mapped IPv4)
         // Structure: bytes 0-1: version/opcode, 2-3: reserved, 4-7: lifetime, 8-23: client IP
         // IPv4-mapped IPv6 format: 10 zero bytes + 0xff 0xff + 4 IPv4 bytes
-        assert_eq!(&packet[8..18], &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);  // 10 zero bytes
-        assert_eq!(&packet[18..20], &[0xff, 0xff]);  // ::ffff: marker
-        assert_eq!(&packet[20..24], &[192, 168, 1, 100]);  // IPv4 address
+        assert_eq!(&packet[8..18], &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // 10 zero bytes
+        assert_eq!(&packet[18..20], &[0xff, 0xff]); // ::ffff: marker
+        assert_eq!(&packet[20..24], &[192, 168, 1, 100]); // IPv4 address
     }
 
     #[test]
@@ -1643,9 +1703,9 @@ mod tests {
         let packet = build_pcp_request(
             PCP_OP_MAP,
             &client_ip,
-            7200,   // lifetime
-            51820,  // internal port
-            51820,  // suggested external port
+            7200,  // lifetime
+            51820, // internal port
+            51820, // suggested external port
             Some(&nonce),
         );
 
@@ -1695,27 +1755,32 @@ mod tests {
     fn test_pcp_nonce_in_request_response() {
         // Test that nonce is correctly placed in MAP request
         let client_ip = Ipv4Addr::new(192, 168, 1, 100);
-        let nonce: [u8; 12] = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x12, 0x34, 0x56, 0x78];
-        
-        let packet = build_pcp_request(
-            PCP_OP_MAP,
-            &client_ip,
-            7200,
-            51820,
-            51820,
-            Some(&nonce),
-        );
+        let nonce: [u8; 12] = [
+            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x12, 0x34, 0x56, 0x78,
+        ];
+
+        let packet = build_pcp_request(PCP_OP_MAP, &client_ip, 7200, 51820, 51820, Some(&nonce));
 
         // Verify nonce is at bytes 24-35 in MAP request
         let request_nonce = &packet[24..36];
-        assert_eq!(request_nonce, &nonce, "Nonce should be at bytes 24-35 in MAP request");
+        assert_eq!(
+            request_nonce, &nonce,
+            "Nonce should be at bytes 24-35 in MAP request"
+        );
 
         // Simulate a response with matching nonce (would be validated in request_mapping_pcp)
         let matching_nonce = &nonce;
-        assert_eq!(matching_nonce, &nonce, "Matching nonce should pass validation");
+        assert_eq!(
+            matching_nonce, &nonce,
+            "Matching nonce should pass validation"
+        );
 
         // Simulate a response with mismatched nonce (would fail validation)
         let wrong_nonce: [u8; 12] = [0x00; 12];
-        assert_ne!(&wrong_nonce[..], &nonce[..], "Mismatched nonce should fail validation");
+        assert_ne!(
+            &wrong_nonce[..],
+            &nonce[..],
+            "Mismatched nonce should fail validation"
+        );
     }
 }
