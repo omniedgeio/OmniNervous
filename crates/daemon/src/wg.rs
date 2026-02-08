@@ -23,12 +23,13 @@ impl WgInterface {
     pub async fn setup_interface(
         &mut self,
         vip: &str,
+        vip6: Option<&str>,
         port: u16,
         private_key: &str,
     ) -> Result<(), String> {
         match self {
-            Self::Cli(c) => c.setup_interface_sync(vip, port, private_key),
-            Self::Userspace(u) => u.setup_tunnel(vip, port, private_key).await,
+            Self::Cli(c) => c.setup_interface_sync(vip, vip6, port, private_key),
+            Self::Userspace(u) => u.setup_tunnel(vip, vip6, port, private_key).await,
         }
     }
 
@@ -126,6 +127,7 @@ impl CliWgControl {
     pub fn setup_interface_sync(
         &self,
         vip: &str,
+        vip6: Option<&str>,
         port: u16,
         private_key: &str,
     ) -> Result<(), String> {
@@ -164,7 +166,7 @@ impl CliWgControl {
             return Err(String::from_utf8_lossy(&output.stderr).to_string());
         }
 
-        // 3. Set IP address
+        // 3. Set IPv4 address
         let _ = Command::new("ip")
             .args([
                 "address",
@@ -175,7 +177,22 @@ impl CliWgControl {
             ])
             .output();
 
-        // 4. Set interface up
+        // 4. Set IPv6 address if provided
+        if let Some(v6) = vip6 {
+            info!("[WG] Adding IPv6 address {}/64 to {}", v6, self.interface);
+            let _ = Command::new("ip")
+                .args([
+                    "-6",
+                    "address",
+                    "add",
+                    &format!("{}/64", v6),
+                    "dev",
+                    &self.interface,
+                ])
+                .output();
+        }
+
+        // 5. Set interface up
         let _ = Command::new("ip")
             .args(["link", "set", &self.interface, "up"])
             .output();
@@ -291,6 +308,7 @@ impl UserspaceWgControl {
     pub async fn setup_tunnel(
         &self,
         vip: &str,
+        _vip6: Option<&str>,  // IPv6 VIP (not yet used in userspace - tun crate limitation)
         _port: u16,
         private_key: &str,
     ) -> Result<(), String> {
