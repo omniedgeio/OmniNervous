@@ -77,9 +77,11 @@ async fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<WgIn
             vip
         );
 
-        let private_key_hex = hex::encode(identity.private_key_bytes());
+        // WireGuard CLI expects base64-encoded keys, not hex!
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let private_key_b64 = STANDARD.encode(identity.private_key_bytes());
         if let Err(e) = wg_control
-            .setup_interface(&vip.to_string(), args.port, &private_key_hex)
+            .setup_interface(&vip.to_string(), args.port, &private_key_b64)
             .await
         {
             warn!(
