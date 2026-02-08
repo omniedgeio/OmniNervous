@@ -841,7 +841,6 @@ impl UserspaceWgControl {
                     debug!("[WG-RX] Decapsulate returned other result");
                     return Ok(());
                 }
-                }
             }
         }
 
