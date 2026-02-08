@@ -548,7 +548,7 @@ run_test() {
     
     # Start Nucleus (signaling server)
     print_step "Starting Nucleus on $NUCLEUS..."
-    ssh_cmd "$NUCLEUS" "sudo sh -c \"RUST_LOG=debug nohup \$HOME/omni-test/omninervous --mode nucleus --port $OMNI_PORT $secret_args > /tmp/omni-nucleus.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NUCLEUS" "sudo sh -c \"RUST_LOG=debug nohup \$HOME/omni-test/omninervous --mode nucleus --port $OMNI_PORT $secret_args --mtu auto> /tmp/omni-nucleus.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Build IPv6 args if enabled
@@ -562,12 +562,12 @@ run_test() {
 
     # Start Edge A with VIP (use RUST_LOG=info for better throughput)
     print_step "Starting Edge A on $NODE_A (VIP: $VIP_A)..."
-    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup \$HOME/omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_A $vip6_args_a --port $OMNI_PORT $user_flag > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_A" "sudo sh -c \"RUST_LOG=info nohup \$HOME/omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_A $vip6_args_a --port $OMNI_PORT $user_flag --mtu auto > /tmp/omni-edge-a.log 2>&1 &\" < /dev/null"
     sleep 2
 
     # Start Edge B with VIP (IMPORTANT: use SAME port as Edge A for P2P to work)
     print_step "Starting Edge B on $NODE_B (VIP: $VIP_B)..."
-    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup \$HOME/omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_B $vip6_args_b --port $OMNI_PORT $user_flag > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
+    ssh_cmd "$NODE_B" "sudo sh -c \"RUST_LOG=info nohup \$HOME/omni-test/omninervous --nucleus $NUCLEUS:$OMNI_PORT --cluster $CLUSTER_NAME $secret_args $stun_args --vip $VIP_B $vip6_args_b --port $OMNI_PORT $user_flag --mtu auto > /tmp/omni-edge-b.log 2>&1 &\" < /dev/null"
     sleep 2
     
     # Wait for WireGuard tunnel establishment (heartbeat cycle is 30s)

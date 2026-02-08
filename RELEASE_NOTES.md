@@ -1,5 +1,50 @@
 # Release Notes
 
+## v0.8.7: Automatic MTU Heuristic & Daemon State Fixes
+
+**Date:** 2026-02-08
+
+This release introduces automatic MTU detection for VPN-over-VPN scenarios and critical fixes to the daemon's state management for reliable P2P discovery.
+
+### 🚀 New Features
+
+#### Automatic MTU Heuristic
+*   **VPN Detection**: Daemon automatically detects existing VPN interfaces (`utun`, `tun`, `wg`, `ppp`, `tap`) on startup.
+*   **Smart MTU Scaling**: If another VPN is detected, MTU is automatically reduced to **1280** (IPv6 minimum) to prevent fragmentation.
+*   **CLI Override**: New `--mtu` flag supports explicit values or `auto` for heuristic mode.
+*   **Cross-Platform**: Detection works on Linux (`/sys/class/net`) and macOS (`ifconfig`).
+
+### 🛠️ Bug Fixes
+
+#### Daemon State Management (Critical)
+*   **State Persistence**: Moved `pending_pings` and `pending_races` outside the main event loop to prevent state loss.
+*   **MessageHandler Refactor**: Handler is now instantiated per-branch in `tokio::select!` to maintain shared state access.
+*   **Async/Sync Correction**: Fixed incorrect `.await` calls on synchronous methods (`cleanup_expired_races`).
+*   **Restored Event Loop**: Corrected accidental removal of `tokio::select!` macro and `signal::ctrl_c()` branch.
+
+### 📊 Code Changes
+
+| File | Change |
+|:---|:---|
+| `config.rs` | Added `network.mtu` field with `default_mtu()` function |
+| `main.rs` | Added `detect_vpn_active()` and `calculate_mtu()` functions |
+| `main.rs` | Updated `setup_wireguard()` to accept and apply MTU |
+| `wg.rs` | Extended `setup_interface()` and `setup_tunnel()` with MTU parameter |
+| `wg.rs` | Linux CLI mode now explicitly sets interface MTU via `ip link` |
+| `handler.rs` | Updated `MessageHandler` to accept mutable references for state |
+
+### 🧪 Tests
+
+*   All unit tests passing
+*   Cloud test script updated to use `--mtu auto` by default
+
+### ⬆️ Upgrade Notes
+
+*   **Backward Compatible**: Default MTU behavior (1420) unchanged for standard environments
+*   **Recommended**: Use `--mtu auto` when running behind secondary VPNs (corporate VPN, etc.)
+
+---
+
 ## v0.6.0: NAT Traversal Enhancement & Security Hardening
 
 **Date:** 2026-02-06

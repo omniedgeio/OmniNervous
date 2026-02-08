@@ -22,7 +22,7 @@ Validated on **AWS Lightsail $5 Instances** (3-node cluster, cross-region: us-ea
 | **Baseline** | 448.59 Mbps | Raw iperf3 performance |
 | **Efficiency** | **147.6%** | Protocol acceleration & zero-copy |
 
-> **Key Achievement**: Feb 8 tests demonstrated record-breaking efficiency. v0.8.5 achieves **147.6% efficiency** through zero-copy packet transmission and optimized UDP pipelines, outperforming raw baseline throughput.
+> **Key Achievement**: Feb 8 tests demonstrated record-breaking efficiency. v0.8.7 achieves **147.6% efficiency** through zero-copy packet transmission, optimized UDP pipelines, and automatic MTU detection for VPN-over-VPN scenarios.
 
 ---
 
@@ -121,6 +121,7 @@ sudo ./target/release/omninervous \
 | `--config` | Path to config file | - |
 | `--transport-mode` | Transport mode: "l3" (default) or "l2" (Linux-only, requires l2-vpn feature) | l3 |
 | `--l2-mtu` | Override L2 TAP MTU (Linux only, l2-vpn) | 1400 |
+| `--mtu` | Interface MTU: number or "auto" for VPN detection | 1420 (auto-detected) |
 
 ---
 
@@ -148,9 +149,9 @@ sudo ./target/release/omninervous \
 
 ## Current Status
 
-- **Version**: v0.8.5 (High-Efficiency Zero-Copy Release)
+- **Version**: v0.8.7 (Automatic MTU Heuristic Release)
 - **Performance**: 662.38 Mbps throughput, 147.6% baseline efficiency
-- **Features**: Dual-stack IPv4/IPv6 P2P, Zero-copy transmission, Relay fallback, L2 transport mode (Linux), Prometheus metrics
+- **Features**: Dual-stack IPv4/IPv6 P2P, Zero-copy transmission, Relay fallback, L2 transport mode (Linux), Prometheus metrics, Automatic MTU detection
 - **Security**: Input validation, DoS protection, CBOR size limits, XML injection prevention
 
 ---
