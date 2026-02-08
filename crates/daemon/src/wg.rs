@@ -365,7 +365,7 @@ impl UserspaceWgControl {
         // On Windows, try to reuse existing WinTun adapter to avoid accumulation
         #[cfg(target_os = "windows")]
         {
-            let device = self.setup_windows_tun(vip).await?;
+            let device = self.setup_windows_tun(vip, mtu).await?;
             let mut d_lock = self.inner.device.lock().await;
             *d_lock = Some(device);
             Ok(())
@@ -440,7 +440,7 @@ impl UserspaceWgControl {
 
     /// Windows-specific TUN setup that reuses existing WinTun adapters
     #[cfg(target_os = "windows")]
-    async fn setup_windows_tun(&self, vip: &str) -> Result<tun::AsyncDevice, String> {
+    async fn setup_windows_tun(&self, vip: &str, mtu: u16) -> Result<tun::AsyncDevice, String> {
         use std::sync::Arc as StdArc;
 
         info!(
