@@ -625,56 +625,85 @@ impl UserspaceWgControl {
                             };
 
                             if let Some(pk) = pk_opt {
-                                let peers = inner.peers.read().await;
-                                if let Some(session) = peers.get(&pk) {
-                                    if let Some(ep) = session.endpoint {
-                                        let mut t_lock = session.tunnel.lock().await;
+                                // OPTIMIZATION: Cache tunnel Arc and endpoint to minimize lock scope
+                                // This allows us to release the peers lock before crypto operations
+                                let tunnel_and_endpoint = {
+                                    let peers = inner.peers.read().await;
+                                    peers.get(&pk).map(|session| {
+                                        (session.tunnel.clone(), session.endpoint)
+                                    })
+                                };
+                                // peers lock released here
+
+                                if let Some((tunnel_arc, Some(ep))) = tunnel_and_endpoint {
+                                    // OPTIMIZATION: Perform encryption, then release lock before network I/O
+                                    // This prevents holding Mutex during UDP send which was a major bottleneck
+                                    let send_result = {
+                                        let mut t_lock = tunnel_arc.lock().await;
                                         let mut dst = [0u8; 2048];
                                         match t_lock.encapsulate(&buf[..n], &mut dst) {
                                             TunnResult::WriteToNetwork(packet) => {
                                                 let msg_type = if !packet.is_empty() { packet[0] } else { 0 };
-                                                let type_name = match msg_type {
-                                                    1 => "HandshakeInit",
-                                                    2 => "HandshakeResponse", 
-                                                    3 => "CookieReply",
-                                                    4 => "Data",
-                                                    _ => "Unknown",
-                                                };
                                                 
                                                 // Extract sender_index from HandshakeInit (bytes 4-7) and store in index_map
                                                 // This enables O(1) routing for incoming Data packets
                                                 if msg_type == 1 && packet.len() >= 8 {
                                                     let sender_index = u32::from_le_bytes([packet[4], packet[5], packet[6], packet[7]]);
+                                                    drop(t_lock); // Release tunnel lock before index_map write
                                                     let mut indices = inner.index_map.write().await;
                                                     indices.insert(sender_index, pk);
                                                     debug!("[WG-TX] Registered sender_index {} for peer", sender_index);
-                                                }
-                                                
-                                                if should_log || msg_type <= 3 {
-                                                    info!("[WG-TX] Sending {} ({} bytes) to {}", type_name, packet.len(), ep);
-                                                }
-                                                if let Err(e) = socket_tx.send_to(packet, ep).await {
-                                                    error!("[WG-TX] Failed to send to {}: {}", ep, e);
+                                                    // Re-encapsulate after re-acquiring lock (handshakes are rare)
+                                                    let mut t_lock = tunnel_arc.lock().await;
+                                                    let mut dst2 = [0u8; 2048];
+                                                    if let TunnResult::WriteToNetwork(p) = t_lock.encapsulate(&[], &mut dst2) {
+                                                        Some((p.to_vec(), msg_type))
+                                                    } else {
+                                                        Some((packet.to_vec(), msg_type))
+                                                    }
+                                                } else {
+                                                    // For Data packets (most common case), copy and release lock immediately
+                                                    Some((packet.to_vec(), msg_type))
                                                 }
                                             }
                                             TunnResult::Err(e) => {
                                                 error!("[WG-TX] Encapsulate error for {}: {:?}", ip, e);
+                                                None
                                             }
                                             TunnResult::Done => {
                                                 if should_log {
                                                     debug!("[WG-TX] Encapsulate returned Done (no packet to send)");
                                                 }
+                                                None
                                             }
                                             _ => {
                                                 if should_log {
                                                     debug!("[WG-TX] Encapsulate returned other result");
                                                 }
+                                                None
                                             }
                                         }
-                                    } else {
-                                        if should_log {
-                                            debug!("[TUN] Peer {} has no endpoint set", hex::encode(&pk[..8]));
+                                    }; // tunnel lock released here
+
+                                    // Now send outside of any lock - this is the key optimization!
+                                    if let Some((packet_data, msg_type)) = send_result {
+                                        // Only log handshakes, NEVER log Data packets (critical for performance)
+                                        if msg_type <= 3 {
+                                            let type_name = match msg_type {
+                                                1 => "HandshakeInit",
+                                                2 => "HandshakeResponse",
+                                                3 => "CookieReply",
+                                                _ => "Unknown",
+                                            };
+                                            info!("[WG-TX] Sending {} ({} bytes) to {}", type_name, packet_data.len(), ep);
                                         }
+                                        if let Err(e) = socket_tx.send_to(&packet_data, ep).await {
+                                            error!("[WG-TX] Failed to send to {}: {}", ep, e);
+                                        }
+                                    }
+                                } else if tunnel_and_endpoint.is_some() {
+                                    if should_log {
+                                        debug!("[TUN] Peer {} has no endpoint set", hex::encode(&pk[..8]));
                                     }
                                 } else {
                                     if should_log {
