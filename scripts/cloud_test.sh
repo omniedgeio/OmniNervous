@@ -303,10 +303,10 @@ install_dependencies() {
             echo -e "  📥 Installing utility tools (iproute2, jq, bc)..."
             case $pkg_manager in
                 apt)
-                    ssh_cmd "$node" "sudo apt-get install -y -qq iproute2 jq bc"
+                    ssh_cmd "$node" "sudo apt-get install -y -qq iproute2 jq bc psmisc"
                     ;;
                 dnf|yum)
-                    ssh_cmd "$node" "sudo $pkg_manager install -y iproute jq bc"
+                    ssh_cmd "$node" "sudo $pkg_manager install -y iproute jq bc psmisc"
                     ;;
             esac
         else
@@ -404,12 +404,21 @@ run_test() {
         echo -e "🚀 Using Userspace (BoringTun) mode"
     fi
 
-    # Kill any existing processes
+    # Kill any existing processes and clean up interfaces
     print_step "Cleaning up old processes, interfaces and logs..."
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
-        ssh_cmd "$node" "sudo pkill -9 -f omninervous 2>/dev/null; sudo pkill -9 -f iperf3 2>/dev/null; sudo ip link delete omni0 2>/dev/null; sudo rm -f /tmp/omni-*.log" || true
+        # Aggressive cleanup: kill processes, clear port, delete interface
+        ssh_cmd "$node" "sudo pkill -9 -f omninervous 2>/dev/null; \
+                         sudo pkill -9 -f iperf3 2>/dev/null; \
+                         sudo fuser -k $OMNI_PORT/udp 2>/dev/null; \
+                         sudo ip link set omni0 down 2>/dev/null; \
+                         sudo ip link delete omni0 2>/dev/null; \
+                         sudo rm -f /tmp/omni-*.log" || true
     done
-    sleep 3
+    
+    # Give the OS a bit more time to release sockets and cleanup interfaces
+    echo "   Waiting for resource release..."
+    sleep 5
     
     # Start Nucleus (signaling server)
     print_step "Starting Nucleus on $NUCLEUS..."
