@@ -749,24 +749,12 @@ impl UserspaceWgControl {
                 peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
             }
             2 => {
-                // Handshake Response: Receiver index at offset 8
-                if buf.len() >= 12 {
-                    let index = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
-                    debug!("[WG-RX] HandshakeResponse: looking up index {}", index);
-                    let indices = self.inner.index_map.read().await;
-                    if let Some(pk) = indices.get(&index) {
-                        let peers = self.inner.peers.read().await;
-                        peers
-                            .get(pk)
-                            .map(|s| vec![s.tunnel.clone()])
-                            .unwrap_or_default()
-                    } else {
-                        debug!("[WG-RX] HandshakeResponse: index {} not found in index_map", index);
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                }
+                // Handshake Response: Try all sessions because BoringTun uses internal indices
+                // that don't match our index_map. BoringTun will internally validate the handshake.
+                let peers = self.inner.peers.read().await;
+                let count = peers.len();
+                debug!("[WG-RX] HandshakeResponse: trying {} peer sessions", count);
+                peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
             }
             3 | 4 => {
                 // Cookie Reply (3) or Data (4): Receiver index at offset 4
