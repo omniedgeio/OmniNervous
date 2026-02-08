@@ -56,7 +56,11 @@ fn collect_stun_servers(args: &Args, config: &config::Config) -> Vec<String> {
     }
 }
 
-async fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<WgInterface>> {
+async fn setup_wireguard(
+    args: &Args,
+    identity: &Identity,
+    mtu: u16,
+) -> Result<Option<WgInterface>> {
     if let Some(vip) = args.vip {
         let ifname = args.tun_name.clone();
 
@@ -67,8 +71,9 @@ async fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<WgIn
         };
 
         info!(
-            "🔧 Initializing WireGuard interface '{}' in {} mode with IP {}",
+            "🔧 Initializing WireGuard interface '{}' (MTU: {}) in {} mode with IP {}",
             ifname,
+            mtu,
             if args.userspace {
                 "USERSPACE"
             } else {
@@ -90,6 +95,7 @@ async fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<WgIn
                 vip6_str.as_deref(),
                 args.port,
                 &private_key_b64,
+                mtu,
             )
             .await
         {
@@ -99,7 +105,10 @@ async fn setup_wireguard(args: &Args, identity: &Identity) -> Result<Option<WgIn
             );
             Ok(None)
         } else {
-            info!("✅ WireGuard interface '{}' is ready.", ifname);
+            info!(
+                "✅ WireGuard interface '{}' is ready (MTU: {}).",
+                ifname, mtu
+            );
             Ok(Some(wg_control))
         }
     } else {
@@ -189,6 +198,10 @@ struct Args {
     /// Disable built-in Nucleus STUN fallback
     #[arg(long)]
     disable_builtin_stun: bool,
+
+    /// Interface MTU (default: 1420, use 'auto' for heuristic detection)
+    #[arg(long)]
+    mtu: Option<String>,
 }
 
 /// Standard STUN Binding Request (minimal) - Try multiple servers and return first success
@@ -240,6 +253,74 @@ async fn discover_public_endpoint_standard_stun(
     }
 
     anyhow::bail!("All STUN servers failed")
+}
+
+/// Detect if any other VPN or tunnel interfaces are active (Heuristic)
+fn detect_vpn_active() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+            for entry in entries.flatten() {
+                if let Ok(name) = entry.file_name().into_string() {
+                    // Detect common VPN interface prefixes
+                    if name.starts_with("tun")
+                        || name.starts_with("wg")
+                        || name.starts_with("tap")
+                        || name.starts_with("ppp")
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, check for utun or ppp interfaces via ifconfig
+        use std::process::Command;
+        if let Ok(output) = Command::new("ifconfig").output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            // Search for utun (standard) or ppp (legacy)
+            if s.contains("utun") || s.contains("ppp") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Get the best MTU based on environment and config
+fn calculate_mtu(args: &Args, config: &config::Config) -> u16 {
+    // 1. Check CLI override
+    if let Some(ref mtu_str) = args.mtu {
+        if mtu_str.to_lowercase() == "auto" {
+            return if detect_vpn_active() {
+                info!("Auto-MTU: Active VPN detected, selecting safety MTU 1280");
+                1280
+            } else {
+                info!("Auto-MTU: No VPN detected, using standard MTU 1420");
+                1420
+            };
+        }
+        if let Ok(val) = mtu_str.parse::<u16>() {
+            return val;
+        }
+    }
+
+    // 2. Check config file field
+    if let Some(val) = config.network.mtu {
+        return val;
+    }
+
+    // 3. Last fallback: automatic detection
+    if detect_vpn_active() {
+        info!("Environment: Possible VPN detected, recommending MTU 1280");
+        1280
+    } else {
+        1420
+    }
 }
 
 #[tokio::main]
@@ -373,7 +454,8 @@ async fn main() -> Result<()> {
     let socket = std::sync::Arc::new(socket_raw);
 
     // Create WireGuard interface if VIP is specified
-    let mut wg_api_opt = setup_wireguard(&args, &identity).await?;
+    let mtu = calculate_mtu(&args, &config);
+    let mut wg_api_opt = setup_wireguard(&args, &identity, mtu).await?;
     if wg_api_opt.is_none() && l2_requested {
         info!("L2 mode enabled without WireGuard (no VIP configured)");
     }

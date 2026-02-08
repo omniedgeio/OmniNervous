@@ -63,6 +63,9 @@ pub struct NetworkConfig {
     /// Happy Eyeballs delay in milliseconds (Phase 7)
     #[serde(default = "default_happy_eyeballs_delay")]
     pub happy_eyeballs_delay_ms: u64,
+    /// WireGuard interface MTU (default: 1420)
+    #[serde(default = "default_mtu")]
+    pub mtu: Option<u16>,
 }
 
 impl Default for NetworkConfig {
@@ -76,6 +79,7 @@ impl Default for NetworkConfig {
             enable_ipv6: true,
             prefer_ipv6: true,
             happy_eyeballs_delay_ms: default_happy_eyeballs_delay(),
+            mtu: default_mtu(),
         }
     }
 }
@@ -283,6 +287,10 @@ fn default_l2_mode() -> String {
 fn default_tap_name() -> String {
     "omni0".to_string()
 }
+fn default_mtu() -> Option<u16> {
+    Some(1420)
+}
+
 fn default_l2_mtu() -> u16 {
     1500
 }

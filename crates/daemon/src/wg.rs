@@ -27,10 +27,11 @@ impl WgInterface {
         vip6: Option<&str>,
         port: u16,
         private_key: &str,
+        mtu: u16,
     ) -> Result<(), String> {
         match self {
-            Self::Cli(c) => c.setup_interface_sync(vip, vip6, port, private_key),
-            Self::Userspace(u) => u.setup_tunnel(vip, vip6, port, private_key).await,
+            Self::Cli(c) => c.setup_interface_sync(vip, vip6, port, private_key, mtu),
+            Self::Userspace(u) => u.setup_tunnel(vip, vip6, port, private_key, mtu).await,
         }
     }
 
@@ -131,6 +132,7 @@ impl CliWgControl {
         vip6: Option<&str>,
         port: u16,
         private_key: &str,
+        mtu: u16,
     ) -> Result<(), String> {
         use std::io::Write;
         use std::process::Command;
@@ -193,7 +195,19 @@ impl CliWgControl {
                 .output();
         }
 
-        // 5. Set interface up
+        // 5. Set interface MTU
+        let _ = Command::new("ip")
+            .args([
+                "link",
+                "set",
+                "dev",
+                &self.interface,
+                "mtu",
+                &mtu.to_string(),
+            ])
+            .output();
+
+        // 6. Set interface up
         let _ = Command::new("ip")
             .args(["link", "set", &self.interface, "up"])
             .output();
@@ -312,6 +326,7 @@ impl UserspaceWgControl {
         _vip6: Option<&str>,
         _port: u16,
         private_key: &str,
+        mtu: u16,
     ) -> Result<(), String> {
         info!(
             "[WG] Setting up tunnel with interface '{}', VIP {}",
@@ -369,7 +384,7 @@ impl UserspaceWgControl {
                 config.name(&self.interface);
             }
 
-            config.address(vip).netmask("255.255.255.0").up();
+            config.address(vip).netmask("255.255.255.0").mtu(mtu as i32).up();
 
             #[cfg(target_os = "linux")]
             config.platform(|config| {
@@ -441,7 +456,7 @@ impl UserspaceWgControl {
                     "[WG] Failed to load WinTun DLL, falling back to tun crate: {}",
                     e
                 );
-                return self.create_tun_fallback(vip);
+                return self.create_tun_fallback(vip, mtu);
             }
         };
 
@@ -489,12 +504,12 @@ impl UserspaceWgControl {
             "[WG] Calling create_tun_fallback with interface name: '{}'",
             self.interface
         );
-        self.create_tun_fallback(vip)
+        self.create_tun_fallback(vip, mtu)
     }
 
     /// Fallback TUN creation using the tun crate directly
     #[cfg(target_os = "windows")]
-    fn create_tun_fallback(&self, vip: &str) -> Result<tun::AsyncDevice, String> {
+    fn create_tun_fallback(&self, vip: &str, mtu: u16) -> Result<tun::AsyncDevice, String> {
         use tun::Device as TunDevice; // Import the Device trait for set_name()
 
         let mut config = tun::Configuration::default();
@@ -516,7 +531,7 @@ impl UserspaceWgControl {
         config.name(adapter_name);
         info!("[WG] config.name set successfully");
 
-        config.address(vip).netmask("255.255.255.0").up();
+        config.address(vip).netmask("255.255.255.0").mtu(mtu as i32).up();
 
         info!(
             "[WG] Calling tun::create_as_async for Windows interface '{}'...",
