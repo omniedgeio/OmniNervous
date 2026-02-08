@@ -105,11 +105,8 @@ pub struct MessageHandler<'a> {
 }
 
 impl<'a> MessageHandler<'a> {
-    fn encode_wg_key(wg_api: &WgInterface, key: [u8; 32]) -> String {
-        match wg_api {
-            WgInterface::Cli(_) => BASE64.encode(key),
-            WgInterface::Userspace(_) => hex::encode(key),
-        }
+    fn encode_wg_key(_wg_api: &WgInterface, key: [u8; 32]) -> String {
+        BASE64.encode(key)
     }
     pub async fn handle_packet(&mut self, buf: &[u8], src: SocketAddr) -> Result<()> {
         self.metrics.inc_packets_rx();

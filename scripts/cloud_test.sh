@@ -298,23 +298,14 @@ install_dependencies() {
             echo -e "  ✅ netperf already installed"
         fi
         
-        # Install iproute2, jq, and bc
-        if ! ssh_cmd "$node" "which ip" &>/dev/null; then
-            echo -e "  📥 Installing utility tools (iproute2, jq, bc)..."
-            case $pkg_manager in
-                apt)
-                    ssh_cmd "$node" "sudo apt-get install -y -qq iproute2 jq bc psmisc"
-                    ;;
-                dnf|yum)
-                    ssh_cmd "$node" "sudo $pkg_manager install -y iproute jq bc psmisc"
-                    ;;
-            esac
-        else
-            # Ensure jq and bc are also present even if ip is there
-            ssh_cmd "$node" "which jq &>/dev/null || (sudo $pkg_manager install -y jq || true)" || true
-            ssh_cmd "$node" "which bc &>/dev/null || (sudo $pkg_manager install -y bc || true)" || true
-            echo -e "  ✅ Utility tools (ip, jq, bc) check complete"
-        fi
+        # Install iproute2, jq, bc, psmisc (for fuser)
+        ssh_cmd "$node" "which ip &>/dev/null || (sudo $pkg_manager install -y iproute2 || sudo $pkg_manager install -y iproute || true)" || true
+        ssh_cmd "$node" "which jq &>/dev/null || (sudo $pkg_manager install -y jq || true)" || true
+        ssh_cmd "$node" "which bc &>/dev/null || (sudo $pkg_manager install -y bc || true)" || true
+        ssh_cmd "$node" "which fuser &>/dev/null || (sudo $pkg_manager install -y psmisc || true)" || true
+        ssh_cmd "$node" "which pkill &>/dev/null || (sudo $pkg_manager install -y procps || true)" || true
+        
+        echo -e "  ✅ Utility tools (ip, jq, bc, psmisc, procps) check complete"
         
         echo -e "  ✅ Dependencies installed on $node"
     done
@@ -412,7 +403,7 @@ run_test() {
                          sudo pkill -9 -f iperf3 2>/dev/null; \
                          sudo fuser -k $OMNI_PORT/udp 2>/dev/null; \
                          # Delete any interface starting with 'omni'
-                         for dev in \$(ip -o link show | awk -F': ' '{print \$2}' | grep '^omni' | cut -d'@' -f1); do \
+                         for dev in \$(ip link show | grep -o 'omni[0-9]*'); do \
                             sudo ip link set \$dev down 2>/dev/null || true; \
                             sudo ip link delete \$dev 2>/dev/null || true; \
                          done; \

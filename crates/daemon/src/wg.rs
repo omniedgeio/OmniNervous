@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 /// WgInterface unified enum
 /// Supports both Kernel (CLI) and Userspace (BoringTun) modes.
@@ -316,9 +317,9 @@ impl UserspaceWgControl {
             "[WG] Setting up tunnel with interface '{}', VIP {}",
             self.interface, vip
         );
-        // Parse private key
-        let secret_key = hex::decode(private_key).map_err(|e| {
-            error!("[WG] Failed to decode private key hex: {}", e);
+        // Parse private key (supports both hex and base64)
+        let secret_key = decode_key(private_key).map_err(|e| {
+            error!("[WG] Failed to decode private key: {}", e);
             e.to_string()
         })?;
         let mut sk = [0u8; 32];
@@ -567,7 +568,7 @@ impl UserspaceWgControl {
         allowed_ips: &[String],
         persistent_keepalive: Option<u32>,
     ) -> Result<(), String> {
-        let pk_bytes = hex::decode(public_key).map_err(|e| e.to_string())?;
+        let pk_bytes = decode_key(public_key).map_err(|e| e.to_string())?;
         let mut pk = [0u8; 32];
         if pk_bytes.len() != 32 {
             return Err("Invalid peer public key".to_string());
@@ -913,7 +914,7 @@ impl UserspaceWgControl {
     }
 
     pub async fn get_peer_stats(&self, public_key: &str) -> Option<PeerStats> {
-        let pk_bytes = hex::decode(public_key).ok()?;
+        let pk_bytes = decode_key(public_key).ok()?;
         let mut pk = [0u8; 32];
         if pk_bytes.len() != 32 {
             return None;
@@ -1048,6 +1049,21 @@ impl UserspaceWgControl {
         };
         has_handles && has_writer
     }
+}
+
+/// Helper to decode a key from hex or base64
+fn decode_key(key: &str) -> Result<Vec<u8>, String> {
+    // Try hex first if it looks like hex
+    if key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+        if let Ok(bytes) = hex::decode(key) {
+            return Ok(bytes);
+        }
+    }
+
+    // Otherwise try base64
+    BASE64
+        .decode(key.trim())
+        .map_err(|e| format!("Key decoding failed (tried hex and base64): {}", e))
 }
 
 /// Helper to parse destination IP from raw IP packet
