@@ -1286,6 +1286,7 @@ impl NucleusClient {
         let data = encode_message(MSG_REGISTER, &msg)?;
         // Use dual-stack compatible address for IPv6 sockets sending to IPv4
         let target = Self::to_dual_stack_addr(self.nucleus_addr, socket);
+        debug!("Sending 0x{:02x} (len={}) to nucleus {}", MSG_REGISTER, data.len(), target);
         socket.send_to(&data, target).await?;
         info!(
             "Registered with nucleus {} (cluster: {}, vip: {}, vip_v6: {:?})",
@@ -1312,6 +1313,7 @@ impl NucleusClient {
         let data = encode_message(MSG_HEARTBEAT, &msg)?;
         // Use dual-stack compatible address for IPv6 sockets sending to IPv4
         let target = Self::to_dual_stack_addr(self.nucleus_addr, socket);
+        debug!("Sending 0x{:02x} (len={}) to nucleus {}", MSG_HEARTBEAT, data.len(), target);
         socket.send_to(&data, target).await?;
         debug!("Sent heartbeat to nucleus");
         Ok(())
