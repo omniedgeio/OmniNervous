@@ -1072,6 +1072,27 @@ pub struct NucleusClient {
 }
 
 impl NucleusClient {
+    /// Convert SocketAddr to be compatible with dual-stack IPv6 sockets.
+    /// On macOS (and some other platforms), IPv6 sockets require IPv4 addresses
+    /// to be in IPv4-mapped IPv6 format (::ffff:a.b.c.d) to send to IPv4 destinations.
+    fn to_dual_stack_addr(addr: SocketAddr, socket: &UdpSocket) -> SocketAddr {
+        // Check if our socket is IPv6
+        let is_ipv6_socket = socket
+            .local_addr()
+            .map(|a| a.is_ipv6())
+            .unwrap_or(false);
+
+        match (is_ipv6_socket, addr) {
+            // Socket is IPv6 but target is IPv4 - convert to IPv4-mapped IPv6
+            (true, SocketAddr::V4(v4)) => {
+                let mapped = v4.ip().to_ipv6_mapped();
+                SocketAddr::new(std::net::IpAddr::V6(mapped), v4.port())
+            }
+            // All other cases: use address as-is
+            _ => addr,
+        }
+    }
+
     pub async fn new(
         nucleus: &str,
         cluster: String,
@@ -1257,7 +1278,9 @@ impl NucleusClient {
         }
 
         let data = encode_message(MSG_REGISTER, &msg)?;
-        socket.send_to(&data, self.nucleus_addr).await?;
+        // Use dual-stack compatible address for IPv6 sockets sending to IPv4
+        let target = Self::to_dual_stack_addr(self.nucleus_addr, socket);
+        socket.send_to(&data, target).await?;
         info!(
             "Registered with nucleus {} (cluster: {}, vip: {}, vip_v6: {:?})",
             self.nucleus_addr, self.cluster, self.vip, self.vip_v6
@@ -1281,7 +1304,9 @@ impl NucleusClient {
         }
 
         let data = encode_message(MSG_HEARTBEAT, &msg)?;
-        socket.send_to(&data, self.nucleus_addr).await?;
+        // Use dual-stack compatible address for IPv6 sockets sending to IPv4
+        let target = Self::to_dual_stack_addr(self.nucleus_addr, socket);
+        socket.send_to(&data, target).await?;
         debug!("Sent heartbeat to nucleus");
         Ok(())
     }
@@ -1289,7 +1314,9 @@ impl NucleusClient {
     /// Query public endpoint from built-in STUN on Nucleus
     pub async fn query_stun(&self, socket: &UdpSocket) -> Result<()> {
         let data = vec![MSG_STUN_QUERY];
-        socket.send_to(&data, self.nucleus_addr).await?;
+        // Use dual-stack compatible address for IPv6 sockets sending to IPv4
+        let target = Self::to_dual_stack_addr(self.nucleus_addr, socket);
+        socket.send_to(&data, target).await?;
         debug!("Sent STUN query to nucleus");
         Ok(())
     }
@@ -1311,7 +1338,9 @@ impl NucleusClient {
         }
 
         let data = encode_message(MSG_QUERY_PEER, &msg)?;
-        socket.send_to(&data, self.nucleus_addr).await?;
+        // Use dual-stack compatible address for IPv6 sockets sending to IPv4
+        let target = Self::to_dual_stack_addr(self.nucleus_addr, socket);
+        socket.send_to(&data, target).await?;
         debug!("Queried peer {}", target_vip);
         Ok(())
     }
@@ -1337,7 +1366,9 @@ impl NucleusClient {
         }
 
         let data = encode_message(MSG_QUERY_PEER, &msg)?;
-        socket.send_to(&data, self.nucleus_addr).await?;
+        // Use dual-stack compatible address for IPv6 sockets sending to IPv4
+        let target = Self::to_dual_stack_addr(self.nucleus_addr, socket);
+        socket.send_to(&data, target).await?;
         debug!("Queried peer by IPv6 {}", target_vip_v6);
         Ok(())
     }
