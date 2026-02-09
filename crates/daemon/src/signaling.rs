@@ -684,8 +684,14 @@ pub fn encode_message(msg_type: u8, payload: &impl Serialize) -> Result<Vec<u8>>
 
 /// Helper to sign a slice of bytes with a secret
 fn calculate_hmac(secret: &str, data: &[u8]) -> [u8; 32] {
+    // If the secret is a 64-character hex string, it's likely a 32-byte key
+    let key_bytes = if secret.len() == 64 {
+        hex::decode(secret).unwrap_or_else(|_| secret.as_bytes().to_vec())
+    } else {
+        secret.as_bytes().to_vec()
+    };
     let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+        Hmac::<Sha256>::new_from_slice(&key_bytes).expect("HMAC can take key of any size");
     mac.update(data);
     let result = mac.finalize();
     result.into_bytes().into()
