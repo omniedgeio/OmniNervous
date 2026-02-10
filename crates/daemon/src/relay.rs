@@ -25,12 +25,14 @@ use std::time::{Duration, Instant};
 pub const MSG_RELAY_BIND: u8 = 0x20;
 /// Relay endpoint allocated successfully
 pub const MSG_RELAY_BIND_ACK: u8 = 0x21;
-/// Relayed WireGuard packet
+/// Relayed WireGuard packet (requires session ID header - for userspace mode)
 pub const MSG_RELAY_DATA: u8 = 0x22;
 /// Release relay session
 pub const MSG_RELAY_UNBIND: u8 = 0x23;
 /// Relay keepalive (prevents session timeout)
 pub const MSG_RELAY_KEEPALIVE: u8 = 0x24;
+/// Request transparent relay (for kernel WireGuard mode - no header required)
+pub const MSG_RELAY_BIND_TRANSPARENT: u8 = 0x25;
 
 // ============================================================================
 // Data Structures
@@ -68,6 +70,9 @@ pub struct RelaySession {
     pub rate_limit_bucket: u64,
     /// Last rate limit refill time
     pub rate_limit_refill: Instant,
+    /// Transparent mode: forward raw packets without RELAY_DATA header
+    /// Used for kernel WireGuard mode where we can't add/strip headers
+    pub transparent: bool,
 }
 
 impl RelaySession {
@@ -79,6 +84,19 @@ impl RelaySession {
         pubkey_b: [u8; 32],
         vip_a: Ipv4Addr,
         vip_b: Ipv4Addr,
+    ) -> Self {
+        Self::new_with_mode(id, client_a, pubkey_a, pubkey_b, vip_a, vip_b, false)
+    }
+
+    /// Create a new relay session with explicit mode
+    pub fn new_with_mode(
+        id: SessionId,
+        client_a: SocketAddr,
+        pubkey_a: [u8; 32],
+        pubkey_b: [u8; 32],
+        vip_a: Ipv4Addr,
+        vip_b: Ipv4Addr,
+        transparent: bool,
     ) -> Self {
         let now = Instant::now();
         Self {
@@ -95,6 +113,7 @@ impl RelaySession {
             bytes_b_to_a: 0,
             rate_limit_bucket: 1024 * 1024, // 1 MB initial bucket (reduced from 10 MB)
             rate_limit_refill: now,
+            transparent,
         }
     }
 
@@ -141,6 +160,14 @@ pub struct RelayBindRequest {
     pub requester_vip: Ipv4Addr,
     /// Target's VIP
     pub target_vip: Ipv4Addr,
+    /// Transparent mode: for kernel WireGuard, forward raw packets by source address
+    /// without requiring RELAY_DATA header encapsulation
+    #[serde(default)]
+    pub transparent: bool,
+    /// WireGuard listen port (required for transparent mode)
+    /// The relay server uses this to know which port to expect WG packets from
+    #[serde(default)]
+    pub wg_listen_port: Option<u16>,
 }
 
 /// Relay bind acknowledgement message
@@ -155,10 +182,15 @@ pub struct RelayBindAck {
     /// with the correct peer, preventing session hijacking
     #[serde(default)]
     pub target_key: Option<[u8; 32]>,
-    /// Relay endpoint to use
+    /// Relay endpoint to use (set WireGuard peer endpoint to this for transparent relay)
     pub relay_endpoint: Option<String>,
     /// Error message (if failed)
     pub error: Option<String>,
+    /// Transparent mode acknowledgement
+    /// If true, the client should set WireGuard peer endpoint to relay_endpoint
+    /// and send raw WG packets (no RELAY_DATA header needed)
+    #[serde(default)]
+    pub transparent: bool,
 }
 
 /// Relay data header (prepended to forwarded packets)
@@ -245,6 +277,7 @@ impl RelayServer {
                 target_key: Some(request.target_key),
                 relay_endpoint: None,
                 error: Some("Relay is disabled".to_string()),
+                transparent: false,
             });
         }
 
@@ -256,6 +289,7 @@ impl RelayServer {
                 target_key: Some(request.target_key),
                 relay_endpoint: None,
                 error: Some("Maximum sessions reached".to_string()),
+                transparent: false,
             });
         }
 
@@ -271,16 +305,25 @@ impl RelayServer {
                 } else {
                     session.client_b = Some(requester_addr);
                 }
+                // Upgrade to transparent mode if requested
+                if request.transparent && !session.transparent {
+                    session.transparent = true;
+                    info!(
+                        "Upgraded relay session {:02x?} to transparent mode for kernel WireGuard",
+                        &session_id[..4]
+                    );
+                }
                 session.touch();
 
                 // Update address index
                 self.sessions_by_addr.insert(requester_addr, *session_id);
 
                 info!(
-                    "Reusing relay session {:02x?} for {} <-> {}",
+                    "Reusing relay session {:02x?} for {} <-> {} (transparent: {})",
                     &session_id[..4],
                     request.requester_vip,
-                    request.target_vip
+                    request.target_vip,
+                    session.transparent
                 );
 
                 return Ok(RelayBindAck {
@@ -289,6 +332,7 @@ impl RelayServer {
                     target_key: Some(request.target_key),
                     relay_endpoint: None, // Will be filled by caller with actual endpoint
                     error: None,
+                    transparent: session.transparent,
                 });
             }
         }
@@ -296,21 +340,23 @@ impl RelayServer {
         // Generate new session ID
         let session_id: SessionId = rand::random();
 
-        // Create session
-        let session = RelaySession::new(
+        // Create session with transparent mode if requested
+        let session = RelaySession::new_with_mode(
             session_id,
             requester_addr,
             request.requester_key,
             request.target_key,
             request.requester_vip,
             request.target_vip,
+            request.transparent,
         );
 
         info!(
-            "Allocated relay session {:02x?} for {} <-> {}",
+            "Allocated relay session {:02x?} for {} <-> {} (transparent: {})",
             &session_id[..4],
             request.requester_vip,
-            request.target_vip
+            request.target_vip,
+            request.transparent
         );
 
         // Store session
@@ -324,6 +370,7 @@ impl RelayServer {
             target_key: Some(request.target_key),
             relay_endpoint: None,
             error: None,
+            transparent: request.transparent,
         })
     }
 
@@ -392,6 +439,63 @@ impl RelayServer {
 
         session.touch();
         dest
+    }
+
+    /// Relay a transparent packet (no RELAY_DATA header) by source address lookup
+    /// Used for kernel WireGuard mode where packets are sent directly to relay
+    /// Returns the destination address if relay should proceed
+    pub fn relay_transparent_packet(
+        &mut self,
+        from: SocketAddr,
+        packet_size: usize,
+    ) -> Option<SocketAddr> {
+        // Look up session by source address
+        let session_id = self.sessions_by_addr.get(&from)?.clone();
+        let session = self.sessions_by_id.get_mut(&session_id)?;
+
+        // Only process if this is a transparent session
+        if !session.transparent {
+            debug!(
+                "Ignoring non-transparent packet from {} in session {:02x?}",
+                from,
+                &session_id[..4]
+            );
+            return None;
+        }
+
+        // Check rate limit
+        if !session.check_rate_limit(packet_size as u64, self.config.rate_limit_bytes_per_sec) {
+            debug!(
+                "Rate limited transparent packet in session {:02x?}",
+                &session_id[..4]
+            );
+            return None;
+        }
+
+        // Determine destination
+        let dest = if from == session.client_a {
+            session.bytes_a_to_b += packet_size as u64;
+            session.client_b
+        } else if session.client_b == Some(from) {
+            session.bytes_b_to_a += packet_size as u64;
+            Some(session.client_a)
+        } else {
+            // Address not in session - should not happen if sessions_by_addr is correct
+            return None;
+        };
+
+        session.touch();
+        dest
+    }
+
+    /// Check if an address has an active transparent relay session
+    pub fn has_transparent_session(&self, addr: &SocketAddr) -> bool {
+        if let Some(session_id) = self.sessions_by_addr.get(addr) {
+            if let Some(session) = self.sessions_by_id.get(session_id) {
+                return session.transparent && session.client_b.is_some();
+            }
+        }
+        false
     }
 
     /// Release a relay session
@@ -538,6 +642,19 @@ impl RelayClient {
         target_key: [u8; 32],
         target_vip: Ipv4Addr,
     ) -> RelayBindRequest {
+        self.create_bind_request_with_mode(target_key, target_vip, false, None)
+    }
+
+    /// Request relay allocation for a target peer with explicit mode
+    /// transparent: if true, request transparent relay (for kernel WireGuard)
+    /// wg_listen_port: WireGuard listen port (required for transparent mode)
+    pub fn create_bind_request_with_mode(
+        &mut self,
+        target_key: [u8; 32],
+        target_vip: Ipv4Addr,
+        transparent: bool,
+        wg_listen_port: Option<u16>,
+    ) -> RelayBindRequest {
         self.pending_binds.insert(target_key, Instant::now());
         self.peer_states
             .insert(target_key, RelayClientState::Binding);
@@ -547,6 +664,8 @@ impl RelayClient {
             target_key,
             requester_vip: self.our_vip,
             target_vip,
+            transparent,
+            wg_listen_port,
         }
     }
 
@@ -725,6 +844,7 @@ pub fn is_relay_message(data: &[u8]) -> bool {
             | MSG_RELAY_DATA
             | MSG_RELAY_UNBIND
             | MSG_RELAY_KEEPALIVE
+            | MSG_RELAY_BIND_TRANSPARENT
     )
 }
 
@@ -759,6 +879,8 @@ mod tests {
             target_key: key_b,
             requester_vip: vip_a,
             target_vip: vip_b,
+            transparent: false,
+            wg_listen_port: None,
         };
 
         let ack = server.allocate_session(&request, addr_a).unwrap();
@@ -783,6 +905,8 @@ mod tests {
             target_key: key_b,
             requester_vip: vip_a,
             target_vip: vip_b,
+            transparent: false,
+            wg_listen_port: None,
         };
 
         let ack1 = server.allocate_session(&request, addr_a).unwrap();
@@ -808,6 +932,8 @@ mod tests {
             target_key: key_b,
             requester_vip: vip_a,
             target_vip: vip_b,
+            transparent: false,
+            wg_listen_port: None,
         };
 
         let ack = server.allocate_session(&request, addr_a).unwrap();
@@ -832,6 +958,8 @@ mod tests {
             target_key: [2u8; 32],
             requester_vip: "10.200.0.1".parse().unwrap(),
             target_vip: "10.200.0.2".parse().unwrap(),
+            transparent: false,
+            wg_listen_port: None,
         };
 
         let encoded = encode_relay_bind(&request).unwrap();
@@ -853,5 +981,61 @@ mod tests {
         let (parsed_id, parsed_data) = parse_relay_data(&encoded).unwrap();
         assert_eq!(parsed_id, session_id);
         assert_eq!(parsed_data, wg_packet);
+    }
+
+    #[test]
+    fn test_transparent_relay_session() {
+        let config = RelayConfig::default();
+        let mut server = RelayServer::new(config);
+
+        let (key_a, key_b) = make_test_keys();
+        let addr_a: SocketAddr = "1.2.3.4:51820".parse().unwrap();
+        let addr_b: SocketAddr = "5.6.7.8:51820".parse().unwrap();
+        let vip_a: Ipv4Addr = "10.200.0.1".parse().unwrap();
+        let vip_b: Ipv4Addr = "10.200.0.2".parse().unwrap();
+
+        // Create transparent relay request (for kernel WireGuard mode)
+        let request = RelayBindRequest {
+            requester_key: key_a,
+            target_key: key_b,
+            requester_vip: vip_a,
+            target_vip: vip_b,
+            transparent: true,
+            wg_listen_port: Some(51820),
+        };
+
+        let ack = server.allocate_session(&request, addr_a).unwrap();
+        assert!(ack.success);
+        assert!(ack.transparent);
+
+        // Client B joins the session
+        let session_id = ack.session_id.unwrap();
+        server.join_session(&session_id, addr_b, &key_b).unwrap();
+
+        // Test transparent packet forwarding (by address lookup, not session ID)
+        let dest = server.relay_transparent_packet(addr_a, 100);
+        assert_eq!(dest, Some(addr_b));
+
+        let dest = server.relay_transparent_packet(addr_b, 100);
+        assert_eq!(dest, Some(addr_a));
+
+        // Non-transparent session should not allow transparent forwarding
+        let (key_c, key_d) = ([3u8; 32], [4u8; 32]);
+        let addr_c: SocketAddr = "9.10.11.12:51820".parse().unwrap();
+        let non_transparent_request = RelayBindRequest {
+            requester_key: key_c,
+            target_key: key_d,
+            requester_vip: "10.200.0.3".parse().unwrap(),
+            target_vip: "10.200.0.4".parse().unwrap(),
+            transparent: false,
+            wg_listen_port: None,
+        };
+        server
+            .allocate_session(&non_transparent_request, addr_c)
+            .unwrap();
+
+        // Should return None because session is not transparent
+        let dest = server.relay_transparent_packet(addr_c, 100);
+        assert_eq!(dest, None);
     }
 }

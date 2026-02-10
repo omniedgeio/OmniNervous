@@ -8,7 +8,7 @@ use anyhow::Result;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -16,10 +16,22 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 /// Signal sent from MessageHandler to main loop requesting a mode switch
+/// 
+/// DEPRECATED: This mechanism is no longer used. Instead of switching global mode,
+/// we now use per-peer transparent relay which allows kernel WireGuard to continue
+/// working while individual unreachable peers are routed through the relay server.
+/// 
+/// The per-peer relay approach is safer because:
+/// 1. No global mode switch that could be triggered by attackers
+/// 2. No coordination problems between peers
+/// 3. One bad peer doesn't affect connectivity to other peers
+/// 4. Transient failures don't cause permanent mode changes
 #[derive(Debug, Clone)]
 pub enum ModeSwitch {
     /// Switch from kernel to userspace WireGuard mode
     /// This is triggered when relay is needed but kernel mode cannot support it
+    /// 
+    /// NOTE: This variant is no longer triggered. Kept for backwards compatibility.
     KernelToUserspace {
         /// Reason for the switch
         reason: String,
@@ -132,7 +144,7 @@ impl<'a> MessageHandler<'a> {
             return Ok(());
         }
 
-        // Check for relay messages (0x20-0x24)
+        // Check for relay messages (0x20-0x25)
         if relay::is_relay_message(buf) {
             return self.handle_relay_message(buf, src).await;
         }
@@ -155,6 +167,26 @@ impl<'a> MessageHandler<'a> {
                 }
             }
             return Ok(());
+        }
+        
+        // Check for transparent relay forwarding (WireGuard packets: types 1-4)
+        // This is for nucleus/relay server mode - forward raw WG packets between peers
+        if self.is_nucleus_mode && buf[0] >= 1 && buf[0] <= 4 {
+            if let Some(relay_server) = self.relay_server.as_mut() {
+                // Check if source has an active transparent relay session
+                if let Some(dest) = relay_server.relay_transparent_packet(src, buf.len()) {
+                    // Forward the raw WireGuard packet to the destination peer
+                    if let Err(e) = self.socket.send_to(buf, dest).await {
+                        debug!("Failed to forward transparent relay packet: {}", e);
+                    } else {
+                        debug!(
+                            "Forwarded transparent relay WG packet ({} bytes) {} -> {}",
+                            buf.len(), src, dest
+                        );
+                    }
+                    return Ok(());
+                }
+            }
         }
 
         Ok(())
@@ -200,23 +232,51 @@ impl<'a> MessageHandler<'a> {
                         Ok(ack) => {
                             // Get the target key from the ack
                             if let Some(target_key) = ack.target_key {
+                                let is_transparent = ack.transparent;
                                 match relay_client.handle_bind_ack(&target_key, ack.clone()) {
                                     Ok(Some(relay_endpoint)) => {
                                         info!(
-                                            "Relay session established for peer {:02x?}, endpoint: {}",
+                                            "Relay session established for peer {:02x?}, endpoint: {} (transparent: {})",
                                             &target_key[..4],
-                                            relay_endpoint
+                                            relay_endpoint,
+                                            is_transparent
                                         );
                                         
-                                        // Note: In kernel WireGuard mode, we cannot redirect traffic
-                                        // through relay because kernel WireGuard sends raw packets.
-                                        // The relay protocol requires RELAY_DATA encapsulation.
-                                        // Relay fallback only works reliably in userspace mode.
-                                        if self.wg_listen_port.is_some() {
+                                        // For TRANSPARENT relay in kernel mode:
+                                        // Update WireGuard peer endpoint to point to relay server
+                                        // Kernel WG will then send raw packets to relay, which forwards them
+                                        if is_transparent && self.wg_listen_port.is_some() {
+                                            if let Some(wg) = self.wg_api.as_mut() {
+                                                // Find the peer's VIP to construct allowed_ips
+                                                let peer_vip = {
+                                                    let table = self.peer_table.lock().await;
+                                                    table.lookup_by_pubkey(&target_key).map(|p| p.virtual_ip)
+                                                };
+                                                
+                                                if let Some(vip) = peer_vip {
+                                                    let pubkey_b64 = base64::engine::general_purpose::STANDARD.encode(&target_key);
+                                                    let allowed_ips = vec![format!("{}/32", vip)];
+                                                    
+                                                    match wg.set_peer(&pubkey_b64, Some(relay_endpoint), &allowed_ips, Some(25)).await {
+                                                        Ok(()) => {
+                                                            info!(
+                                                                "✅ Updated WireGuard peer {} endpoint to relay server {} for transparent relay",
+                                                                vip, relay_endpoint
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            warn!("Failed to update WG peer endpoint for relay: {}", e);
+                                                        }
+                                                    }
+                                                } else {
+                                                    warn!("Could not find VIP for peer {:02x?} to update endpoint", &target_key[..4]);
+                                                }
+                                            }
+                                        } else if self.wg_listen_port.is_some() && !is_transparent {
+                                            // Non-transparent relay in kernel mode - this shouldn't happen
                                             warn!(
-                                                "Relay established but kernel WireGuard mode cannot \
-                                                 use relay encapsulation. Consider using --userspace mode \
-                                                 for relay fallback support."
+                                                "Relay established but not in transparent mode. \
+                                                 Kernel WireGuard cannot use RELAY_DATA encapsulation."
                                             );
                                         }
                                     }
@@ -1148,38 +1208,13 @@ impl<'a> MessageHandler<'a> {
     }
 
     /// Request relay allocation for a peer when direct connection fails
+    /// This is a convenience wrapper that uses standard (non-transparent) relay
     pub async fn request_relay_for_peer(
         &mut self,
         target_key: [u8; 32],
         target_vip: Ipv4Addr,
     ) -> Result<bool> {
-        let relay_client = match self.relay_client.as_mut() {
-            Some(c) => c,
-            None => {
-                debug!("Relay not available, cannot fallback for {}", target_vip);
-                return Ok(false);
-            }
-        };
-
-        // Check if we already have an active relay for this peer
-        if relay_client.is_relay_active(&target_key) {
-            debug!("Relay already active for {}", target_vip);
-            return Ok(true);
-        }
-
-        // Create and send bind request
-        let request = relay_client.create_bind_request(target_key, target_vip);
-        let bind_data = relay::encode_relay_bind(&request)?;
-        let relay_endpoint = relay_client.relay_endpoint();
-
-        self.socket.send_to(&bind_data, relay_endpoint).await?;
-
-        info!(
-            "Requested relay allocation for {} via {}",
-            target_vip, relay_endpoint
-        );
-
-        Ok(true)
+        self.request_relay_for_peer_with_mode(target_key, target_vip, false).await
     }
 
     /// Check for peers that need relay fallback (disco timed out after max retries)
@@ -1208,43 +1243,27 @@ impl<'a> MessageHandler<'a> {
                             warn!("Failed to retry disco ping to {}: {}", vip, e);
                         }
                     } else {
-                        // Max retries exceeded, request relay
+                        // Max retries exceeded, request relay for this specific peer
                         info!(
-                            "Disco ping to {} failed after {} retries, requesting relay fallback",
+                            "Disco ping to {} failed after {} retries, requesting per-peer relay fallback",
                             vip, retries
                         );
                         
-                        // Check if we're in kernel mode - if so, trigger userspace fallback
-                        if self.wg_listen_port.is_some() {
-                            error!(
-                                "⚠️  P2P connection to {} failed and relay is needed, but kernel WireGuard \
-                                 mode cannot use relay encapsulation. Requesting restart in userspace mode.",
-                                vip
-                            );
-                            
-                            // Send mode switch signal to main loop
-                            if let Some(tx) = &self.mode_switch_tx {
-                                let reason = format!(
-                                    "P2P to {} failed after {} retries; relay needed but kernel WG cannot relay",
-                                    vip, retries
-                                );
-                                if let Err(e) = tx.try_send(ModeSwitch::KernelToUserspace { reason: reason.clone() }) {
-                                    error!("Failed to send mode switch signal: {}", e);
-                                } else {
-                                    info!("🔄 Mode switch signal sent: {}", reason);
-                                }
-                            }
-                            
-                            // Still track this as needing relay (useful for logging)
-                            relay_requested.push(vip);
-                            continue;
-                        }
+                        // Request relay for this peer (works in both kernel and userspace mode)
+                        // In kernel mode: request transparent relay (no RELAY_DATA header)
+                        // In userspace mode: request standard relay (with RELAY_DATA header)
+                        let use_transparent = self.wg_listen_port.is_some();
                         
-                        // Userspace mode - proceed with relay request
-                        if let Err(e) = self.request_relay_for_peer(pubkey, vip).await {
+                        if let Err(e) = self.request_relay_for_peer_with_mode(pubkey, vip, use_transparent).await {
                             warn!("Failed to request relay for {}: {}", vip, e);
                         } else {
                             relay_requested.push(vip);
+                            if use_transparent {
+                                info!(
+                                    "🔄 Requested TRANSPARENT relay for {} (kernel mode per-peer relay)",
+                                    vip
+                                );
+                            }
                         }
                     }
                 }
@@ -1252,5 +1271,49 @@ impl<'a> MessageHandler<'a> {
         }
 
         Ok(relay_requested)
+    }
+    
+    /// Request relay allocation for a peer when direct connection fails
+    /// In kernel mode, uses transparent relay (no header encapsulation)
+    pub async fn request_relay_for_peer_with_mode(
+        &mut self,
+        target_key: [u8; 32],
+        target_vip: Ipv4Addr,
+        transparent: bool,
+    ) -> Result<bool> {
+        let relay_client = match self.relay_client.as_mut() {
+            Some(c) => c,
+            None => {
+                debug!("Relay not available, cannot fallback for {}", target_vip);
+                return Ok(false);
+            }
+        };
+
+        // Check if we already have an active relay for this peer
+        if relay_client.is_relay_active(&target_key) {
+            debug!("Relay already active for {}", target_vip);
+            return Ok(true);
+        }
+
+        // Create and send bind request with transparent mode flag
+        let request = relay_client.create_bind_request_with_mode(
+            target_key, 
+            target_vip, 
+            transparent,
+            self.wg_listen_port,
+        );
+        let bind_data = relay::encode_relay_bind(&request)?;
+        let relay_endpoint = relay_client.relay_endpoint();
+
+        self.socket.send_to(&bind_data, relay_endpoint).await?;
+
+        info!(
+            "Requested {} relay allocation for {} via {}",
+            if transparent { "transparent" } else { "standard" },
+            target_vip, 
+            relay_endpoint
+        );
+
+        Ok(true)
     }
 }

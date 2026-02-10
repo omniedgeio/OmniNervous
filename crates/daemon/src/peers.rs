@@ -183,6 +183,13 @@ impl PeerTable {
             .and_then(|vip| self.by_vip.get(vip))
     }
 
+    /// Lookup peer by public key (linear scan, use sparingly)
+    pub fn lookup_by_pubkey(&self, pubkey: &[u8; 32]) -> Option<&PeerEntry> {
+        self.by_vip
+            .values()
+            .find(|p| p.public_key.as_ref() == Some(pubkey))
+    }
+
     /// Update last_seen for a peer
     pub fn touch(&mut self, vip: &Ipv4Addr) {
         if let Some(peer) = self.by_vip.get_mut(vip) {
