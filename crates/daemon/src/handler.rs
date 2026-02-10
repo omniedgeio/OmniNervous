@@ -314,13 +314,28 @@ impl<'a> MessageHandler<'a> {
     }
 
     async fn handle_nucleus_signaling(&mut self, buf: &[u8], src: SocketAddr) -> Result<()> {
-        if let Some(response) =
-            signaling::handle_nucleus_message(self.nucleus_state, buf, src, self.secret)
-        {
+        let result =
+            signaling::handle_nucleus_message(self.nucleus_state, buf, src, self.secret);
+
+        // Send response to the original sender
+        if let Some(response) = result.response {
             if let Err(e) = self.socket.send_to(&response, src).await {
                 warn!("Failed to send signaling response: {}", e);
             }
         }
+
+        // Send notifications to other peers (for simultaneous disco)
+        for (peer_addr, notification) in result.notifications {
+            if let Err(e) = self.socket.send_to(&notification, peer_addr).await {
+                warn!(
+                    "Failed to send PEER_NOTIFY to {}: {}",
+                    peer_addr, e
+                );
+            } else {
+                debug!("Sent PEER_NOTIFY to {}", peer_addr);
+            }
+        }
+
         Ok(())
     }
 
@@ -332,6 +347,7 @@ impl<'a> MessageHandler<'a> {
             Some(signaling::SIGNALING_HEARTBEAT_ACK) => self.process_heartbeat_ack(buf).await,
             Some(signaling::SIGNALING_PEER_INFO) => self.process_peer_info(buf).await,
             Some(signaling::SIGNALING_STUN_RESPONSE) => self.process_stun_response(buf).await,
+            Some(signaling::SIGNALING_PEER_NOTIFY) => self.process_peer_notify(buf, src).await,
             Some(signaling::SIGNALING_NAT_PUNCH) => {
                 debug!("Received NAT punch from {}", src);
                 Ok(())
@@ -340,6 +356,26 @@ impl<'a> MessageHandler<'a> {
             Some(signaling::SIGNALING_DISCO_PONG) => self.handle_disco_pong(buf, src).await,
             _ => {
                 debug!("Unknown signaling message type");
+                Ok(())
+            }
+        }
+    }
+
+    /// Handle PEER_NOTIFY - Nucleus pushed new peer info for simultaneous disco
+    async fn process_peer_notify(&mut self, buf: &[u8], src: SocketAddr) -> Result<()> {
+        match signaling::parse_peer_notify(buf, self.secret) {
+            Ok(notify) => {
+                info!(
+                    "Received PEER_NOTIFY from Nucleus: new peer {} at {}",
+                    notify.peer.vip, notify.peer.endpoint
+                );
+                // Add the peer and start disco immediately
+                // This enables simultaneous hole punching with the new peer
+                self.add_peer(notify.peer).await;
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Failed to parse PEER_NOTIFY from {}: {}", src, e);
                 Ok(())
             }
         }

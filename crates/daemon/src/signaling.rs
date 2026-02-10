@@ -67,6 +67,8 @@ pub const MSG_DISCO_PING: u8 = 0x1B;
 pub const MSG_DISCO_PONG: u8 = 0x1C;
 /// Encrypted message envelope - wraps any message type with nacl box encryption
 pub const MSG_ENCRYPTED: u8 = 0x1D;
+/// Peer notification - Nucleus pushes new peer info to existing peers for simultaneous disco
+pub const MSG_PEER_NOTIFY: u8 = 0x1E;
 
 /// How long peers stay in "recent" list for delta updates
 const RECENT_PEER_WINDOW_SECS: u64 = 90; // 3x heartbeat interval
@@ -239,6 +241,16 @@ pub struct DiscoPong {
     /// If None, assume the signaling port is also the WireGuard port (userspace mode)
     #[serde(default)]
     pub wg_port: Option<u16>,
+}
+
+/// Peer notification - pushed by Nucleus to existing peers when a new peer joins
+/// This enables simultaneous hole punching for NAT traversal
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PeerNotifyMessage {
+    /// The new peer that joined
+    pub peer: PeerInfo,
+    /// HMAC tag for authentication (optional)
+    pub hmac_tag: Option<[u8; 32]>,
 }
 
 /// Encrypted envelope for signaling messages
@@ -498,15 +510,48 @@ impl NucleusState {
         }
     }
 
-    /// Register or update a peer
-    pub fn register(&mut self, cluster: &str, peer: RegisteredPeer) -> Vec<PeerInfo> {
+    /// Register or update a peer. Returns (recent_peers_for_new_peer, existing_peers_to_notify)
+    /// - recent_peers_for_new_peer: peers that the new peer should know about (for REGISTER_ACK)
+    /// - existing_peers_to_notify: existing peers that should be notified about the new peer (for PEER_NOTIFY)
+    pub fn register(
+        &mut self,
+        cluster: &str,
+        peer: RegisteredPeer,
+    ) -> (Vec<PeerInfo>, Vec<(SocketAddr, PeerInfo)>) {
         let state = self.clusters.entry(cluster.to_string()).or_default();
         let is_new = !state.peers.contains_key(&peer.vip);
 
+        // Collect existing peers to notify BEFORE inserting the new peer
+        let peers_to_notify: Vec<(SocketAddr, PeerInfo)> = if is_new {
+            state
+                .peers
+                .values()
+                .map(|p| {
+                    (
+                        p.endpoint,
+                        PeerInfo {
+                            vip: p.vip,
+                            vip_v6: p.vip_v6,
+                            endpoint: p.endpoint.to_string(),
+                            public_key: p.public_key,
+                            nat_type: p.nat_type,
+                            mapped_endpoint: p.mapped_endpoint.clone(),
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
         if is_new {
             info!(
-                "New peer {} (v6: {:?}) at {} in cluster '{}'",
-                peer.vip, peer.vip_v6, peer.endpoint, cluster
+                "New peer {} (v6: {:?}) at {} in cluster '{}' - notifying {} existing peers",
+                peer.vip,
+                peer.vip_v6,
+                peer.endpoint,
+                cluster,
+                peers_to_notify.len()
             );
         } else {
             debug!("Updated peer {} in cluster '{}'", peer.vip, cluster);
@@ -519,8 +564,9 @@ impl NucleusState {
 
         state.peers.insert(peer.vip, peer.clone());
 
-        // Return recent peers (joined in last RECENT_PEER_WINDOW_SECS)
-        self.get_recent_peers(cluster, peer.vip)
+        // Return recent peers (joined in last RECENT_PEER_WINDOW_SECS) for the new peer
+        let recent_peers = self.get_recent_peers(cluster, peer.vip);
+        (recent_peers, peers_to_notify)
     }
 
     /// Get peers that joined recently (for REGISTER_ACK)
@@ -725,22 +771,41 @@ fn verify_hmac_tag(received: Option<[u8; 32]>, expected: [u8; 32]) -> bool {
     }
 }
 
+/// Result from handling a Nucleus message
+/// Contains the response to send back to sender, plus optional notifications for other peers
+pub struct NucleusMessageResult {
+    /// Response to send back to the sender (if any)
+    pub response: Option<Vec<u8>>,
+    /// Notifications to send to other peers (socket address, message bytes)
+    pub notifications: Vec<(SocketAddr, Vec<u8>)>,
+}
+
+impl NucleusMessageResult {
+    fn response_only(response: Option<Vec<u8>>) -> Self {
+        Self {
+            response,
+            notifications: vec![],
+        }
+    }
+}
+
 /// Handle incoming signaling message (Nucleus side)
+/// Returns response for sender and optional notifications for other peers
 pub fn handle_nucleus_message(
     state: &mut NucleusState,
     data: &[u8],
     src: SocketAddr,
     secret: Option<&str>,
-) -> Option<Vec<u8>> {
+) -> NucleusMessageResult {
     // Rate limiting: Check if IP is allowed
     let ip = src.ip();
     if state.rate_limiter.check_key(&ip).is_err() {
         warn!("Rate limit exceeded for IP: {}", ip);
-        return None;
+        return NucleusMessageResult::response_only(None);
     }
 
     if data.is_empty() {
-        return None;
+        return NucleusMessageResult::response_only(None);
     }
 
     // SECURITY: Limit maximum message size to prevent DoS via large payloads
@@ -757,7 +822,7 @@ pub fn handle_nucleus_message(
             data.len(),
             MAX_SIGNALING_MESSAGE_SIZE
         );
-        return None;
+        return NucleusMessageResult::response_only(None);
     }
 
     let msg_type = data[0];
@@ -771,27 +836,29 @@ pub fn handle_nucleus_message(
                         "Invalid cluster name in REGISTER from {}: {}",
                         src, reg.cluster
                     );
-                    return None;
+                    return NucleusMessageResult::response_only(None);
                 }
                 if !is_private_ip(reg.vip) {
                     warn!("VIP {} is not in private IP range (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)", reg.vip);
-                    return None;
+                    return NucleusMessageResult::response_only(None);
                 }
                 // Validate IPv6 VIP if provided
                 if let Some(vip_v6) = reg.vip_v6 {
                     if !is_private_ip_v6(vip_v6) {
                         warn!("IPv6 VIP {} is not in ULA range (fd00::/8)", vip_v6);
-                        return None;
+                        return NucleusMessageResult::response_only(None);
                     }
                 }
                 if let Some(s) = secret {
                     let mut check_reg = reg.clone();
                     check_reg.hmac_tag = None;
-                    let check_bytes = serde_cbor::to_vec(&check_reg).ok()?;
+                    let Some(check_bytes) = serde_cbor::to_vec(&check_reg).ok() else {
+                        return NucleusMessageResult::response_only(None);
+                    };
                     let expected = calculate_hmac(s, &check_bytes);
                     if !verify_hmac_tag(reg.hmac_tag, expected) {
                         warn!("HMAC verification failed for REGISTER from {}", src);
-                        return None;
+                        return NucleusMessageResult::response_only(None);
                     }
                 }
 
@@ -837,7 +904,18 @@ pub fn handle_nucleus_message(
                     joined_at: Instant::now(),
                     last_seen: Instant::now(),
                 };
-                let recent_peers = state.register(&reg.cluster, peer);
+
+                // Create PeerInfo for the new peer (to notify existing peers)
+                let new_peer_info = PeerInfo {
+                    vip: peer.vip,
+                    vip_v6: peer.vip_v6,
+                    endpoint: peer.endpoint.to_string(),
+                    public_key: peer.public_key,
+                    nat_type: peer.nat_type,
+                    mapped_endpoint: peer.mapped_endpoint.clone(),
+                };
+
+                let (recent_peers, peers_to_notify) = state.register(&reg.cluster, peer);
 
                 let mut ack = RegisterAckMessage {
                     success: true,
@@ -846,15 +924,38 @@ pub fn handle_nucleus_message(
                 };
 
                 if let Some(s) = secret {
-                    let bytes = serde_cbor::to_vec(&ack).ok()?;
-                    ack.hmac_tag = Some(calculate_hmac(s, &bytes));
+                    if let Ok(bytes) = serde_cbor::to_vec(&ack) {
+                        ack.hmac_tag = Some(calculate_hmac(s, &bytes));
+                    }
                 }
 
-                encode_message(MSG_REGISTER_ACK, &ack).ok()
+                // Build notifications for existing peers
+                let notifications: Vec<(SocketAddr, Vec<u8>)> = peers_to_notify
+                    .into_iter()
+                    .filter_map(|(peer_addr, _peer_info)| {
+                        let mut notify = PeerNotifyMessage {
+                            peer: new_peer_info.clone(),
+                            hmac_tag: None,
+                        };
+                        if let Some(s) = secret {
+                            if let Ok(bytes) = serde_cbor::to_vec(&notify) {
+                                notify.hmac_tag = Some(calculate_hmac(s, &bytes));
+                            }
+                        }
+                        encode_message(MSG_PEER_NOTIFY, &notify)
+                            .ok()
+                            .map(|msg| (peer_addr, msg))
+                    })
+                    .collect();
+
+                NucleusMessageResult {
+                    response: encode_message(MSG_REGISTER_ACK, &ack).ok(),
+                    notifications,
+                }
             }
             Err(e) => {
                 warn!("Invalid REGISTER from {}: {}", src, e);
-                None
+                NucleusMessageResult::response_only(None)
             }
         },
         MSG_HEARTBEAT => match serde_cbor::from_slice::<HeartbeatMessage>(payload) {
@@ -864,28 +965,30 @@ pub fn handle_nucleus_message(
                         "Invalid cluster name in HEARTBEAT from {}: {}",
                         src, hb.cluster
                     );
-                    return None;
+                    return NucleusMessageResult::response_only(None);
                 }
                 if !is_private_ip(hb.vip) {
                     warn!("VIP {} is not in private IP range", hb.vip);
-                    return None;
+                    return NucleusMessageResult::response_only(None);
                 }
                 // Validate IPv6 VIP if provided
                 if let Some(vip_v6) = hb.vip_v6 {
                     if !is_private_ip_v6(vip_v6) {
                         warn!("IPv6 VIP {} is not in ULA range (fd00::/8)", vip_v6);
-                        return None;
+                        return NucleusMessageResult::response_only(None);
                     }
                 }
 
                 if let Some(s) = secret {
                     let mut check_hb = hb.clone();
                     check_hb.hmac_tag = None;
-                    let check_bytes = serde_cbor::to_vec(&check_hb).ok()?;
+                    let Some(check_bytes) = serde_cbor::to_vec(&check_hb).ok() else {
+                        return NucleusMessageResult::response_only(None);
+                    };
                     let expected = calculate_hmac(s, &check_bytes);
                     if !verify_hmac_tag(hb.hmac_tag, expected) {
                         warn!("HMAC verification failed for HEARTBEAT from {}", src);
-                        return None;
+                        return NucleusMessageResult::response_only(None);
                     }
                 }
 
@@ -900,15 +1003,16 @@ pub fn handle_nucleus_message(
                 };
 
                 if let Some(s) = secret {
-                    let bytes = serde_cbor::to_vec(&ack).ok()?;
-                    ack.hmac_tag = Some(calculate_hmac(s, &bytes));
+                    if let Ok(bytes) = serde_cbor::to_vec(&ack) {
+                        ack.hmac_tag = Some(calculate_hmac(s, &bytes));
+                    }
                 }
 
-                encode_message(MSG_HEARTBEAT_ACK, &ack).ok()
+                NucleusMessageResult::response_only(encode_message(MSG_HEARTBEAT_ACK, &ack).ok())
             }
             Err(e) => {
                 warn!("Invalid HEARTBEAT from {}: {}", src, e);
-                None
+                NucleusMessageResult::response_only(None)
             }
         },
         MSG_QUERY_PEER => match serde_cbor::from_slice::<QueryPeerMessage>(payload) {
@@ -918,38 +1022,40 @@ pub fn handle_nucleus_message(
                         "Invalid cluster name in QUERY_PEER from {}: {}",
                         src, query.cluster
                     );
-                    return None;
+                    return NucleusMessageResult::response_only(None);
                 }
                 if !is_private_ip(query.target_vip) || !is_private_ip(query.requester_vip) {
                     warn!(
                         "Invalid VIP in QUERY_PEER: target={}, requester={}",
                         query.target_vip, query.requester_vip
                     );
-                    return None;
+                    return NucleusMessageResult::response_only(None);
                 }
 
                 // Validate IPv6 VIPs if provided
                 if let Some(ref v6) = query.target_vip_v6 {
                     if !is_private_ip_v6(*v6) {
                         warn!("Invalid IPv6 target VIP in QUERY_PEER: {}", v6);
-                        return None;
+                        return NucleusMessageResult::response_only(None);
                     }
                 }
                 if let Some(ref v6) = query.requester_vip_v6 {
                     if !is_private_ip_v6(*v6) {
                         warn!("Invalid IPv6 requester VIP in QUERY_PEER: {}", v6);
-                        return None;
+                        return NucleusMessageResult::response_only(None);
                     }
                 }
 
                 if let Some(s) = secret {
                     let mut check_query = query.clone();
                     check_query.hmac_tag = None;
-                    let check_bytes = serde_cbor::to_vec(&check_query).ok()?;
+                    let Some(check_bytes) = serde_cbor::to_vec(&check_query).ok() else {
+                        return NucleusMessageResult::response_only(None);
+                    };
                     let expected = calculate_hmac(s, &check_bytes);
                     if !verify_hmac_tag(query.hmac_tag, expected) {
                         warn!("HMAC verification failed for QUERY_PEER from {}", src);
-                        return None;
+                        return NucleusMessageResult::response_only(None);
                     }
                 }
 
@@ -968,15 +1074,16 @@ pub fn handle_nucleus_message(
                 };
 
                 if let Some(s) = secret {
-                    let bytes = serde_cbor::to_vec(&response).ok()?;
-                    response.hmac_tag = Some(calculate_hmac(s, &bytes));
+                    if let Ok(bytes) = serde_cbor::to_vec(&response) {
+                        response.hmac_tag = Some(calculate_hmac(s, &bytes));
+                    }
                 }
 
-                encode_message(MSG_PEER_INFO, &response).ok()
+                NucleusMessageResult::response_only(encode_message(MSG_PEER_INFO, &response).ok())
             }
             Err(e) => {
                 warn!("Invalid QUERY_PEER from {}: {}", src, e);
-                None
+                NucleusMessageResult::response_only(None)
             }
         },
         MSG_STUN_QUERY => {
@@ -984,11 +1091,11 @@ pub fn handle_nucleus_message(
             let response = StunResponse {
                 public_addr: src.to_string(),
             };
-            encode_message(MSG_STUN_RESPONSE, &response).ok()
+            NucleusMessageResult::response_only(encode_message(MSG_STUN_RESPONSE, &response).ok())
         }
         _ => {
             debug!("Unknown message type {} from {}", msg_type, src);
-            None
+            NucleusMessageResult::response_only(None)
         }
     }
 }
@@ -1609,6 +1716,28 @@ pub const SIGNALING_NAT_PUNCH: u8 = MSG_NAT_PUNCH;
 pub const SIGNALING_DISCO_PING: u8 = MSG_DISCO_PING;
 pub const SIGNALING_DISCO_PONG: u8 = MSG_DISCO_PONG;
 pub const SIGNALING_ENCRYPTED: u8 = MSG_ENCRYPTED;
+pub const SIGNALING_PEER_NOTIFY: u8 = MSG_PEER_NOTIFY;
+
+/// Parse a PEER_NOTIFY message (Edge receives this from Nucleus)
+pub fn parse_peer_notify(data: &[u8], secret: Option<&str>) -> Result<PeerNotifyMessage> {
+    if data.is_empty() || data[0] != MSG_PEER_NOTIFY {
+        anyhow::bail!("Not a PEER_NOTIFY message");
+    }
+    let notify: PeerNotifyMessage = serde_cbor::from_slice(&data[1..])
+        .context("Failed to decode PEER_NOTIFY")?;
+
+    if let Some(s) = secret {
+        let mut check = notify.clone();
+        check.hmac_tag = None;
+        let check_bytes = serde_cbor::to_vec(&check)?;
+        let expected = calculate_hmac(s, &check_bytes);
+        if !verify_hmac_tag(notify.hmac_tag, expected) {
+            anyhow::bail!("HMAC verification failed for PEER_NOTIFY");
+        }
+    }
+
+    Ok(notify)
+}
 
 #[cfg(test)]
 mod tests {
