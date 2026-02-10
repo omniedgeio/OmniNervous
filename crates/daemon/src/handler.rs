@@ -550,6 +550,29 @@ impl<'a> MessageHandler<'a> {
                                 warn!("Failed to update WG peer endpoint: {}", e);
                             }
                         }
+
+                        // Cancel pending disco pings to this peer that target the OLD endpoint.
+                        // These retries would fail anyway since the peer's NAT mapping changed.
+                        // This prevents unnecessary relay fallback when direct P2P is possible.
+                        let cancelled: Vec<[u8; 12]> = self
+                            .pending_pings
+                            .iter()
+                            .filter(|(_, p)| p.target_vip == ping.sender_vip && p.target != src)
+                            .map(|(tx_id, _)| *tx_id)
+                            .collect();
+
+                        for tx_id in &cancelled {
+                            self.pending_pings.remove(tx_id);
+                        }
+
+                        if !cancelled.is_empty() {
+                            info!(
+                                "Cancelled {} pending disco pings to {} (endpoint changed to {})",
+                                cancelled.len(),
+                                ping.sender_vip,
+                                src
+                            );
+                        }
                     }
                 }
 
@@ -659,6 +682,30 @@ impl<'a> MessageHandler<'a> {
                             {
                                 warn!("Failed to update WG peer endpoint: {}", e);
                             }
+                        }
+
+                        // Cancel any remaining pending disco pings to this peer that target the
+                        // OLD endpoint. These retries would fail since the peer's NAT mapping changed.
+                        // Note: The race logic above only cancels pings from the *current* race,
+                        // but there may be leftover pings from previous disco attempts.
+                        let cancelled: Vec<[u8; 12]> = self
+                            .pending_pings
+                            .iter()
+                            .filter(|(_, p)| p.target_vip == pending.target_vip && p.target != src)
+                            .map(|(tx_id, _)| *tx_id)
+                            .collect();
+
+                        for tx_id in &cancelled {
+                            self.pending_pings.remove(tx_id);
+                        }
+
+                        if !cancelled.is_empty() {
+                            info!(
+                                "Cancelled {} stale pending disco pings to {} (endpoint changed to {})",
+                                cancelled.len(),
+                                pending.target_vip,
+                                src
+                            );
                         }
                     }
                 } else {
