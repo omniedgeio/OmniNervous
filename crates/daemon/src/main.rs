@@ -665,6 +665,10 @@ async fn main() -> Result<()> {
             }
             _ = fast_interval.tick() => {
                 if !is_nucleus_mode {
+                    // In kernel mode (!userspace), WireGuard listens on args.port
+                    // We need this to forward relayed packets to kernel WireGuard
+                    let kernel_wg_port = if !args.userspace { Some(args.port) } else { None };
+                    
                     let mut handler = MessageHandler {
                         socket: &socket,
                         peer_table: &peer_table_mutex,
@@ -685,6 +689,7 @@ async fn main() -> Result<()> {
                         },
                         relay_server: relay_server.as_mut(),
                         relay_client: relay_client.as_mut(),
+                        wg_listen_port: kernel_wg_port,
                         #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
                         l2_transport: l2_transport.as_ref(),
                     };
@@ -707,6 +712,9 @@ async fn main() -> Result<()> {
 
                         if first_byte >= 0x11 {
                             // Signaling message
+                            // In kernel mode, WireGuard listens on args.port for relay forwarding
+                            let kernel_wg_port = if !args.userspace { Some(args.port) } else { None };
+                            
                             let mut handler = MessageHandler {
                                 socket: &socket,
                                 peer_table: &peer_table_mutex,
@@ -727,6 +735,7 @@ async fn main() -> Result<()> {
                                 },
                                 relay_server: relay_server.as_mut(),
                                 relay_client: relay_client.as_mut(),
+                                wg_listen_port: kernel_wg_port,
                                 #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
                                 l2_transport: l2_transport.as_ref(),
                             };
@@ -744,6 +753,9 @@ async fn main() -> Result<()> {
                         } else {
                             #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
                             if first_byte == L2_ENVELOPE {
+                                // In kernel mode, WireGuard listens on args.port for relay forwarding
+                                let kernel_wg_port = if !args.userspace { Some(args.port) } else { None };
+                                
                                 let mut handler = MessageHandler {
                                     socket: &socket,
                                     peer_table: &peer_table_mutex,
@@ -764,6 +776,7 @@ async fn main() -> Result<()> {
                                     },
                                     relay_server: relay_server.as_mut(),
                                     relay_client: relay_client.as_mut(),
+                                    wg_listen_port: kernel_wg_port,
                                     #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
                                     l2_transport: l2_transport.as_ref(),
                                 };

@@ -100,6 +100,9 @@ pub struct MessageHandler<'a> {
     pub relay_server: Option<&'a mut RelayServer>,
     /// Relay client (for edge mode)
     pub relay_client: Option<&'a mut RelayClient>,
+    /// WireGuard listen port (for kernel mode relay forwarding)
+    /// In kernel mode, relayed WireGuard packets need to be forwarded to this port
+    pub wg_listen_port: Option<u16>,
     #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
     pub l2_transport: Option<&'a crate::l2::L2Transport>,
 }
@@ -197,7 +200,7 @@ impl<'a> MessageHandler<'a> {
             }
 
             relay::MSG_RELAY_DATA => {
-                // Forward relayed data
+                // Server-side: Forward relayed data between peers
                 if let Some(relay_server) = self.relay_server.as_mut() {
                     match relay::parse_relay_data(buf) {
                         Ok((session_id, wg_packet)) => {
@@ -213,6 +216,45 @@ impl<'a> MessageHandler<'a> {
                         }
                         Err(e) => {
                             debug!("Failed to parse RELAY_DATA: {}", e);
+                        }
+                    }
+                } else {
+                    // Edge client: Receive relayed WireGuard packet
+                    // This handles the case where we receive WireGuard data via relay
+                    match relay::parse_relay_data(buf) {
+                        Ok((_session_id, wg_packet)) => {
+                            // For userspace WireGuard, process the packet directly
+                            if let Some(wg) = self.wg_api.as_mut() {
+                                // Try to handle it through userspace WireGuard
+                                // For kernel mode, this is a no-op, so we need special handling
+                                if let Err(e) = wg.handle_incoming_packet(wg_packet, src, self.socket).await {
+                                    debug!("Failed to process relayed WG packet: {}", e);
+                                }
+                            }
+                            
+                            // Kernel mode relay forwarding:
+                            // In kernel mode, the WireGuard interface listens on its own port.
+                            // We need to forward the relayed packet to localhost:wg_port so the
+                            // kernel WireGuard module can process it.
+                            if let Some(wg_port) = self.wg_listen_port {
+                                let kernel_wg_addr = std::net::SocketAddr::new(
+                                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                                    wg_port,
+                                );
+                                // Forward the raw WireGuard packet to kernel WireGuard
+                                if let Err(e) = self.socket.send_to(wg_packet, kernel_wg_addr).await {
+                                    debug!("Failed to forward relayed packet to kernel WG: {}", e);
+                                } else {
+                                    debug!(
+                                        "Forwarded relayed WG packet ({} bytes) to kernel WireGuard at {}",
+                                        wg_packet.len(),
+                                        kernel_wg_addr
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Failed to parse RELAY_DATA on edge: {}", e);
                         }
                     }
                 }
