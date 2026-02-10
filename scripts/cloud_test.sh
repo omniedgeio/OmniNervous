@@ -1,8 +1,15 @@
 #!/bin/bash
 # =============================================================================
-# OmniNervous Cloud-to-Cloud Test Orchestrator (v0.8.5)
+# OmniNervous Cloud-to-Cloud Test Orchestrator (v0.9.3)
 # Run from LOCAL machine, orchestrates tests between cloud instances
 # Architecture: Nucleus (signaling/relay) + Edge A + Edge B (WireGuard VPN)
+# 
+# Features:
+#   - P2P vs Relay connectivity detection
+#   - Automatic WireGuard interface cleanup after test
+#   - Docker container cleanup for local testing
+#   - IPv4 and IPv6 tunnel testing
+#   - Baseline vs VPN performance comparison
 # =============================================================================
 
 set -e
@@ -183,6 +190,123 @@ ensure_local_docker() {
         docker exec "$LOCAL_DOCKER_NAME" mkdir -p /root/omni-test
         # Symlink /root/omni-test to /home/ubuntu if needed or just use consistent paths
     fi
+}
+
+# =============================================================================
+# Cleanup Functions
+# =============================================================================
+
+cleanup_local_docker() {
+    if [[ "$LOCAL_DOCKER" != "true" ]]; then return 0; fi
+    
+    print_step "Cleaning up local Docker container ($LOCAL_DOCKER_NAME)..."
+    if docker ps -a --format '{{.Names}}' | grep -q "^$LOCAL_DOCKER_NAME$"; then
+        docker stop "$LOCAL_DOCKER_NAME" 2>/dev/null || true
+        docker rm -f "$LOCAL_DOCKER_NAME" 2>/dev/null || true
+        echo -e "  ✅ Docker container $LOCAL_DOCKER_NAME removed"
+    else
+        echo -e "  ℹ️  Docker container $LOCAL_DOCKER_NAME not found (already cleaned)"
+    fi
+}
+
+cleanup_wireguard_interfaces() {
+    local node="$1"
+    print_step "Cleaning up WireGuard interfaces on $node..."
+    
+    local remote_os=$(ssh_cmd "$node" "uname" 2>/dev/null || echo "Unknown")
+    
+    if [[ "$remote_os" == "Linux" ]]; then
+        # Linux: Delete all omni* interfaces (kernel WireGuard or userspace TUN)
+        ssh_cmd "$node" "
+            for dev in \$(ip link show 2>/dev/null | grep -oE 'omni[0-9]+' | sort -u); do
+                echo \"  Deleting interface: \$dev\"
+                sudo ip link set \$dev down 2>/dev/null || true
+                sudo ip link delete \$dev 2>/dev/null || true
+            done
+            # Also try wg-quick down if it was used
+            for conf in /etc/wireguard/omni*.conf; do
+                if [[ -f \"\$conf\" ]]; then
+                    sudo wg-quick down \"\$(basename \$conf .conf)\" 2>/dev/null || true
+                fi
+            done
+        " 2>/dev/null || true
+        echo -e "  ✅ WireGuard interfaces cleaned on $node (Linux)"
+        
+    elif [[ "$remote_os" == "Darwin" ]]; then
+        # macOS: Delete utun interfaces (userspace WireGuard uses utun)
+        # Note: We can't directly delete utun interfaces, but we can kill the process
+        ssh_cmd "$node" "
+            # Kill any wireguard-go or boringtun processes
+            sudo pkill -9 wireguard-go 2>/dev/null || true
+            sudo pkill -9 boringtun 2>/dev/null || true
+            # Remove WireGuard config files
+            sudo rm -f /etc/wireguard/omni*.conf 2>/dev/null || true
+        " 2>/dev/null || true
+        echo -e "  ✅ WireGuard processes cleaned on $node (macOS)"
+        
+    else
+        echo -e "  ⚠️  Unknown OS on $node, skipping interface cleanup"
+    fi
+}
+
+detect_connectivity_type() {
+    local node="$1"
+    local log_file="$2"
+    
+    # Check logs for relay usage indicators
+    local using_relay=false
+    local relay_session=""
+    local direct_p2p=false
+    local disco_success=false
+    
+    # Check for relay indicators in logs
+    if ssh_cmd "$node" "grep -q 'RELAY_BIND_ACK\|Relay session\|Using relay' $log_file 2>/dev/null"; then
+        using_relay=true
+        relay_session=$(ssh_cmd "$node" "grep -oE 'session[[:space:]]*[a-f0-9-]+' $log_file 2>/dev/null | head -1" || echo "")
+    fi
+    
+    # Check for successful disco (direct P2P)
+    if ssh_cmd "$node" "grep -q 'Disco pong received\|disco.*success\|Direct path confirmed' $log_file 2>/dev/null"; then
+        disco_success=true
+        direct_p2p=true
+    fi
+    
+    # Check for disco failure leading to relay
+    if ssh_cmd "$node" "grep -q 'requesting relay fallback\|Disco.*timed out after.*retries\|All.*endpoints failed' $log_file 2>/dev/null"; then
+        direct_p2p=false
+    fi
+    
+    # Determine connectivity type
+    if [[ "$using_relay" == "true" ]]; then
+        echo "relay"
+    elif [[ "$direct_p2p" == "true" && "$disco_success" == "true" ]]; then
+        echo "direct_p2p"
+    elif [[ "$disco_success" == "true" ]]; then
+        echo "direct_p2p"
+    else
+        echo "unknown"
+    fi
+}
+
+get_connectivity_details() {
+    local node="$1"
+    local log_file="$2"
+    
+    local details=""
+    
+    # Get NAT type if detected
+    local nat_type=$(ssh_cmd "$node" "grep -oE 'NAT type: [A-Za-z]+' $log_file 2>/dev/null | head -1 | cut -d: -f2 | tr -d ' '" || echo "")
+    
+    # Get endpoint info
+    local endpoint=$(ssh_cmd "$node" "grep -oE 'endpoint [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' $log_file 2>/dev/null | tail -1 | cut -d' ' -f2" || echo "")
+    
+    # Get relay server if used
+    local relay_server=$(ssh_cmd "$node" "grep -oE 'relay server [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' $log_file 2>/dev/null | head -1 | cut -d' ' -f3" || echo "")
+    
+    # Get disco RTT if available
+    local disco_rtt=$(ssh_cmd "$node" "grep -oE 'rtt[=:][[:space:]]*[0-9]+\.?[0-9]*ms' $log_file 2>/dev/null | tail -1 | grep -oE '[0-9]+\.?[0-9]*'" || echo "")
+    
+    echo "{\"nat_type\": \"${nat_type:-unknown}\", \"endpoint\": \"${endpoint:-unknown}\", \"relay_server\": \"${relay_server:-none}\", \"disco_rtt_ms\": \"${disco_rtt:-N/A}\"}"
 }
 
 # =============================================================================
@@ -816,7 +940,39 @@ run_test() {
     ssh_cmd "$NODE_A" "cat /tmp/omni-edge-a.log" > "$RESULTS_DIR/edge_a.log" 2>/dev/null || true
     ssh_cmd "$NODE_B" "cat /tmp/omni-edge-b.log" > "$RESULTS_DIR/edge_b.log" 2>/dev/null || true
     
-    # Create results JSON
+    # ==========================================================================
+    # Connectivity Type Detection (P2P vs Relay)
+    # ==========================================================================
+    print_header "Connectivity Analysis"
+    
+    # Detect connectivity type from Edge A's perspective
+    local conn_type_a=$(detect_connectivity_type "$NODE_A" "/tmp/omni-edge-a.log")
+    local conn_details_a=$(get_connectivity_details "$NODE_A" "/tmp/omni-edge-a.log")
+    
+    # Detect connectivity type from Edge B's perspective
+    local conn_type_b=$(detect_connectivity_type "$NODE_B" "/tmp/omni-edge-b.log")
+    local conn_details_b=$(get_connectivity_details "$NODE_B" "/tmp/omni-edge-b.log")
+    
+    # Determine overall connectivity type
+    local overall_conn_type="unknown"
+    if [[ "$conn_type_a" == "relay" || "$conn_type_b" == "relay" ]]; then
+        overall_conn_type="relay"
+        echo -e "  🔄 Connectivity Type: ${YELLOW}RELAY${NC} (traffic routed via Nucleus)"
+    elif [[ "$conn_type_a" == "direct_p2p" && "$conn_type_b" == "direct_p2p" ]]; then
+        overall_conn_type="direct_p2p"
+        echo -e "  ✅ Connectivity Type: ${GREEN}DIRECT P2P${NC} (UDP hole punching successful)"
+    elif [[ "$conn_type_a" == "direct_p2p" || "$conn_type_b" == "direct_p2p" ]]; then
+        overall_conn_type="direct_p2p"
+        echo -e "  ✅ Connectivity Type: ${GREEN}DIRECT P2P${NC} (asymmetric, one side confirmed)"
+    else
+        echo -e "  ⚠️  Connectivity Type: ${RED}UNKNOWN${NC} (check logs for details)"
+    fi
+    
+    echo ""
+    echo "  Edge A details: $conn_details_a"
+    echo "  Edge B details: $conn_details_b"
+    
+    # Create results JSON with connectivity info
     cat > "$result_file" << EOF
 {
   "timestamp": "$timestamp",
@@ -826,7 +982,19 @@ run_test() {
   "edge_b": {"public_ip": "$NODE_B", "vip": "$VIP_B"},
   "cluster": "$CLUSTER_NAME",
   "authenticated": $([ -n "$CLUSTER_SECRET" ] && echo "true" || echo "false"),
+  "userspace_wireguard": $USERSPACE,
   "test_duration_sec": $TEST_DURATION,
+  "connectivity": {
+    "type": "$overall_conn_type",
+    "edge_a": {
+      "type": "$conn_type_a",
+      "details": $conn_details_a
+    },
+    "edge_b": {
+      "type": "$conn_type_b",
+      "details": $conn_details_b
+    }
+  },
   "baseline": {
     "ping_ms": "$baseline_latency",
     "throughput_mbps": "$baseline_throughput_mbps"
@@ -842,14 +1010,39 @@ run_test() {
 }
 EOF
     
-    # Cleanup
-    print_step "Cleaning up remote processes..."
+    # ==========================================================================
+    # Cleanup: Processes, Interfaces, and Docker
+    # ==========================================================================
+    print_header "Cleanup"
+    
+    # Stop processes
+    print_step "Stopping remote processes..."
     for node in "$NUCLEUS" "$NODE_A" "$NODE_B"; do
-        ssh_cmd "$node" "sudo pkill -f omninervous || true; pkill -f iperf3 || true" 2>/dev/null || true
+        ssh_cmd "$node" "sudo pkill -9 -f omninervous 2>/dev/null || true; pkill -f iperf3 2>/dev/null || true" 2>/dev/null || true
     done
+    
+    # Clean up WireGuard interfaces
+    print_step "Cleaning up WireGuard interfaces..."
+    for node in "$NODE_A" "$NODE_B"; do
+        cleanup_wireguard_interfaces "$node"
+    done
+    
+    # Clean up local Docker container if used
+    cleanup_local_docker
     
     # Summary
     print_header "Test Complete"
+    
+    # Connectivity type color
+    local conn_color="${RED}"
+    local conn_icon="❓"
+    if [[ "$overall_conn_type" == "direct_p2p" ]]; then
+        conn_color="${GREEN}"
+        conn_icon="✅"
+    elif [[ "$overall_conn_type" == "relay" ]]; then
+        conn_color="${YELLOW}"
+        conn_icon="🔄"
+    fi
     
     echo -e "┌─────────────────────────────────────────────────────────┐"
     echo -e "│  ${GREEN}3-NODE P2P TEST RESULTS${NC}                                 │"
@@ -857,6 +1050,10 @@ EOF
     echo -e "│  Nucleus:     $NUCLEUS"
     echo -e "│  Edge A:      $NODE_A → $VIP_A"
     echo -e "│  Edge B:      $NODE_B → $VIP_B"
+    echo -e "├─────────────────────────────────────────────────────────┤"
+    echo -e "│  ${CYAN}CONNECTIVITY${NC}                                            │"
+    echo -e "│    Type:       $conn_icon ${conn_color}${overall_conn_type^^}${NC}"
+    echo -e "│    Mode:       $([ "$USERSPACE" == "true" ] && echo "Userspace (BoringTun)" || echo "Kernel WireGuard")"
     echo -e "├─────────────────────────────────────────────────────────┤"
     echo -e "│  ${CYAN}BASELINE (Public IP)${NC}                                    │"
     echo -e "│    Latency:    ${YELLOW}${baseline_latency} ms${NC}"
