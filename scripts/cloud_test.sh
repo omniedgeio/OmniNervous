@@ -131,8 +131,8 @@ ssh_cmd() {
     shift
     if is_local "$host"; then
         if [[ "$LOCAL_DOCKER" == "true" ]]; then
-            # Run in local Docker container
-            docker exec -t "$LOCAL_DOCKER_NAME" sh -c "$*"
+            # Run in local Docker container (no -t to avoid TTY issues when capturing output)
+            docker exec "$LOCAL_DOCKER_NAME" sh -c "$*"
         else
             # Native local execution
             sudo sh -c "$*"
@@ -255,24 +255,24 @@ detect_connectivity_type() {
     
     # Check logs for relay usage indicators
     local using_relay=false
-    local relay_session=""
     local direct_p2p=false
     local disco_success=false
     
-    # Check for relay indicators in logs
-    if ssh_cmd "$node" "grep -q 'RELAY_BIND_ACK\|Relay session\|Using relay' $log_file 2>/dev/null"; then
+    # Check for relay session established (actual relay usage)
+    if ssh_cmd "$node" "grep -q 'Relay session established' $log_file 2>/dev/null"; then
         using_relay=true
-        relay_session=$(ssh_cmd "$node" "grep -oE 'session[[:space:]]*[a-f0-9-]+' $log_file 2>/dev/null | head -1" || echo "")
     fi
     
     # Check for successful disco (direct P2P)
-    if ssh_cmd "$node" "grep -q 'Disco pong received\|disco.*success\|Direct path confirmed' $log_file 2>/dev/null"; then
+    # Format: "Disco pong received from ..."
+    if ssh_cmd "$node" "grep -q 'Disco pong received' $log_file 2>/dev/null"; then
         disco_success=true
         direct_p2p=true
     fi
     
     # Check for disco failure leading to relay
-    if ssh_cmd "$node" "grep -q 'requesting relay fallback\|Disco.*timed out after.*retries\|All.*endpoints failed' $log_file 2>/dev/null"; then
+    # Format: "Disco ping to ... failed after ... retries, requesting relay fallback"
+    if ssh_cmd "$node" "grep -q 'requesting relay fallback' $log_file 2>/dev/null"; then
         direct_p2p=false
     fi
     
@@ -294,19 +294,25 @@ get_connectivity_details() {
     
     local details=""
     
-    # Get NAT type if detected
-    local nat_type=$(ssh_cmd "$node" "grep -oE 'NAT type: [A-Za-z]+' $log_file 2>/dev/null | head -1 | cut -d: -f2 | tr -d ' '" || echo "")
-    
-    # Get endpoint info
-    local endpoint=$(ssh_cmd "$node" "grep -oE 'endpoint [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' $log_file 2>/dev/null | tail -1 | cut -d' ' -f2" || echo "")
+    # Get public endpoint (from STUN discovery)
+    # Format: "Public endpoint discovered via Nucleus STUN: 1.2.3.4:5678" or "Public endpoint: 1.2.3.4:5678"
+    local endpoint=$(ssh_cmd "$node" "grep -oE 'Public endpoint[^:]*: [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' $log_file 2>/dev/null | tail -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+'" || echo "")
     
     # Get relay server if used
-    local relay_server=$(ssh_cmd "$node" "grep -oE 'relay server [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' $log_file 2>/dev/null | head -1 | cut -d' ' -f3" || echo "")
+    # Format: "Relay client enabled, relay server at 1.2.3.4:5678"
+    local relay_server=$(ssh_cmd "$node" "grep -oE 'relay server at [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' $log_file 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+'" || echo "")
     
     # Get disco RTT if available
-    local disco_rtt=$(ssh_cmd "$node" "grep -oE 'rtt[=:][[:space:]]*[0-9]+\.?[0-9]*ms' $log_file 2>/dev/null | tail -1 | grep -oE '[0-9]+\.?[0-9]*'" || echo "")
+    # Format: "Disco pong received from ... (VIP: ..., RTT: 123.456789ms, observed: ...)"
+    local disco_rtt=$(ssh_cmd "$node" "grep -oE 'RTT: [0-9]+\.?[0-9]*m?s' $log_file 2>/dev/null | tail -1 | grep -oE '[0-9]+\.?[0-9]*'" || echo "")
     
-    echo "{\"nat_type\": \"${nat_type:-unknown}\", \"endpoint\": \"${endpoint:-unknown}\", \"relay_server\": \"${relay_server:-none}\", \"disco_rtt_ms\": \"${disco_rtt:-N/A}\"}"
+    # Check if relay was used (session established)
+    local relay_used="false"
+    if ssh_cmd "$node" "grep -q 'Relay session established' $log_file 2>/dev/null"; then
+        relay_used="true"
+    fi
+    
+    echo "{\"endpoint\": \"${endpoint:-unknown}\", \"relay_server\": \"${relay_server:-none}\", \"relay_used\": $relay_used, \"disco_rtt_ms\": \"${disco_rtt:-N/A}\"}"
 }
 
 # =============================================================================
@@ -1052,7 +1058,7 @@ EOF
     echo -e "│  Edge B:      $NODE_B → $VIP_B"
     echo -e "├─────────────────────────────────────────────────────────┤"
     echo -e "│  ${CYAN}CONNECTIVITY${NC}                                            │"
-    echo -e "│    Type:       $conn_icon ${conn_color}${overall_conn_type^^}${NC}"
+    echo -e "│    Type:       $conn_icon ${conn_color}$(echo "$overall_conn_type" | tr '[:lower:]' '[:upper:]')${NC}"
     echo -e "│    Mode:       $([ "$USERSPACE" == "true" ] && echo "Userspace (BoringTun)" || echo "Kernel WireGuard")"
     echo -e "├─────────────────────────────────────────────────────────┤"
     echo -e "│  ${CYAN}BASELINE (Public IP)${NC}                                    │"
