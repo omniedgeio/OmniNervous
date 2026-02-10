@@ -5,7 +5,7 @@ use log::{debug, error, info, warn};
 use omninervous::l2::{L2Transport, L2_ENVELOPE};
 use omninervous::{
     config,
-    handler::{DiscoConfig, MessageHandler},
+    handler::{DiscoConfig, MessageHandler, ModeSwitch},
     http,
     identity::Identity,
     metrics::Metrics,
@@ -17,6 +17,7 @@ use omninervous::{
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::signal;
+use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 
 fn load_config(args: &Args) -> config::Config {
@@ -622,12 +623,97 @@ async fn main() -> Result<()> {
 
     let mut pending_pings = std::collections::HashMap::new();
     let mut pending_races = std::collections::HashMap::new();
+    
+    // Mode switch channel for kernel-to-userspace fallback
+    let (mode_switch_tx, mut mode_switch_rx) = mpsc::channel::<ModeSwitch>(1);
+    // Track if userspace mode was requested due to auto-fallback
+    let mut userspace_mode_active = args.userspace;
 
     loop {
         tokio::select! {
             _ = signal::ctrl_c() => {
                 info!("Exiting...");
                 break;
+            }
+            // Handle mode switch signal (kernel-to-userspace fallback)
+            Some(switch) = mode_switch_rx.recv() => {
+                match switch {
+                    ModeSwitch::KernelToUserspace { reason } => {
+                        if userspace_mode_active {
+                            debug!("Already in userspace mode, ignoring mode switch request");
+                            continue;
+                        }
+                        
+                        warn!("🔄 AUTO-FALLBACK TRIGGERED: {}", reason);
+                        warn!("🔄 Switching from KERNEL to USERSPACE WireGuard mode...");
+                        
+                        // 1. Shutdown kernel WireGuard interface
+                        if let Some(ref wg) = wg_api_opt {
+                            info!("Shutting down kernel WireGuard interface...");
+                            wg.shutdown().await;
+                        }
+                        
+                        // 2. Small delay to ensure interface is fully released
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        
+                        // 3. Create new userspace WireGuard interface
+                        info!("🔧 Initializing WireGuard interface '{}' (MTU: {}) in USERSPACE mode with IP {}",
+                            args.tun_name, mtu,
+                            args.vip.map(|v| v.to_string()).unwrap_or_default()
+                        );
+                        
+                        let mut new_wg = WgInterface::Userspace(UserspaceWgControl::new(&args.tun_name));
+                        
+                        // Setup with same parameters
+                        use base64::{engine::general_purpose::STANDARD, Engine};
+                        let private_key_b64 = STANDARD.encode(identity.private_key_bytes());
+                        let vip6_str = args.vip6.map(|v| v.to_string());
+                        
+                        match new_wg.setup_interface(
+                            &args.vip.map(|v| v.to_string()).unwrap_or_default(),
+                            vip6_str.as_deref(),
+                            args.port,
+                            &private_key_b64,
+                            mtu,
+                        ).await {
+                            Ok(()) => {
+                                info!("✅ WireGuard interface restarted in USERSPACE mode");
+                                
+                                // Start the TUN loop for userspace mode
+                                let socket_clone = socket.clone();
+                                let mut wg_clone = new_wg.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = wg_clone.start_loop(socket_clone).await {
+                                        error!("Packet processing loop failed: {}", e);
+                                    }
+                                });
+                                
+                                wg_api_opt = Some(new_wg);
+                                userspace_mode_active = true;
+                                
+                                // 4. Re-register with nucleus to refresh peer list
+                                if let Some(ref client) = nucleus_client {
+                                    info!("Re-registering with Nucleus...");
+                                    if let Err(e) = client.register(&socket).await {
+                                        warn!("Failed to re-register with nucleus: {}", e);
+                                    } else {
+                                        info!("✅ Re-registered with Nucleus, peers will be rediscovered");
+                                    }
+                                }
+                                
+                                // Clear pending pings/races to restart disco
+                                pending_pings.clear();
+                                pending_races.clear();
+                                
+                                info!("🔄 Auto-fallback complete. Now running in USERSPACE mode with relay support.");
+                            }
+                            Err(e) => {
+                                error!("❌ Failed to restart WireGuard in userspace mode: {}", e);
+                                error!("Connection to peers may be unavailable. Try restarting with --userspace flag.");
+                            }
+                        }
+                    }
+                }
             }
             _ = cleanup_interval.tick() => {
                 if is_nucleus_mode {
@@ -675,7 +761,7 @@ async fn main() -> Result<()> {
                 if !is_nucleus_mode {
                     // In kernel mode (!userspace), WireGuard listens on args.port
                     // We need this to forward relayed packets to kernel WireGuard
-                    let kernel_wg_port = if !args.userspace { Some(args.port) } else { None };
+                    let kernel_wg_port = if !userspace_mode_active { Some(args.port) } else { None };
                     
                     let mut handler = MessageHandler {
                         socket: &socket,
@@ -698,6 +784,7 @@ async fn main() -> Result<()> {
                         relay_server: relay_server.as_mut(),
                         relay_client: relay_client.as_mut(),
                         wg_listen_port: kernel_wg_port,
+                        mode_switch_tx: Some(&mode_switch_tx),
                         #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
                         l2_transport: l2_transport.as_ref(),
                     };
@@ -721,7 +808,7 @@ async fn main() -> Result<()> {
                         if first_byte >= 0x11 {
                             // Signaling message
                             // In kernel mode, WireGuard listens on args.port for relay forwarding
-                            let kernel_wg_port = if !args.userspace { Some(args.port) } else { None };
+                            let kernel_wg_port = if !userspace_mode_active { Some(args.port) } else { None };
                             
                             let mut handler = MessageHandler {
                                 socket: &socket,
@@ -744,6 +831,7 @@ async fn main() -> Result<()> {
                                 relay_server: relay_server.as_mut(),
                                 relay_client: relay_client.as_mut(),
                                 wg_listen_port: kernel_wg_port,
+                                mode_switch_tx: Some(&mode_switch_tx),
                                 #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
                                 l2_transport: l2_transport.as_ref(),
                             };
@@ -762,7 +850,7 @@ async fn main() -> Result<()> {
                             #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
                             if first_byte == L2_ENVELOPE {
                                 // In kernel mode, WireGuard listens on args.port for relay forwarding
-                                let kernel_wg_port = if !args.userspace { Some(args.port) } else { None };
+                                let kernel_wg_port = if !userspace_mode_active { Some(args.port) } else { None };
                                 
                                 let mut handler = MessageHandler {
                                     socket: &socket,
@@ -785,6 +873,7 @@ async fn main() -> Result<()> {
                                     relay_server: relay_server.as_mut(),
                                     relay_client: relay_client.as_mut(),
                                     wg_listen_port: kernel_wg_port,
+                                    mode_switch_tx: Some(&mode_switch_tx),
                                     #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
                                     l2_transport: l2_transport.as_ref(),
                                 };

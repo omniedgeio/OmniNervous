@@ -8,11 +8,23 @@ use anyhow::Result;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
+
+/// Signal sent from MessageHandler to main loop requesting a mode switch
+#[derive(Debug, Clone)]
+pub enum ModeSwitch {
+    /// Switch from kernel to userspace WireGuard mode
+    /// This is triggered when relay is needed but kernel mode cannot support it
+    KernelToUserspace {
+        /// Reason for the switch
+        reason: String,
+    },
+}
 
 /// Pending disco ping awaiting pong response
 #[derive(Debug, Clone)]
@@ -103,6 +115,8 @@ pub struct MessageHandler<'a> {
     /// WireGuard listen port (for kernel mode relay forwarding)
     /// In kernel mode, relayed WireGuard packets need to be forwarded to this port
     pub wg_listen_port: Option<u16>,
+    /// Channel to signal mode switch requests to main loop
+    pub mode_switch_tx: Option<&'a mpsc::Sender<ModeSwitch>>,
     #[cfg(all(feature = "l2-vpn", target_os = "linux"))]
     pub l2_transport: Option<&'a crate::l2::L2Transport>,
 }
@@ -1169,6 +1183,7 @@ impl<'a> MessageHandler<'a> {
     }
 
     /// Check for peers that need relay fallback (disco timed out after max retries)
+    /// Returns a tuple of (relay_requested_vips, mode_switch_needed)
     pub async fn check_relay_fallback(&mut self) -> Result<Vec<Ipv4Addr>> {
         let timed_out = self.cleanup_expired_pings();
         let mut relay_requested = Vec::new();
@@ -1198,6 +1213,34 @@ impl<'a> MessageHandler<'a> {
                             "Disco ping to {} failed after {} retries, requesting relay fallback",
                             vip, retries
                         );
+                        
+                        // Check if we're in kernel mode - if so, trigger userspace fallback
+                        if self.wg_listen_port.is_some() {
+                            error!(
+                                "⚠️  P2P connection to {} failed and relay is needed, but kernel WireGuard \
+                                 mode cannot use relay encapsulation. Requesting restart in userspace mode.",
+                                vip
+                            );
+                            
+                            // Send mode switch signal to main loop
+                            if let Some(tx) = &self.mode_switch_tx {
+                                let reason = format!(
+                                    "P2P to {} failed after {} retries; relay needed but kernel WG cannot relay",
+                                    vip, retries
+                                );
+                                if let Err(e) = tx.try_send(ModeSwitch::KernelToUserspace { reason: reason.clone() }) {
+                                    error!("Failed to send mode switch signal: {}", e);
+                                } else {
+                                    info!("🔄 Mode switch signal sent: {}", reason);
+                                }
+                            }
+                            
+                            // Still track this as needing relay (useful for logging)
+                            relay_requested.push(vip);
+                            continue;
+                        }
+                        
+                        // Userspace mode - proceed with relay request
                         if let Err(e) = self.request_relay_for_peer(pubkey, vip).await {
                             warn!("Failed to request relay for {}: {}", vip, e);
                         } else {

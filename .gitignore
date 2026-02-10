@@ -31,3 +31,6 @@ docs/
 
 # Agent
 .agent/
+
+# Pre-built binaries in scripts
+scripts/omninervous-*
