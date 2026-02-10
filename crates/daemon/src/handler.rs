@@ -641,7 +641,19 @@ impl<'a> MessageHandler<'a> {
         target: SocketAddr,
         target_vip: Ipv4Addr,
     ) -> Result<()> {
-        self.send_disco_ping_internal(target, target_vip, None)
+        self.send_disco_ping_internal(target, target_vip, None, 0)
+            .await?;
+        Ok(())
+    }
+
+    /// Send a DISCO_PING to a target endpoint with retry count tracking
+    pub async fn send_disco_ping_with_retries(
+        &mut self,
+        target: SocketAddr,
+        target_vip: Ipv4Addr,
+        retries: u32,
+    ) -> Result<()> {
+        self.send_disco_ping_internal(target, target_vip, None, retries)
             .await?;
         Ok(())
     }
@@ -652,6 +664,7 @@ impl<'a> MessageHandler<'a> {
         target: SocketAddr,
         target_vip: Ipv4Addr,
         race_id: Option<Ipv4Addr>,
+        retries: u32,
     ) -> Result<[u8; 12]> {
         // Generate random transaction ID
         let tx_id: [u8; 12] = rand::random();
@@ -674,17 +687,18 @@ impl<'a> MessageHandler<'a> {
             target,
             target_vip,
             sent_at: Instant::now(),
-            retries: 0,
+            retries,
             race_id,
         };
         self.pending_pings.insert(tx_id, pending);
 
         debug!(
-            "Sent disco ping to {} ({}) tx: {:02x?}{}",
+            "Sent disco ping to {} ({}) tx: {:02x?}{}{}",
             target_vip,
             target,
             &tx_id[..4],
-            if race_id.is_some() { " [racing]" } else { "" }
+            if race_id.is_some() { " [racing]" } else { "" },
+            if retries > 0 { format!(" [retry {}]", retries) } else { String::new() }
         );
         Ok(tx_id)
     }
@@ -729,7 +743,7 @@ impl<'a> MessageHandler<'a> {
                     target_vip, addr
                 );
                 Some(
-                    self.send_disco_ping_internal(*addr, target_vip, Some(target_vip))
+                    self.send_disco_ping_internal(*addr, target_vip, Some(target_vip), 0)
                         .await?,
                 )
             }
@@ -739,7 +753,7 @@ impl<'a> MessageHandler<'a> {
                     target_vip
                 );
                 Some(
-                    self.send_disco_ping_internal(*addr, target_vip, Some(target_vip))
+                    self.send_disco_ping_internal(*addr, target_vip, Some(target_vip), 0)
                         .await?,
                 )
             }
@@ -877,8 +891,8 @@ impl<'a> MessageHandler<'a> {
     }
 
     /// Clean up expired pending pings
-    /// Returns list of VIPs that timed out (for potential retry or relay fallback)
-    pub fn cleanup_expired_pings(&mut self) -> Vec<Ipv4Addr> {
+    /// Returns list of (VIP, target endpoint, retry count) for timed out pings
+    pub fn cleanup_expired_pings(&mut self) -> Vec<(Ipv4Addr, SocketAddr, u32)> {
         let timeout = self.disco_config.ping_timeout;
         let now = Instant::now();
         let mut timed_out = Vec::new();
@@ -886,12 +900,13 @@ impl<'a> MessageHandler<'a> {
         self.pending_pings.retain(|tx_id, pending| {
             if now.duration_since(pending.sent_at) > timeout {
                 debug!(
-                    "Disco ping to {} ({}) timed out (tx: {:02x?})",
+                    "Disco ping to {} ({}) timed out (tx: {:02x?}, retries: {})",
                     pending.target_vip,
                     pending.target,
-                    &tx_id[..4]
+                    &tx_id[..4],
+                    pending.retries
                 );
-                timed_out.push(pending.target_vip);
+                timed_out.push((pending.target_vip, pending.target, pending.retries));
                 false // Remove from map
             } else {
                 true // Keep in map
@@ -979,30 +994,31 @@ impl<'a> MessageHandler<'a> {
         let timed_out = self.cleanup_expired_pings();
         let mut relay_requested = Vec::new();
 
-        for vip in timed_out {
+        for (vip, target_endpoint, retries) in timed_out {
             let peer_entry = {
                 let table = self.peer_table.lock().await;
                 table.lookup_by_vip(&vip).cloned()
             };
             if let Some(peer) = peer_entry {
                 if let Some(pubkey) = peer.public_key {
-                    // Check retry count
-                    let should_retry = self
-                        .pending_pings
-                        .values()
-                        .filter(|p| p.target_vip == vip)
-                        .map(|p| p.retries)
-                        .max()
-                        .map(|r| r < self.disco_config.max_retries)
-                        .unwrap_or(true);
+                    // Check retry count from the timed-out ping
+                    let should_retry = retries < self.disco_config.max_retries;
 
                     if should_retry {
-                        // Retry disco ping
-                        if let Err(e) = self.send_disco_ping(peer.endpoint, vip).await {
+                        // Retry disco ping with incremented retry count
+                        debug!(
+                            "Retrying disco ping to {} ({}) - attempt {}/{}",
+                            vip, target_endpoint, retries + 1, self.disco_config.max_retries
+                        );
+                        if let Err(e) = self.send_disco_ping_with_retries(target_endpoint, vip, retries + 1).await {
                             warn!("Failed to retry disco ping to {}: {}", vip, e);
                         }
                     } else {
                         // Max retries exceeded, request relay
+                        info!(
+                            "Disco ping to {} failed after {} retries, requesting relay fallback",
+                            vip, retries
+                        );
                         if let Err(e) = self.request_relay_for_peer(pubkey, vip).await {
                             warn!("Failed to request relay for {}: {}", vip, e);
                         } else {
