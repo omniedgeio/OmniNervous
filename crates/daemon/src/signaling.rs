@@ -216,6 +216,10 @@ pub struct DiscoPing {
     /// Sender's IPv6 VIP for routing (dual-stack support)
     #[serde(default)]
     pub sender_vip_v6: Option<Ipv6Addr>,
+    /// Sender's WireGuard listen port (for kernel mode where signaling uses different port)
+    /// If None, assume the signaling port is also the WireGuard port (userspace mode)
+    #[serde(default)]
+    pub wg_port: Option<u16>,
 }
 
 /// Disco Pong - response to DiscoPing
@@ -231,6 +235,10 @@ pub struct DiscoPong {
     /// Responder's IPv6 VIP (dual-stack support)
     #[serde(default)]
     pub responder_vip_v6: Option<Ipv6Addr>,
+    /// Responder's WireGuard listen port (for kernel mode where signaling uses different port)
+    /// If None, assume the signaling port is also the WireGuard port (userspace mode)
+    #[serde(default)]
+    pub wg_port: Option<u16>,
 }
 
 /// Encrypted envelope for signaling messages
@@ -529,7 +537,10 @@ impl NucleusState {
                     .map(|p| PeerInfo {
                         vip: p.vip,
                         vip_v6: p.vip_v6,
-                        endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
+                        // Use observed endpoint (source address of REGISTER packet) for disco pings.
+                        // This is crucial for kernel WireGuard mode where the signaling socket
+                        // uses a different port than WireGuard's listen port.
+                        endpoint: p.endpoint.to_string(),
                         public_key: p.public_key,
                         nat_type: p.nat_type,
                         mapped_endpoint: p.mapped_endpoint.clone(),
@@ -567,7 +578,10 @@ impl NucleusState {
             .map(|p| PeerInfo {
                 vip: p.vip,
                 vip_v6: p.vip_v6,
-                endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
+                // Use observed endpoint (source address of REGISTER packet) for disco pings.
+                // This is crucial for kernel WireGuard mode where the signaling socket
+                // uses a different port than WireGuard's listen port.
+                endpoint: p.endpoint.to_string(),
                 public_key: p.public_key,
                 nat_type: p.nat_type,
                 mapped_endpoint: p.mapped_endpoint.clone(),
@@ -601,7 +615,10 @@ impl NucleusState {
             .map(|p| PeerInfo {
                 vip: p.vip,
                 vip_v6: p.vip_v6,
-                endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
+                // Use observed endpoint (source address of REGISTER packet) for disco pings.
+                // This is crucial for kernel WireGuard mode where the signaling socket
+                // uses a different port than WireGuard's listen port.
+                endpoint: p.endpoint.to_string(),
                 public_key: p.public_key,
                 nat_type: p.nat_type,
                 mapped_endpoint: p.mapped_endpoint.clone(),
@@ -616,7 +633,10 @@ impl NucleusState {
                 state.peers.get(vip).map(|p| PeerInfo {
                     vip: p.vip,
                     vip_v6: p.vip_v6,
-                    endpoint: format!("{}:{}", p.endpoint.ip(), p.listen_port),
+                    // Use observed endpoint (source address of REGISTER packet) for disco pings.
+                    // This is crucial for kernel WireGuard mode where the signaling socket
+                    // uses a different port than WireGuard's listen port.
+                    endpoint: p.endpoint.to_string(),
                     public_key: p.public_key,
                     nat_type: p.nat_type,
                     mapped_endpoint: p.mapped_endpoint.clone(),

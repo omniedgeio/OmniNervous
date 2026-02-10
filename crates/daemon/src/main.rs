@@ -256,17 +256,25 @@ async fn discover_public_endpoint_standard_stun(
 }
 
 /// Detect if any other VPN or tunnel interfaces are active (Heuristic)
+/// Excludes our own interface (omni*) to avoid false positives
 fn detect_vpn_active() -> bool {
     #[cfg(target_os = "linux")]
     {
         if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
             for entry in entries.flatten() {
                 if let Ok(name) = entry.file_name().into_string() {
+                    // Skip our own interface
+                    if name.starts_with("omni") {
+                        continue;
+                    }
                     // Detect common VPN interface prefixes
-                    if name.starts_with("tun")
-                        || name.starts_with("wg")
+                    // Note: We don't check for 'tun' because Docker uses tun interfaces
+                    // and we don't want to trigger low MTU in containerized environments
+                    if name.starts_with("wg")
                         || name.starts_with("tap")
                         || name.starts_with("ppp")
+                        || name.starts_with("tailscale")
+                        || name.starts_with("nordlynx")
                     {
                         return true;
                     }

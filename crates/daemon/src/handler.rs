@@ -181,13 +181,40 @@ impl<'a> MessageHandler<'a> {
 
             relay::MSG_RELAY_BIND_ACK => {
                 // Edge clients handle bind acknowledgements
-                if let Some(_relay_client) = self.relay_client.as_mut() {
+                if let Some(relay_client) = self.relay_client.as_mut() {
                     match relay::parse_relay_bind_ack(buf) {
                         Ok(ack) => {
-                            // Find which peer this ack is for
-                            // (In a full implementation, we'd track pending requests)
-                            if ack.success {
-                                info!("Relay session established");
+                            // Get the target key from the ack
+                            if let Some(target_key) = ack.target_key {
+                                match relay_client.handle_bind_ack(&target_key, ack.clone()) {
+                                    Ok(Some(relay_endpoint)) => {
+                                        info!(
+                                            "Relay session established for peer {:02x?}, endpoint: {}",
+                                            &target_key[..4],
+                                            relay_endpoint
+                                        );
+                                        
+                                        // Note: In kernel WireGuard mode, we cannot redirect traffic
+                                        // through relay because kernel WireGuard sends raw packets.
+                                        // The relay protocol requires RELAY_DATA encapsulation.
+                                        // Relay fallback only works reliably in userspace mode.
+                                        if self.wg_listen_port.is_some() {
+                                            warn!(
+                                                "Relay established but kernel WireGuard mode cannot \
+                                                 use relay encapsulation. Consider using --userspace mode \
+                                                 for relay fallback support."
+                                            );
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        warn!("Relay bind failed for peer {:02x?}", &target_key[..4]);
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to handle RELAY_BIND_ACK: {}", e);
+                                    }
+                                }
+                            } else if ack.success {
+                                info!("Relay session established (no target key in ack)");
                             } else {
                                 warn!("Relay bind failed: {:?}", ack.error);
                             }
@@ -489,18 +516,21 @@ impl<'a> MessageHandler<'a> {
         match signaling::parse_disco_ping(buf) {
             Ok(ping) => {
                 info!(
-                    "Received disco ping from {} (VIP: {}, tx: {:02x?})",
+                    "Received disco ping from {} (VIP: {}, tx: {:02x?}, wg_port: {:?})",
                     src,
                     ping.sender_vip,
-                    &ping.tx_id[..4]
+                    &ping.tx_id[..4],
+                    ping.wg_port
                 );
 
                 // Create pong response with the observed address
+                // Include our WireGuard listen port so peer knows where to send WG packets
                 let pong = signaling::DiscoPong {
                     tx_id: ping.tx_id,
                     observed_addr: src.to_string(),
                     responder_key: self.our_public_key.unwrap_or([0u8; 32]),
                     responder_vip_v6: self.our_vip_v6,
+                    wg_port: self.wg_listen_port,
                 };
 
                 // Encode and send pong
@@ -517,6 +547,15 @@ impl<'a> MessageHandler<'a> {
                     }
                 }
 
+                // Determine the endpoint to use for WireGuard:
+                // - If ping includes wg_port (kernel mode), use src.ip():wg_port
+                // - Otherwise (userspace mode), use src as-is
+                let wg_endpoint = if let Some(wg_port) = ping.wg_port {
+                    SocketAddr::new(src.ip(), wg_port)
+                } else {
+                    src
+                };
+
                 // Update peer endpoint if we know this peer by their public key
                 // This handles endpoint migration (e.g., mobile device changing networks)
                 let peer_entry = {
@@ -525,12 +564,14 @@ impl<'a> MessageHandler<'a> {
                 };
                 if let Some(peer) = peer_entry {
                     let current_endpoint = peer.endpoint;
+                    // For endpoint comparison, use the signaling source (src) to detect changes
+                    // since that's what we receive packets from
                     if current_endpoint != src {
                         info!(
-                            "Peer {} endpoint changed: {} -> {}",
-                            ping.sender_vip, current_endpoint, src
+                            "Peer {} endpoint changed: {} -> {} (WG endpoint: {})",
+                            ping.sender_vip, current_endpoint, src, wg_endpoint
                         );
-                        // Update endpoint in peer table
+                        // Update endpoint in peer table (use signaling src for tracking)
                         let update_result = {
                             let mut table = self.peer_table.lock().await;
                             table.update_endpoint(&ping.sender_key, src)
@@ -539,12 +580,12 @@ impl<'a> MessageHandler<'a> {
                             warn!("Failed to update peer endpoint: {}", e);
                         }
 
-                        // Update WireGuard peer endpoint
+                        // Update WireGuard peer endpoint (use wg_endpoint with correct port)
                         if let Some(wg_api) = self.wg_api.as_mut() {
                             let pubkey = Self::encode_wg_key(wg_api, ping.sender_key);
                             let allowed_ips = vec![format!("{}/32", ping.sender_vip)];
                             if let Err(e) = wg_api
-                                .set_peer(&pubkey, Some(src), &allowed_ips, Some(25))
+                                .set_peer(&pubkey, Some(wg_endpoint), &allowed_ips, Some(25))
                                 .await
                             {
                                 warn!("Failed to update WG peer endpoint: {}", e);
@@ -593,9 +634,18 @@ impl<'a> MessageHandler<'a> {
                 if let Some(pending) = self.pending_pings.remove(&pong.tx_id) {
                     let rtt = pending.sent_at.elapsed();
                     info!(
-                        "Disco pong received from {} (VIP: {}, RTT: {:?}, observed: {})",
-                        src, pending.target_vip, rtt, pong.observed_addr
+                        "Disco pong received from {} (VIP: {}, RTT: {:?}, observed: {}, wg_port: {:?})",
+                        src, pending.target_vip, rtt, pong.observed_addr, pong.wg_port
                     );
+
+                    // Determine the endpoint to use for WireGuard:
+                    // - If pong includes wg_port (kernel mode), use src.ip():wg_port
+                    // - Otherwise (userspace mode), use src as-is
+                    let wg_endpoint = if let Some(wg_port) = pong.wg_port {
+                        SocketAddr::new(src.ip(), wg_port)
+                    } else {
+                        src
+                    };
 
                     // Check if this ping was part of a Happy Eyeballs race
                     let race_result: Option<RaceResult> = if let Some(race_vip) = pending.race_id {
@@ -650,10 +700,11 @@ impl<'a> MessageHandler<'a> {
                     // Update peer endpoint if it changed (e.g., due to NAT rebinding or race winner)
                     if pending.target != src || race_result.is_some() {
                         info!(
-                            "Peer {} endpoint discovered via disco: {} -> {}{}",
+                            "Peer {} endpoint discovered via disco: {} -> {} (WG endpoint: {}){}",
                             pending.target_vip,
                             pending.target,
                             src,
+                            wg_endpoint,
                             if race_result.as_ref().map(|r| r.ipv6_won).unwrap_or(false) {
                                 " (IPv6 won race)"
                             } else if race_result.is_some() {
@@ -663,7 +714,7 @@ impl<'a> MessageHandler<'a> {
                             }
                         );
 
-                        // Update endpoint in peer table
+                        // Update endpoint in peer table (use signaling src for tracking)
                         let update_result = {
                             let mut table = self.peer_table.lock().await;
                             table.update_endpoint(&pong.responder_key, src)
@@ -672,12 +723,12 @@ impl<'a> MessageHandler<'a> {
                             debug!("Could not update peer endpoint: {}", e);
                         }
 
-                        // Update WireGuard peer endpoint
+                        // Update WireGuard peer endpoint (use wg_endpoint with correct port)
                         if let Some(wg_api) = self.wg_api.as_mut() {
                             let pubkey = Self::encode_wg_key(wg_api, pong.responder_key);
                             let allowed_ips = vec![format!("{}/32", pending.target_vip)];
                             if let Err(e) = wg_api
-                                .set_peer(&pubkey, Some(src), &allowed_ips, Some(25))
+                                .set_peer(&pubkey, Some(wg_endpoint), &allowed_ips, Some(25))
                                 .await
                             {
                                 warn!("Failed to update WG peer endpoint: {}", e);
@@ -759,11 +810,13 @@ impl<'a> MessageHandler<'a> {
         let tx_id: [u8; 12] = rand::random();
 
         // Create the ping message
+        // Include WireGuard listen port in kernel mode so peer knows where to send WG packets
         let ping = signaling::DiscoPing {
             tx_id,
             sender_key: self.our_public_key.unwrap_or([0u8; 32]),
             sender_vip: self.our_vip.unwrap_or(Ipv4Addr::UNSPECIFIED),
             sender_vip_v6: self.our_vip_v6,
+            wg_port: self.wg_listen_port,
         };
 
         // Encode and send
@@ -901,6 +954,7 @@ impl<'a> MessageHandler<'a> {
                 sender_key: self.our_public_key.unwrap_or([0u8; 32]),
                 sender_vip: self.our_vip.unwrap_or(Ipv4Addr::UNSPECIFIED),
                 sender_vip_v6: self.our_vip_v6,
+                wg_port: self.wg_listen_port,
             };
 
             match signaling::encode_disco_ping(&ping) {
