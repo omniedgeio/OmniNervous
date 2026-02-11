@@ -24,7 +24,7 @@ Thumbs.db
 omni-ebpf.elf
 
 # Test Results
-test_results/
+test_results*/
 
 # Documentation
 docs/
