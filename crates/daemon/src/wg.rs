@@ -187,7 +187,7 @@ impl CliWgControl {
                 .args([
                     "-6",
                     "address",
-                    "add",
+                    "replace",
                     &format!("{}/64", v6),
                     "dev",
                     &self.interface,
@@ -426,7 +426,7 @@ impl UserspaceWgControl {
                     .args([
                         "-6",
                         "address",
-                        "add",
+                        "replace",
                         &format!("{}/64", v6),
                         "dev",
                         &self.interface,
