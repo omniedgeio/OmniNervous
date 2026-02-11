@@ -97,7 +97,10 @@ fn is_private_ip(ip: Ipv4Addr) -> bool {
     // 172.16.0.0/12
     (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) ||
     // 192.168.0.0/16
-    (octets[0] == 192 && octets[1] == 168)
+    (octets[0] == 192 && octets[1] == 168) ||
+    // 100.64.0.0/10 (CGNAT / Shared Address Space, RFC 6598)
+    // OmniEdge API assigns VIPs in this range (e.g. 100.64.0.x, 100.100.0.x)
+    (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127)
 }
 
 /// Validates that an IPv6 address is in the Unique Local Address (ULA) range
@@ -1801,5 +1804,33 @@ mod tests {
         // Same secret key should produce same public key
         assert_eq!(enc1.public_key_bytes(), enc2.public_key_bytes());
         assert_eq!(enc1.secret_key_bytes(), enc2.secret_key_bytes());
+    }
+
+    #[test]
+    fn test_is_private_ip() {
+        // RFC 1918 ranges
+        assert!(is_private_ip(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::new(10, 255, 255, 255)));
+        assert!(is_private_ip(Ipv4Addr::new(172, 16, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::new(172, 31, 255, 255)));
+        assert!(is_private_ip(Ipv4Addr::new(192, 168, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::new(192, 168, 255, 255)));
+
+        // CGNAT / Shared Address Space (RFC 6598) - used by OmniEdge VIPs
+        assert!(is_private_ip(Ipv4Addr::new(100, 64, 0, 1)));   // 100.64.0.1
+        assert!(is_private_ip(Ipv4Addr::new(100, 64, 0, 18)));  // edge VIP
+        assert!(is_private_ip(Ipv4Addr::new(100, 64, 0, 25)));  // edge VIP
+        assert!(is_private_ip(Ipv4Addr::new(100, 100, 0, 12))); // nucleus VIP
+        assert!(is_private_ip(Ipv4Addr::new(100, 100, 0, 13))); // edge VIP
+        assert!(is_private_ip(Ipv4Addr::new(100, 100, 0, 145)));// edge VIP
+        assert!(is_private_ip(Ipv4Addr::new(100, 127, 255, 255))); // end of CGNAT range
+
+        // Should NOT be private
+        assert!(!is_private_ip(Ipv4Addr::new(8, 8, 8, 8)));     // Google DNS
+        assert!(!is_private_ip(Ipv4Addr::new(1, 1, 1, 1)));     // Cloudflare
+        assert!(!is_private_ip(Ipv4Addr::new(100, 63, 255, 255))); // just below CGNAT
+        assert!(!is_private_ip(Ipv4Addr::new(100, 128, 0, 0)));   // just above CGNAT
+        assert!(!is_private_ip(Ipv4Addr::new(172, 15, 255, 255))); // just below 172.16
+        assert!(!is_private_ip(Ipv4Addr::new(172, 32, 0, 0)));    // just above 172.31
     }
 }

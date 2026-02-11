@@ -437,6 +437,8 @@ fn is_private_ipv4(ip: Ipv4Addr) -> bool {
     (octets[0] == 172 && (16..=31).contains(&octets[1])) ||
     // 192.168.0.0/16
     (octets[0] == 192 && octets[1] == 168) ||
+    // 100.64.0.0/10 (CGNAT / Shared Address Space, RFC 6598)
+    (octets[0] == 100 && (64..=127).contains(&octets[1])) ||
     // 127.0.0.0/8 (loopback)
     octets[0] == 127 ||
     // 169.254.0.0/16 (link-local)
