@@ -2,7 +2,7 @@ use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 #[cfg(target_os = "windows")]
 use log::warn;
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -821,13 +821,13 @@ impl UserspaceWgControl {
                     if let Some(pk) = indices.get(&receiver_index) {
                         let peers = self.inner.peers.read().await;
                         if let Some(session) = peers.get(pk) {
-                            debug!(
+                            trace!(
                                 "[WG-RX] Data packet: found peer via index {}",
                                 receiver_index
                             );
                             vec![session.tunnel.clone()]
                         } else {
-                            debug!(
+                            trace!(
                                 "[WG-RX] Data packet: index {} maps to unknown peer",
                                 receiver_index
                             );
@@ -836,7 +836,7 @@ impl UserspaceWgControl {
                             peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
                         }
                     } else {
-                        debug!("[WG-RX] Data packet: receiver_index {} not in index_map, trying all peers", receiver_index);
+                        trace!("[WG-RX] Data packet: receiver_index {} not in index_map, trying all peers", receiver_index);
                         // Fallback: try all peers (handles initial packets before index is registered)
                         let peers = self.inner.peers.read().await;
                         peers.values().map(|s| s.tunnel.clone()).collect::<Vec<_>>()
@@ -857,7 +857,7 @@ impl UserspaceWgControl {
             let mut dst = [0u8; 2048];
             match t_lock.decapsulate(Some(src.ip()), buf, &mut dst) {
                 TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
-                    debug!("[WG-RX] Decapsulated {} bytes to TUN", packet.len());
+                    trace!("[WG-RX] Decapsulated {} bytes to TUN", packet.len());
                     let packet_vec = packet.to_vec();
                     let tun_writer = self.inner.tun_writer.read().await;
                     if let Some(tx) = tun_writer.as_ref() {
@@ -911,11 +911,11 @@ impl UserspaceWgControl {
                     return Ok(()); // Handshake progression
                 }
                 TunnResult::Err(boringtun::noise::errors::WireGuardError::WrongIndex) => {
-                    debug!("[WG-RX] WrongIndex error, trying next peer");
+                    trace!("[WG-RX] WrongIndex error, trying next peer");
                     continue;
                 }
                 TunnResult::Err(e) => {
-                    debug!("[WG-RX] Decapsulate error: {:?}", e);
+                    trace!("[WG-RX] Decapsulate error: {:?}", e);
                     // Might be wrong peer, continue
                 }
                 TunnResult::Done => {

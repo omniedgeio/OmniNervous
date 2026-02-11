@@ -8,7 +8,7 @@ use anyhow::Result;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -179,7 +179,7 @@ impl<'a> MessageHandler<'a> {
                     if let Err(e) = self.socket.send_to(buf, dest).await {
                         debug!("Failed to forward transparent relay packet: {}", e);
                     } else {
-                        debug!(
+                        trace!(
                             "Forwarded transparent relay WG packet ({} bytes) {} -> {}",
                             buf.len(), src, dest
                         );
@@ -356,9 +356,9 @@ impl<'a> MessageHandler<'a> {
                                 );
                                 // Forward the raw WireGuard packet to kernel WireGuard
                                 if let Err(e) = self.socket.send_to(wg_packet, kernel_wg_addr).await {
-                                    debug!("Failed to forward relayed packet to kernel WG: {}", e);
+                                    trace!("Failed to forward relayed packet to kernel WG: {}", e);
                                 } else {
-                                    debug!(
+                                    trace!(
                                         "Forwarded relayed WG packet ({} bytes) to kernel WireGuard at {}",
                                         wg_packet.len(),
                                         kernel_wg_addr

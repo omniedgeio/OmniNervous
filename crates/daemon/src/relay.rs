@@ -11,7 +11,7 @@
 //! - Automatic cleanup: Sessions expire after inactivity timeout
 
 use anyhow::{Context, Result};
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -417,7 +417,7 @@ impl RelayServer {
 
         // Check rate limit
         if !session.check_rate_limit(packet_size as u64, self.config.rate_limit_bytes_per_sec) {
-            debug!("Rate limited packet in session {:02x?}", &session_id[..4]);
+            trace!("Rate limited packet in session {:02x?}", &session_id[..4]);
             return None;
         }
 
@@ -465,7 +465,7 @@ impl RelayServer {
 
         // Check rate limit
         if !session.check_rate_limit(packet_size as u64, self.config.rate_limit_bytes_per_sec) {
-            debug!(
+            trace!(
                 "Rate limited transparent packet in session {:02x?}",
                 &session_id[..4]
             );
