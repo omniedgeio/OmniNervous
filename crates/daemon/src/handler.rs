@@ -235,11 +235,22 @@ impl<'a> MessageHandler<'a> {
                                 let is_transparent = ack.transparent;
                                 match relay_client.handle_bind_ack(&target_key, ack.clone()) {
                                     Ok(Some(relay_endpoint)) => {
+                                        // For transparent relay (kernel mode), use the actual source address
+                                        // of the ACK packet instead of relay_endpoint from the ACK.
+                                        // The server's local_addr() returns 0.0.0.0:port which is not routable.
+                                        // `src` is the actual relay server address we need to send packets to.
+                                        let effective_endpoint = if is_transparent {
+                                            src // Use the address the ACK came from
+                                        } else {
+                                            relay_endpoint // Use what the server told us (for userspace relay)
+                                        };
+                                        
                                         info!(
-                                            "Relay session established for peer {:02x?}, endpoint: {} (transparent: {})",
+                                            "Relay session established for peer {:02x?}, endpoint: {} (transparent: {}, effective: {})",
                                             &target_key[..4],
                                             relay_endpoint,
-                                            is_transparent
+                                            is_transparent,
+                                            effective_endpoint
                                         );
                                         
                                         // For TRANSPARENT relay in kernel mode:
@@ -257,11 +268,12 @@ impl<'a> MessageHandler<'a> {
                                                     let pubkey_b64 = base64::engine::general_purpose::STANDARD.encode(&target_key);
                                                     let allowed_ips = vec![format!("{}/32", vip)];
                                                     
-                                                    match wg.set_peer(&pubkey_b64, Some(relay_endpoint), &allowed_ips, Some(25)).await {
+                                                    // Use effective_endpoint (src) instead of relay_endpoint
+                                                    match wg.set_peer(&pubkey_b64, Some(effective_endpoint), &allowed_ips, Some(25)).await {
                                                         Ok(()) => {
                                                             info!(
                                                                 "✅ Updated WireGuard peer {} endpoint to relay server {} for transparent relay",
-                                                                vip, relay_endpoint
+                                                                vip, effective_endpoint
                                                             );
                                                         }
                                                         Err(e) => {
