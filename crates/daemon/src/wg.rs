@@ -750,11 +750,98 @@ impl UserspaceWgControl {
             }
         });
 
+        // Timer task: call update_timers() every 250ms on each peer (required by BoringTun)
+        // This handles: keepalives, handshake retransmission, session rekeying, connection expiry
+        let timer_inner = self.inner.clone();
+        let timer_socket = udp_socket.clone();
+        let timer_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            info!("[WG-TIMER] update_timers loop started (250ms interval)");
+
+            loop {
+                interval.tick().await;
+
+                // Collect peer tunnels and endpoints snapshot
+                let peer_info: Vec<(Arc<Mutex<Tunn>>, Option<SocketAddr>)> = {
+                    let peers = timer_inner.peers.read().await;
+                    peers
+                        .values()
+                        .map(|s| (s.tunnel.clone(), s.endpoint))
+                        .collect()
+                };
+
+                for (tunnel_arc, endpoint) in peer_info {
+                    let mut tunnel = tunnel_arc.lock().await;
+                    let mut dst = [0u8; 2048];
+
+                    match tunnel.update_timers(&mut dst) {
+                        TunnResult::WriteToNetwork(packet) => {
+                            if let Some(ep) = endpoint {
+                                let pkt_type = if !packet.is_empty() { packet[0] } else { 0 };
+                                let type_name = match pkt_type {
+                                    1 => "HandshakeInit",
+                                    2 => "HandshakeResponse",
+                                    4 => "Keepalive",
+                                    _ => "TimerPacket",
+                                };
+                                info!(
+                                    "[WG-TIMER] Sending {} ({} bytes) to {}",
+                                    type_name,
+                                    packet.len(),
+                                    ep
+                                );
+
+                                // Extract sender_index before consuming packet
+                                let sender_index_to_register = if pkt_type == 1 && packet.len() >= 8
+                                {
+                                    Some(u32::from_le_bytes([
+                                        packet[4], packet[5], packet[6], packet[7],
+                                    ]))
+                                } else {
+                                    None
+                                };
+
+                                let _ = timer_socket.send_to(packet, ep).await;
+                                // Release Tunn Mutex before acquiring peers lock
+                                drop(tunnel);
+
+                                // Register sender_index for HandshakeInit from timer
+                                if let Some(sender_index) = sender_index_to_register {
+                                    let peers = timer_inner.peers.read().await;
+                                    for (pk, session) in peers.iter() {
+                                        if Arc::ptr_eq(&session.tunnel, &tunnel_arc) {
+                                            timer_inner
+                                                .index_map
+                                                .write()
+                                                .await
+                                                .insert(sender_index, *pk);
+                                            debug!(
+                                                "[WG-TIMER] Registered sender_index {} for rekey",
+                                                sender_index
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        TunnResult::Err(e) => {
+                            debug!("[WG-TIMER] update_timers error: {:?}", e);
+                        }
+                        TunnResult::Done => {}
+                        _ => {}
+                    }
+                }
+            }
+        });
+
         // Store task handles for cleanup
         {
             let mut handles = self.inner.tun_task_handles.lock().await;
             handles.push(reader_handle);
             handles.push(writer_handle);
+            handles.push(timer_handle);
         }
 
         Ok(())
@@ -859,9 +946,14 @@ impl UserspaceWgControl {
                 TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
                     trace!("[WG-RX] Decapsulated {} bytes to TUN", packet.len());
                     let packet_vec = packet.to_vec();
+                    // Release Tunn Mutex BEFORE acquiring tun_writer lock
+                    // This prevents contention with the TUN reader's encapsulate() calls
+                    drop(t_lock);
                     let tun_writer = self.inner.tun_writer.read().await;
                     if let Some(tx) = tun_writer.as_ref() {
-                        let _ = tx.try_send(packet_vec);
+                        if let Err(e) = tx.try_send(packet_vec) {
+                            debug!("[WG-RX] TUN write channel full, dropping packet: {}", e);
+                        }
                     }
                     return Ok(()); // Success
                 }
@@ -908,6 +1000,26 @@ impl UserspaceWgControl {
                             src, e
                         );
                     }
+
+                    // Flush queued packets per BoringTun API contract:
+                    // "If the result is of type TunnResult::WriteToNetwork, should repeat
+                    //  the call with empty datagram, until TunnResult::Done is returned."
+                    loop {
+                        let mut flush_dst = [0u8; 2048];
+                        match t_lock.decapsulate(None, &[], &mut flush_dst) {
+                            TunnResult::WriteToNetwork(queued_pkt) => {
+                                info!(
+                                    "[WG-TX] Flushing queued packet ({} bytes) to {}",
+                                    queued_pkt.len(),
+                                    src
+                                );
+                                let _ = udp_socket.send_to(queued_pkt, src).await;
+                            }
+                            TunnResult::Done => break,
+                            _ => break,
+                        }
+                    }
+
                     return Ok(()); // Handshake progression
                 }
                 TunnResult::Err(boringtun::noise::errors::WireGuardError::WrongIndex) => {
