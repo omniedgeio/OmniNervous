@@ -12,6 +12,29 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
+/// Convert a SocketAddr for sending on a dual-stack IPv6 socket.
+///
+/// On macOS, a dual-stack socket bound to `[::]:0` requires IPv4 addresses to be
+/// mapped to their IPv6 form (`::ffff:x.x.x.x`); passing a plain IPv4 SocketAddr
+/// returns EINVAL. On Linux (and Windows), the kernel handles this transparently,
+/// so no conversion is needed.
+#[cfg(target_os = "macos")]
+fn to_mapped_v6(addr: SocketAddr) -> SocketAddr {
+    match addr {
+        SocketAddr::V4(v4) => SocketAddr::new(
+            IpAddr::V6(v4.ip().to_ipv6_mapped()),
+            v4.port(),
+        ),
+        v6 => v6,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[inline]
+fn to_mapped_v6(addr: SocketAddr) -> SocketAddr {
+    addr
+}
+
 /// WgInterface unified enum
 /// Supports both Kernel (CLI) and Userspace (BoringTun) modes.
 #[derive(Clone)]
@@ -654,6 +677,13 @@ impl UserspaceWgControl {
             let mut dst = [0u8; 2048];
             info!("[TUN] High-performance reader loop started (v0.8.0 - zero-copy)");
 
+            // On macOS, TUN reads include a 4-byte packet information header
+            // (AF_INET/AF_INET6 family). We must skip it to get the raw IP packet.
+            #[cfg(target_os = "macos")]
+            const PI_OFFSET: usize = 4;
+            #[cfg(not(target_os = "macos"))]
+            const PI_OFFSET: usize = 0;
+
             loop {
                 // Read from TUN
                 let n = match reader.read(&mut buf).await {
@@ -665,8 +695,14 @@ impl UserspaceWgControl {
                     }
                 };
 
+                // Skip PI header on macOS
+                if n <= PI_OFFSET {
+                    continue;
+                }
+                let ip_packet = &buf[PI_OFFSET..n];
+
                 // Parse destination IP (fast path check)
-                let dest_ip = match parse_dst_ip(&buf[..n]) {
+                let dest_ip = match parse_dst_ip(ip_packet) {
                     Some(ip) => ip,
                     None => continue,
                 };
@@ -691,7 +727,7 @@ impl UserspaceWgControl {
 
                 // Encrypt - this is the CPU-intensive part
                 let mut tunnel = tunnel_arc.lock().await;
-                match tunnel.encapsulate(&buf[..n], &mut dst) {
+                match tunnel.encapsulate(ip_packet, &mut dst) {
                     TunnResult::WriteToNetwork(packet) => {
                         let plen = packet.len();
                         let msg_type = if plen > 0 { packet[0] } else { 0 };
@@ -723,7 +759,7 @@ impl UserspaceWgControl {
                         }
 
                         // CRITICAL: Send directly from dst buffer, no Vec allocation!
-                        let _ = socket_tx.send_to(&dst[..plen], endpoint).await;
+                        let _ = socket_tx.send_to(&dst[..plen], to_mapped_v6(endpoint)).await;
                     }
                     TunnResult::Err(e) => {
                         error!("[WG-TX] Encapsulate error: {:?}", e);
@@ -744,8 +780,28 @@ impl UserspaceWgControl {
 
         let writer_handle = tokio::spawn(async move {
             while let Some(packet) = rx.recv().await {
-                if let Err(e) = writer.write_all(&packet).await {
-                    error!("Failed to write to TUN: {}", e);
+                // On macOS, TUN writes require a 4-byte packet information header
+                // prepended to the IP packet. The header format is:
+                // [0, 0, 0, AF_INET(2)] for IPv4 or [0, 0, 0, AF_INET6(30)] for IPv6.
+                #[cfg(target_os = "macos")]
+                {
+                    let af_byte = if !packet.is_empty() && (packet[0] >> 4) == 6 {
+                        30u8 // AF_INET6 on macOS
+                    } else {
+                        2u8 // AF_INET on macOS
+                    };
+                    let mut pi_packet = Vec::with_capacity(4 + packet.len());
+                    pi_packet.extend_from_slice(&[0, 0, 0, af_byte]);
+                    pi_packet.extend_from_slice(&packet);
+                    if let Err(e) = writer.write_all(&pi_packet).await {
+                        error!("Failed to write to TUN: {}", e);
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    if let Err(e) = writer.write_all(&packet).await {
+                        error!("Failed to write to TUN: {}", e);
+                    }
                 }
             }
         });
@@ -802,7 +858,7 @@ impl UserspaceWgControl {
                                     None
                                 };
 
-                                let _ = timer_socket.send_to(packet, ep).await;
+                                let _ = timer_socket.send_to(packet, to_mapped_v6(ep)).await;
                                 // Release Tunn Mutex before acquiring peers lock
                                 drop(tunnel);
 
@@ -994,7 +1050,7 @@ impl UserspaceWgControl {
                         packet.len(),
                         src
                     );
-                    if let Err(e) = udp_socket.send_to(packet, src).await {
+                    if let Err(e) = udp_socket.send_to(packet, to_mapped_v6(src)).await {
                         error!(
                             "[WG-TX] Failed to send handshake response to {}: {}",
                             src, e
@@ -1013,7 +1069,7 @@ impl UserspaceWgControl {
                                     queued_pkt.len(),
                                     src
                                 );
-                                let _ = udp_socket.send_to(queued_pkt, src).await;
+                                let _ = udp_socket.send_to(queued_pkt, to_mapped_v6(src)).await;
                             }
                             TunnResult::Done => break,
                             _ => break,

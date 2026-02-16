@@ -463,6 +463,7 @@ pub struct RegisteredPeer {
     pub mapped_endpoint: Option<String>,
     pub joined_at: Instant, // For "recent peers" calculation
     pub last_seen: Instant,
+    pub last_heartbeat: Option<Instant>, // Track when we last sent this peer a heartbeat ACK
 }
 
 /// Recently removed peer (for delta updates)
@@ -567,9 +568,15 @@ impl NucleusState {
 
         state.peers.insert(peer.vip, peer.clone());
 
-        // Return recent peers (joined in last RECENT_PEER_WINDOW_SECS) for the new peer
-        let recent_peers = self.get_recent_peers(cluster, peer.vip);
-        (recent_peers, peers_to_notify)
+        // For new peers: return ALL peers in the cluster so the new peer gets a full view.
+        // For re-registering peers: return only recent peers (joined in last RECENT_PEER_WINDOW_SECS).
+        // A freshly joined peer has no memory of existing peers, so it needs the full list.
+        let peers_for_ack = if is_new {
+            self.get_all_peers(cluster, peer.vip)
+        } else {
+            self.get_recent_peers(cluster, peer.vip)
+        };
+        (peers_for_ack, peers_to_notify)
     }
 
     /// Get peers that joined recently (for REGISTER_ACK)
@@ -599,25 +606,51 @@ impl NucleusState {
             .unwrap_or_default()
     }
 
+    /// Get ALL peers in a cluster (for new peer REGISTER_ACK - full sync)
+    fn get_all_peers(&self, cluster: &str, exclude_vip: Ipv4Addr) -> Vec<PeerInfo> {
+        self.clusters
+            .get(cluster)
+            .map(|state| {
+                state
+                    .peers
+                    .values()
+                    .filter(|p| p.vip != exclude_vip)
+                    .map(|p| PeerInfo {
+                        vip: p.vip,
+                        vip_v6: p.vip_v6,
+                        endpoint: p.endpoint.to_string(),
+                        public_key: p.public_key,
+                        nat_type: p.nat_type,
+                        mapped_endpoint: p.mapped_endpoint.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Update heartbeat and return delta (new peers + removed peers)
     pub fn heartbeat(
         &mut self,
         cluster: &str,
         vip: Ipv4Addr,
-        last_heartbeat_time: Option<Instant>,
+        _last_heartbeat_time: Option<Instant>,
     ) -> (Vec<PeerInfo>, Vec<Ipv4Addr>, Vec<Ipv6Addr>) {
         let state = match self.clusters.get_mut(cluster) {
             Some(s) => s,
             None => return (vec![], vec![], vec![]),
         };
 
-        // Update last_seen
+        // Get the peer's last_heartbeat time, then update last_seen and last_heartbeat
+        let since = state
+            .peers
+            .get(&vip)
+            .and_then(|p| p.last_heartbeat)
+            .unwrap_or_else(|| Instant::now() - Duration::from_secs(90));
+
         if let Some(peer) = state.peers.get_mut(&vip) {
             peer.last_seen = Instant::now();
+            peer.last_heartbeat = Some(Instant::now());
         }
-
-        // Calculate delta since last heartbeat (or last 30s if unknown)
-        let since = last_heartbeat_time.unwrap_or_else(|| Instant::now() - Duration::from_secs(30));
 
         // New peers since last heartbeat
         let new_peers: Vec<PeerInfo> = state
@@ -906,6 +939,7 @@ pub fn handle_nucleus_message(
                     }),
                     joined_at: Instant::now(),
                     last_seen: Instant::now(),
+                    last_heartbeat: None,
                 };
 
                 // Create PeerInfo for the new peer (to notify existing peers)
